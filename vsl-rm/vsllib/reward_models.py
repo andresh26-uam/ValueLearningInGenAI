@@ -164,9 +164,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
                 # /sum(weights)
                 logits, target_probs, reduction='none', reduce=False)
     assert loss.shape == reward1.shape, f"Expected loss shape {(reward1.shape[0],)}, got {loss.shape}"
-    print("CHECK LOSS", loss.shape)
-    print(th.mean(loss, dim=-2))
-    exit(0)
+    
     return th.mean(loss, dim=-2)
 
 def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False):
