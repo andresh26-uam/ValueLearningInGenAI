@@ -8,7 +8,7 @@ from datasets import Dataset, load_dataset,load_from_disk
 
 from defines import LOCAL_DATASET_PATH
 
-"""I want in this file a function that parses the ultrafeedback dataset from https://huggingface.co/datasets/openbmb/UltraFeedback, into a simple jsonl file with columns:  source, types, prompt, context1, context2, response1, response2, model1, model2, score1, score2, value_uhelpfulness_1, value_uhelpfulness_2, value_uhonesty_1, value_uhonesty_2, value_utruthfulness_1, value_utruthfulness_2, value_uinstruction_following_1, value_uinstruction_following_2, value_uverbalized_calibration_1, value_uverbalized_calibration_2. In the original dataset, there are 4 responses per prompt. The data for all responses is in the column "completions". Each value in the column is a python dictionary representing all the data for that response. As you can see by what I need in my dataset, you need to have an entry for all possible pair of responses for each prompt and gather the needed data. Source refers to the original column, prompt is the instruction column, model1/2 is the model that generated the response, context1/2 is the "completions->[select response]->custom_system_prompt" field + "completions->[select response]->principle" field in each response, score1/2 is the "overall_score", and the "value..." columns refer to the "completions->[select response]->annotations-><value name>->Rating" field for the corresponding response."""
+# Load HF tokens.
 def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
 	annotations = completion.get("annotations") or {}
 	value_block = annotations.get(value_name)

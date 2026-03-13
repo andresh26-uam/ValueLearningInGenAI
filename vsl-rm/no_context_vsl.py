@@ -1,4 +1,6 @@
 from dataclasses import dataclass, field
+from functools import partial
+import tempfile
 from typing import Any, Dict, List, Optional, Union
 
 from transformers.utils import PaddingStrategy
@@ -20,14 +22,19 @@ from transformers import (
     TrainingArguments,
 )
 
-import pdb
 
 from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
-from vsllib.reward_models import MultiObjectiveRewardModel
+from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import MORewardTrainer, PairwisePreferenceDataset
 from vsllib.utils import MORewardDataCollatorWithPadding
 
 # Define and parse arguments.
+
+# IMport HF_TOKEN from .env
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 @dataclass
 class ScriptArguments:
     """
@@ -71,7 +78,7 @@ class ScriptArguments:
     )
     
     output_path: Optional[str] = field(
-        default=f"./models/baselines/no_context_vsl_from-{model_name}",
+        default=f"./models/baselines/no_context_vsl-",
         metadata={"help": "The dir for output model"},
     )
     gradient_checkpointing: Optional[bool] = field(
@@ -114,7 +121,7 @@ tokenizer.model_max_length = script_args.max_length
 # Get the dataset
 train_path = script_args.train_set_path
 eval_path = script_args.train_set_path # splits are done later.
-output_name = script_args.output_path
+output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
 training_args = TrainingArguments(
     output_dir=output_name,
@@ -139,16 +146,19 @@ training_args = TrainingArguments(
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
     warmup_ratio=0.03,
-    report_to='wandb',
+    #report_to=None, # 'wandb'
     use_cpu=True,
 )
 
-
+#with tempfile.TemporaryDirectory() as tmp:
 model = AutoModelForSequenceClassification.from_pretrained(
-    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16,
-)
+    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16)
+#)
+
 
 model.config.use_cache = not script_args.gradient_checkpointing
+if getattr(tokenizer, 'pad_token_id', None) is None:
+    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
 model.config.pad_token_id = tokenizer.pad_token_id
 model.resize_token_embeddings(len(tokenizer))
 
@@ -157,20 +167,29 @@ num_proc = 24  # Can adjust to be higher if you have more processors.
 
 extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
 dataset= PairwisePreferenceDataset(train_path, tokenizer, from_disk=True, extra_keep_keys=extra_keep_keys, retokenize=script_args.retokenize)
-print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset))
+print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
 original_columns = dataset.data.column_names
 
-print(original_columns)
 
-print(model, vars(model))
-input("??")
-mo_model = MultiObjectiveRewardModel(model, num_values=len(dataset.value_keys))
+mo_config = MORMForSequenceClassificationConfig(base_model=model, num_values=len(dataset.value_keys), 
+                                    hidden_sizes=[4096], value_layer_dropout=0.1, 
+                                    value_layer_intermediate_activation="SiLU", 
+                                    value_layer_final_activation="Tanh")
+
+mo_model = MORMForSequenceClassification(config=mo_config)
+
+print(mo_model)
+
+print(dataset.train_dataset[0].keys())
+print(dataset.train_dataset[0]["labels"])
+
 trainer = MORewardTrainer(
     model=mo_model,
     args=training_args,
     train_dataset=dataset.train_dataset,
     eval_dataset=dataset.eval_dataset,
     compute_metrics=MORewardTrainer.compute_metrics,
+    compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
     data_collator=MORewardDataCollatorWithPadding(
         tokenizer=tokenizer, max_length=script_args.max_length),
 )
