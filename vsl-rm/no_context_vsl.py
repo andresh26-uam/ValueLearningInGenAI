@@ -25,8 +25,8 @@ from transformers import (
 
 from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
-from vsllib.training import MORewardTrainer, PairwisePreferenceDataset
-from vsllib.utils import MORewardDataCollatorWithPadding
+from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
+from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding
 
 # Define and parse arguments.
 
@@ -55,9 +55,15 @@ class ScriptArguments:
     per_device_eval_batch_size: Optional[int] = field(default=1)
     gradient_accumulation_steps: Optional[int] = field(default=32)
     learning_rate: Optional[float] = field(default=1e-5)
+    grounding_learning_rate: Optional[float] = field(default=1e-5)
+    lagrange_learning_rate: Optional[float] = field(default=1e-2)
+    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.001)
+
     weight_decay: Optional[float] = field(default=0.001)
     model_name: Optional[str] = field(
-        default="mistralai/Mistral-7B-Instruct-v0.2",
+        #default="mistralai/Mistral-7B-Instruct-v0.2",
+        #default="meta-llama/Llama-3.2-1B",
+        default="HuggingFaceTB/SmolLM-135M-Instruct",
         metadata={
             "help": "The model that you want to train from the Hugging Face hub. E.g. gpt2, gpt2-xl, bert, etc."
         },
@@ -143,6 +149,7 @@ training_args = TrainingArguments(
     bf16=script_args.bf16,
     logging_strategy="steps",
     logging_steps=10,
+    optim_args={ },
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
     warmup_ratio=0.03,
@@ -174,14 +181,13 @@ original_columns = dataset.data.column_names
 mo_config = MORMForSequenceClassificationConfig(base_model=model, num_values=len(dataset.value_keys), 
                                     hidden_sizes=[4096], value_layer_dropout=0.1, 
                                     value_layer_intermediate_activation="SiLU", 
-                                    value_layer_final_activation="Tanh")
+                                    value_layer_final_activation="none")
 
 mo_model = MORMForSequenceClassification(config=mo_config)
 
-print(mo_model)
-
-print(dataset.train_dataset[0].keys())
-print(dataset.train_dataset[0]["labels"])
+training_variables = MORMTrainingVariables(n_values=len(dataset.value_keys), initial_lambda=1.0, device=training_args.device, 
+                                           grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
+                                           gradient_accumulation_steps=script_args.gradient_accumulation_steps)
 
 trainer = MORewardTrainer(
     model=mo_model,
@@ -189,7 +195,21 @@ trainer = MORewardTrainer(
     train_dataset=dataset.train_dataset,
     eval_dataset=dataset.eval_dataset,
     compute_metrics=MORewardTrainer.compute_metrics,
-    compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
+    compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=training_variables),
+    optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
+        'params_gr': mo_model.reward_heads.parameters(),
+        'params_vs': mo_model.value_system_layer.parameters(),
+        'n_values': len(dataset.value_keys),
+        'lr_value_system': training_args.learning_rate,
+        'lr_grounding': training_args.learning_rate,
+        'max_grad_norm': training_args.max_grad_norm,
+        'lr_lambda': script_args.lagrange_learning_rate,
+        'initial_lambda': 1.0,
+        'lambda_decay': 1e-9,
+        'sub_optimizer_class': training_args.optim,
+        'training_variables': training_variables,
+        **training_args.optim_args
+    }),
     data_collator=MORewardDataCollatorWithPadding(
         tokenizer=tokenizer, max_length=script_args.max_length),
 )

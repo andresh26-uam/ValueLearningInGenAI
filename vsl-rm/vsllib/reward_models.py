@@ -10,6 +10,8 @@ from transformers import AutoModelForSequenceClassification, PreTrainedModel
 from transformers.modeling_layers import GenericForSequenceClassification
 from transformers.modeling_outputs import SequenceClassifierOutputWithPast
 
+from vsllib.defines import NO_RATING_MASK
+from vsllib.utils import MORMTrainingVariables
 class LinearAlignmentLayer(th.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=None, data=None, n_values=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype)
@@ -87,9 +89,10 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         hidden_sizes: list[int] = [4096,],
         value_layer_dropout: float = 0.1,
         value_layer_intermediate_activation: str = "SiLU",
-        value_layer_final_activation: str = "Tanh",
+        value_layer_final_activation: str = "none",
         reward_diff_threshold: str = 50.0,
         assume_qualitative_labels: bool = False,
+        check_undefined_label: bool = True,
         **kwargs,
     ):
         assert num_values > 0, "num_values must be greater than 0"
@@ -108,6 +111,7 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         self.base_model = base_model
         self.reward_diff_threshold = reward_diff_threshold
         self.assume_qualitative_labels = assume_qualitative_labels
+        self.check_undefined_label = check_undefined_label
 
         default_id2label = {
             index: f"VALUE_{index}" for index in range(num_values)
@@ -120,11 +124,28 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         super().__init__(num_labels=num_values + 1, id2label=id2label, label2id=label2id, **kwargs)
 
 
-
-def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0) -> th.Tensor:
+def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=False) -> th.Tensor:
     # print("DIFF", th.max(x - y))
-    assert isinstance(x, th.Tensor) and isinstance(
-        y, th.Tensor), f"Expected th.Tensor, got {type(x)} and {type(y)}"
+    if check_undefined_label:
+        missing_mask = (x == NO_RATING_MASK) | (y == NO_RATING_MASK)
+        if th.any(missing_mask).item():
+            
+            both_missing_mask = (x == NO_RATING_MASK) & (y == NO_RATING_MASK)
+            if th.any(both_missing_mask).item():
+                x.masked_fill_(both_missing_mask, 0.0)
+                y.masked_fill_(both_missing_mask, 0.0)
+
+            # If one side is missing, copy the other side so the pair becomes neutral.
+            x_missing_mask = x == NO_RATING_MASK
+            if th.any(x_missing_mask).item():
+                x[x_missing_mask] = y[x_missing_mask]
+
+            y_missing_mask = y == NO_RATING_MASK
+            if th.any(y_missing_mask).item():
+                y[y_missing_mask] = x[y_missing_mask]
+
+        # IMPORTANT: Because we use a bradley terry model, the scale does not matter. The model will learn indifference, perhaps force it... This is not ideal...
+            
     returns_diff = x - y
     returns_diff = th.clip(returns_diff, -threshold, threshold)
     assert th.max(returns_diff) <= threshold and th.min(returns_diff) >= - \
@@ -134,16 +155,20 @@ def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0) -> th.Tensor:
     if returns_diff.requires_grad:
         assert returns_diff.grad_fn is not None, "The returned tensor does not require gradients."
     return returns_diff
-def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold: int=50.0, assume_qualitative_labels=False):
+def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold: int=50.0, assume_qualitative_labels=False, check_undefined_label=True):
     with th.no_grad():
         if assume_qualitative_labels:	
+            if check_undefined_label: 
+                # If either score is NO_RATING_MASK, set target_prob to 0.5 (indicating no preference)
+                mask = (scores1 == NO_RATING_MASK) | (scores2 == NO_RATING_MASK)
+                target_probs = th.where(mask, 0.5, scores1)
             assert th.max(scores1) == 1.0
             assert th.min(scores1) == 0.0
             target_probs: th.Tensor = scores1 # model probability of first one being preferred.
         else:
-            target_probs = th.sigmoid(logits_BT(scores1, scores2, threshold=reward_diff_threshold))
+            target_probs = th.sigmoid(logits_BT(scores1, scores2, threshold=reward_diff_threshold, check_undefined_label=check_undefined_label))
     return target_probs
-def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=None, scores2: th.Tensor=None, reward_diff_threshold: float=50.0, assume_qualitative_labels=False):
+def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=None, scores2: th.Tensor=None, reward_diff_threshold: float=50.0, assume_qualitative_labels=False, check_undefined_label=True):
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
     # label = 1: reward1 should be higher.
     # label = 0: reward2 should be higher.
@@ -152,7 +177,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     print(reward1.shape, reward2.shape, scores1.shape if scores1 is not None else None, scores2.shape if scores2 is not None else None)
     #input("Check things work")
     logits = logits_BT(reward1, reward2, threshold=reward_diff_threshold)
-    target_probs = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=assume_qualitative_labels)
+    target_probs = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label)
     print("LOGITS SHAPE", logits.shape)
     print("TARGET PROBS", target_probs.shape)
     assert target_probs.shape == logits.shape, f"Target probabilities shape {target_probs.shape} does not match logits shape {logits.shape}"	
@@ -164,20 +189,22 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
                 # /sum(weights)
                 logits, target_probs, reduction='none', reduce=False)
     assert loss.shape == reward1.shape, f"Expected loss shape {(reward1.shape[0],)}, got {loss.shape}"
-    
-    return th.mean(loss, dim=-2)
+    mean = th.mean(loss, dim=-2)
+    assert mean.shape == (reward1.shape[-1],), f"Expected loss shape {(reward1.shape[-1],)}, got {loss.shape}"
+    return mean
 
-def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False):
+def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True):
     logits = logits_BT(reward1, reward2, threshold=reward_diff_threshold)
-    target_probs = scores_to_target_probs(scores1, scores2, reward_diff_threshold)
+    target_probs = scores_to_target_probs(scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
     loss = th.nn.functional.binary_cross_entropy_with_logits(
                 # /sum(weights)
                 logits, target_probs, reduction='none')
-    return loss
+    assert loss.shape == reward1.shape, f"Expected loss shape {(reward1.shape[0],)}, got {loss.shape}"
+    return th.mean(loss)
 
 
-def mo_loss_function(logits, labels, pooled_logits, config: MORMForSequenceClassificationConfig =None, **kwargs):
+def mo_loss_function(logits, labels, pooled_logits, config: MORMForSequenceClassificationConfig =None, training_variables: MORMTrainingVariables =None, **kwargs):
     
     bsz = pooled_logits.size(0)
 
@@ -197,17 +224,23 @@ def mo_loss_function(logits, labels, pooled_logits, config: MORMForSequenceClass
     assert pooled_logits.shape[-1] == config.num_values + 1
     assert labels.shape == pooled_logits.shape, f"Labels shape {labels.shape} does not match pooled logits shape {pooled_logits.shape}"
 
-    gr_loss = grounding_loss(rewards_1[...,0:config.num_values], rewards_2[...,0:config.num_values], scores1=labels_1[...,0:config.num_values], scores2=labels_2[...,0:config.num_values], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels)
-    vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=pooled_logits[..., -1], scores2=pooled_logits[:, -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels)
-    print("WARNING: LOSS NOT IMPLEMENTED WITH LAGRANGE...")
-    print("GR_LOSS", gr_loss)
-    return vs_loss + th.mean(gr_loss)
+    gr_loss = grounding_loss(rewards_1[...,0:config.num_values], rewards_2[...,0:config.num_values], scores1=labels_1[...,0:config.num_values], scores2=labels_2[...,0:config.num_values], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label)
+    vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label)
+    
+    
+    lag_gr_loss = th.dot(gr_loss, training_variables.lagrange_multipliers)
+    with th.no_grad():
+        weighting_factor = 1.0 / 1.0 + sum(training_variables.lagrange_multipliers)
+    last_loss_original_unscaled = lag_gr_loss + vs_loss
+    total_loss = weighting_factor * last_loss_original_unscaled
+    
+    training_variables.record_grounding_loss(gr_loss.detach().clone(), last_loss_original_unscaled.detach().clone())
+        
+    return total_loss
 
 
-def mo_compute_loss_func(outputs, labels, config=None, **kwargs):
-    print("OUTPUTS", outputs, vars(outputs))
-    print(kwargs.keys())
-    print("LABELS", labels.shape)
+def mo_compute_loss_func(outputs, labels, training_variables: MORMTrainingVariables, config=None, **kwargs):
+
     return mo_loss_function(outputs.logits, labels.to(outputs.logits.device), outputs.logits, config=config, **kwargs)
 
 
@@ -218,7 +251,10 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     
     def construct_value_layer(self, config: MORMForSequenceClassificationConfig):
         layers = []
-        input_size = config.hidden_sizes[0]
+        if hasattr(config.base_model, "score") and hasattr(config.base_model.score, "in_features"):
+            input_size = config.base_model.score.in_features
+        else:
+            input_size = config.base_model.config.hidden_size
         for hidden_size in config.hidden_sizes: 
             layers.append(nn.Linear(input_size, hidden_size))
             if config.value_layer_intermediate_activation == "ReLU":
@@ -260,8 +296,20 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
         self.supports_gradient_checkpointing = hasattr(self.full_model, "gradient_checkpointing_enable")
         self.loss_function = mo_loss_function
         self.value_system_layer = ConvexAlignmentLayer(config.num_values, 1)
+        self._freeze_base_model_keep_heads_trainable()
         
 		#self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
+
+    def _freeze_base_model_keep_heads_trainable(self) -> None:
+        # Freeze pretrained weights and train only the custom reward/value-system heads.
+        for param in self.full_model.parameters():
+            param.requires_grad = False
+
+        for param in self.reward_heads.parameters():
+            param.requires_grad = True
+
+        for param in self.value_system_layer.parameters():
+            param.requires_grad = True
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs: dict[str, Any] | None = None):
         if not hasattr(self.full_model, "gradient_checkpointing_enable"):
@@ -290,6 +338,7 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     
     def score(self, hidden_state):
         # This is used inside the GenericForSequenceClassification forward method.
+        
         rewards = self.reward_heads(hidden_state) 
         vs_reward = self.value_system_layer.forward(rewards)
         all_rewards = th.cat([rewards, vs_reward], dim=-1)
@@ -300,5 +349,9 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     def forward(self, *args, **kwargs):
         outputs = GenericForSequenceClassification.forward(self, *args, **kwargs)
         print("FORWARD DONE")
+        for param in self.full_model.parameters():
+            assert not param.requires_grad 
+        for param in self.wrapped_model.parameters():
+            assert not param.requires_grad
         return outputs
     
