@@ -83,6 +83,7 @@ class MORMTrainingVariables:
         self.lambda_decay = lambda_decay
         self.initial_lambda = initial_lambda
         self._cached_groundings = []
+        self._cached_vs_losses = [] 
     
 
     def prepare_for_optimizer_step(self) -> None:

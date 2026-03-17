@@ -231,17 +231,17 @@ def mo_loss_function(logits, labels, pooled_logits, config: MORMForSequenceClass
     lag_gr_loss = th.dot(gr_loss, training_variables.lagrange_multipliers)
     with th.no_grad():
         weighting_factor = 1.0 / 1.0 + sum(training_variables.lagrange_multipliers)
-    last_loss_original_unscaled = lag_gr_loss + vs_loss
-    total_loss = weighting_factor * last_loss_original_unscaled
+    #last_loss_original_unscaled = lag_gr_loss + vs_loss
+    total_loss = weighting_factor * (lag_gr_loss + vs_loss)
     
-    training_variables.record_grounding_loss(gr_loss.detach().clone(), last_loss_original_unscaled.detach().clone())
+    training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone())
         
     return total_loss
 
 
 def mo_compute_loss_func(outputs, labels, training_variables: MORMTrainingVariables, config=None, **kwargs):
 
-    return mo_loss_function(outputs.logits, labels.to(outputs.logits.device), outputs.logits, config=config, **kwargs)
+    return mo_loss_function(outputs.logits, labels.to(outputs.logits.device), outputs.logits, config=config, training_variables=training_variables, **kwargs)
 
 
 class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassification):

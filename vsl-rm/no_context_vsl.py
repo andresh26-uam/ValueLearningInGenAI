@@ -53,7 +53,7 @@ class ScriptArguments:
     )
     per_device_train_batch_size: Optional[int] = field(default=1)
     per_device_eval_batch_size: Optional[int] = field(default=1)
-    gradient_accumulation_steps: Optional[int] = field(default=32)
+    gradient_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
     learning_rate: Optional[float] = field(default=1e-5)
     grounding_learning_rate: Optional[float] = field(default=1e-5)
     lagrange_learning_rate: Optional[float] = field(default=1e-2)
@@ -189,6 +189,13 @@ training_variables = MORMTrainingVariables(n_values=len(dataset.value_keys), ini
                                            grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
                                            gradient_accumulation_steps=script_args.gradient_accumulation_steps)
 
+
+from transformers import Trainer
+sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
+
+print("Sub optimizer class: ", sub_optimizer_cls
+      , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
+
 trainer = MORewardTrainer(
     model=mo_model,
     args=training_args,
@@ -206,9 +213,9 @@ trainer = MORewardTrainer(
         'lr_lambda': script_args.lagrange_learning_rate,
         'initial_lambda': 1.0,
         'lambda_decay': 1e-9,
-        'sub_optimizer_class': training_args.optim,
+        'sub_optimizer_class': sub_optimizer_cls,
         'training_variables': training_variables,
-        **training_args.optim_args
+        ** sub_optimizer_kwargs
     }),
     data_collator=MORewardDataCollatorWithPadding(
         tokenizer=tokenizer, max_length=script_args.max_length),

@@ -1,14 +1,18 @@
 from abc import abstractmethod
+from copy import deepcopy
 from random import sample
 from typing import Any, Dict, List, Optional, Union
 from datasets.arrow_dataset import Dataset
 import numpy as np
 import torch as th
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, Trainer
+from transformers.optimization import get_scheduler
 from datasets import DatasetDict, load_dataset, load_from_disk
 from dataclasses import dataclass
 from transformers.utils.generic import PaddingStrategy
+from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
 from vsllib.reward_models import MORMForSequenceClassification
@@ -82,11 +86,9 @@ class PairwisePreferenceDataset(Dataset):
 
 
 
-
 class VSLOptimizer(th.optim.Optimizer):
-    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr=0.001, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam, scheduler="cosine", **optimizer_kwargs):
-        lr_grounding = lr if lr_grounding is None else lr_grounding
-        lr_value_system = lr if lr_value_system is None else lr_value_system
+    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam, scheduler="cosine", **optimizer_kwargs):
+        
         self.lr_grounding = lr_grounding
         self.lr_value_system = lr_value_system
         defaults = dict(lr_grounding=lr_grounding,
@@ -100,15 +102,23 @@ class VSLOptimizer(th.optim.Optimizer):
 
         self.params_gr = params_gr
         self.params_vs = params_vs
+
+        print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
+        
+
+        copyargs= deepcopy(self.optimizer_kwargs)
+        copyargs['lr'] = lr_grounding
         self.sub_optimizer_class = sub_optimizer_class
         self.optimx = sub_optimizer_class(
-            params_gr, lr=lr_grounding, **self.optimizer_kwargs)
+            params_gr, **self.optimizer_kwargs)
         if params_vs and len(params_vs) > 0:
+            copyargs= deepcopy(self.optimizer_kwargs)
+            copyargs['lr'] = lr_value_system
             self.optimy = sub_optimizer_class(
-                params_vs, lr=lr_value_system, **self.optimizer_kwargs)
+                params_vs, **self.optimizer_kwargs)
         else:
             self.optimy = None
-        # TODO: SCHEDULER COSINE... ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
+        # TODO: SCHEDULER COSINE...? ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
         # self.optimy_scheduler.step()
         super(VSLOptimizer, self).__init__([*params_gr, *params_vs], defaults)
 
@@ -138,7 +148,7 @@ class ConstrainedOptimizer(VSLOptimizer):
                  lr_value_system=None, lr_lambda=None, initial_lambda=1.0, lambda_decay=1e-9,
                  training_variables: MORMTrainingVariables = None,
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
-        super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values, lr=0.001,
+        super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system / 10.0
         self.initial_lambda = initial_lambda
@@ -148,15 +158,8 @@ class ConstrainedOptimizer(VSLOptimizer):
 
         if self.lr_lambda > 0:
             self.optim_lambdas = th.optim.Adam(
-                self.training_variables.lagrange_multipliers, lr=self.lr_lambda, betas=(0.5, 0.9))
-
-    """@override
-    def set_parameters(self, params_gr, params_vs, optim_state={}):
-        self.params_gr = params_gr
-        self.params_vs = params_vs
-        self.optimx = self.sub_optimizer_class(params_gr, lr=self.lr_grounding, **self.optimizer_kwargs)
-        self.optimy = self.sub_optimizer_class(params_vs, lr=self.lr_value_system, **self.optimizer_kwargs)"""
-
+                (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, betas=(0.5, 0.9))
+        self.time = 0
     def zero_grad(self, set_to_none=True)-> None:
         super().zero_grad(set_to_none)
         if self.lr_lambda > 0:
@@ -167,6 +170,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         
         print("LAGRANGE MULTIPLIERS BEFORE STEP:", self.training_variables.lagrange_multipliers)
+        print("TRAINING VARS", vars(self.training_variables))
         self.time += 1
         th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
         th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
@@ -186,7 +190,119 @@ class ConstrainedOptimizer(VSLOptimizer):
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         return None
     
+
+class ConstrainedLRScheduler:
+    """Composite scheduler that advances all internal schedulers together."""
+
+    def __init__(self, optimizer: ConstrainedOptimizer, sched_x, sched_y=None, sched_lambda=None):
+        self.optimizer = optimizer
+        self.sched_x = sched_x
+        self.sched_y = sched_y
+        self.sched_lambda = sched_lambda
+
+    @property
+    def _all_schedulers(self):
+        return [
+            s for s in (self.sched_x, self.sched_y, self.sched_lambda) if s is not None
+        ]
+
+    def step(self, metric=None):
+        for scheduler in self._all_schedulers:
+            if isinstance(scheduler, ReduceLROnPlateau):
+                scheduler.step(metric)
+            else:
+                scheduler.step()
+
+    def state_dict(self):
+        return {
+            "sched_x": self.sched_x.state_dict() if self.sched_x is not None else None,
+            "sched_y": self.sched_y.state_dict() if self.sched_y is not None else None,
+            "sched_lambda": self.sched_lambda.state_dict() if self.sched_lambda is not None else None,
+        }
+
+    def load_state_dict(self, state_dict):
+        if self.sched_x is not None and state_dict.get("sched_x") is not None:
+            self.sched_x.load_state_dict(state_dict["sched_x"])
+        if self.sched_y is not None and state_dict.get("sched_y") is not None:
+            self.sched_y.load_state_dict(state_dict["sched_y"])
+        if self.sched_lambda is not None and state_dict.get("sched_lambda") is not None:
+            self.sched_lambda.load_state_dict(state_dict["sched_lambda"])
+
+    def get_last_lr(self):
+        lrs = []
+        if self.sched_x is not None:
+            lrs.extend(self.sched_x.get_last_lr())
+        if self.sched_y is not None:
+            lrs.extend(self.sched_y.get_last_lr())
+        if self.sched_lambda is not None:
+            lrs.extend(self.sched_lambda.get_last_lr())
+        return lrs
+
+    """@override
+    def set_parameters(self, params_gr, params_vs, optim_state={}):
+        self.params_gr = params_gr
+        self.params_vs = params_vs
+        self.optimx = self.sub_optimizer_class(params_gr, lr=self.lr_grounding, **self.optimizer_kwargs)
+        self.optimy = self.sub_optimizer_class(params_vs, lr=self.lr_value_system, **self.optimizer_kwargs)"""
+
+from accelerate.optimizer import AcceleratedOptimizer
+    
 class MORewardTrainer(Trainer):
+
+    def create_scheduler(self, num_training_steps: int, optimizer: Optional[th.optim.Optimizer] = None):
+        if self.lr_scheduler is not None:
+            return self.lr_scheduler
+
+        optimizer = optimizer if optimizer is not None else self.optimizer
+        print("Creating scheduler with optimizer: ", optimizer, "???")
+        print(optimizer.__class__.__name__)
+        print(vars(optimizer))
+        if (isinstance(optimizer, AcceleratedOptimizer) and isinstance(optimizer.optimizer, ConstrainedOptimizer)):
+            constrained_optim = optimizer.optimizer
+        elif isinstance(optimizer, ConstrainedOptimizer):
+            constrained_optim = optimizer
+        else:
+            raise ValueError("Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
+            return super().create_scheduler(num_training_steps, optimizer)
+        scheduler_name = SchedulerType(self.args.lr_scheduler_type)
+        warmup_steps = self.args.get_warmup_steps(num_training_steps)
+
+        sched_x = get_scheduler(
+                name=scheduler_name,
+                optimizer=constrained_optim.optimx,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+
+        sched_y = None
+        if constrained_optim.optimy is not None:
+            sched_y = get_scheduler(
+                name=scheduler_name,
+                optimizer=constrained_optim.optimy,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+
+        sched_lambda = None
+        if getattr(constrained_optim, "optim_lambdas", None) is not None:
+            sched_lambda = get_scheduler(
+                name=scheduler_name,
+                optimizer=constrained_optim.optim_lambdas,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+
+        self.lr_scheduler = ConstrainedLRScheduler(
+            optimizer=constrained_optim,
+            sched_x=sched_x,
+            sched_y=sched_y,
+            sched_lambda=sched_lambda,
+        )
+        print("Optimizer and schedulers created successfully.")
+        
+        return self.lr_scheduler
+
+        
     
     def compute_metrics(eval_pred):
         result = {}
