@@ -185,7 +185,7 @@ training_args = TrainingArguments(
 )
 
 model = AutoModelForSequenceClassification.from_pretrained(
-    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16, use_flash_attention_2=True,
+    script_args.model_name, num_labels=1, dtype=torch.bfloat16,
 )
 
 model.config.use_cache = not script_args.gradient_checkpointing

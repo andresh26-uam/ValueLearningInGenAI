@@ -3,9 +3,11 @@ from copy import deepcopy
 from random import sample
 from typing import Any, Dict, List, Optional, Union
 from datasets.arrow_dataset import Dataset
+from matplotlib.pylab import dtype
 import numpy as np
 import torch as th
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.optimizer import Optimizer as Optimizer
 from torch.utils.data import Dataset
 from transformers import AutoTokenizer, Trainer
 from transformers.optimization import get_scheduler
@@ -73,7 +75,7 @@ class PairwisePreferenceDataset(Dataset):
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
         self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.1, seed=split_seed)
+        self.train_dataset = self.train_dataset.train_test_split(test_size=0.0025, seed=split_seed)
         self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
 
@@ -150,7 +152,7 @@ class ConstrainedOptimizer(VSLOptimizer):
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
-        self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system / 10.0
+        self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
         self.initial_lambda = initial_lambda
         self.lambda_decay = lambda_decay
         self.max_grad_norm = max_grad_norm
@@ -170,10 +172,10 @@ class ConstrainedOptimizer(VSLOptimizer):
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         
         print("LAGRANGE MULTIPLIERS BEFORE STEP:", self.training_variables.lagrange_multipliers)
-        print("TRAINING VARS", vars(self.training_variables))
+        #print("TRAINING VARS", vars(self.training_variables))
         self.time += 1
-        th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
-        th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
+        #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
+        #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
         self.optimx.step()
         if self.optimy is not None:
             self.optimy.step()
@@ -181,6 +183,10 @@ class ConstrainedOptimizer(VSLOptimizer):
 
         if self.lr_lambda > 0:
             self.training_variables.prepare_for_optimizer_step()
+            assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
+            print("OPTIM LAMBDAS", self.optim_lambdas.param_groups[0]['params'][0]  )
+            print("TRAINING_VARS", self.training_variables.lagrange_multipliers )
+            
             self.optim_lambdas.step()
             self.training_variables.post_optimizer_step()
 
@@ -249,6 +255,11 @@ from accelerate.optimizer import AcceleratedOptimizer
     
 class MORewardTrainer(Trainer):
 
+    def create_optimizer(self, model: MORMForSequenceClassification =None) -> th.optim.Optimizer:
+        self.optimizer = super().create_optimizer(model)
+
+        return self.optimizer
+
     def create_scheduler(self, num_training_steps: int, optimizer: Optional[th.optim.Optimizer] = None):
         if self.lr_scheduler is not None:
             return self.lr_scheduler
@@ -256,7 +267,7 @@ class MORewardTrainer(Trainer):
         optimizer = optimizer if optimizer is not None else self.optimizer
         print("Creating scheduler with optimizer: ", optimizer, "???")
         print(optimizer.__class__.__name__)
-        print(vars(optimizer))
+        #print(vars(optimizer))
         if (isinstance(optimizer, AcceleratedOptimizer) and isinstance(optimizer.optimizer, ConstrainedOptimizer)):
             constrained_optim = optimizer.optimizer
         elif isinstance(optimizer, ConstrainedOptimizer):
@@ -306,19 +317,35 @@ class MORewardTrainer(Trainer):
     
     def compute_metrics(eval_pred):
         result = {}
-        pos_predictions_scores = eval_pred.predictions[0]
-        neg_predictions_scores = eval_pred.predictions[1]
+        bsz = eval_pred.predictions.shape[0]
+
+        jidx = th.arange(0, bsz, 2, device=eval_pred.predictions.device)
+        kidx = jidx + 1
+        rewards_1 = eval_pred.predictions[jidx]
+        rewards_2 = eval_pred.predictions[kidx]
+        print(vars(eval_pred))
+        labels_1 = np.asarray(eval_pred.label_ids[jidx], dtype=rewards_1.dtype)
+        labels_2 = np.asarray(eval_pred.label_ids[kidx], dtype=rewards_2.dtype)
 
         print(eval_pred)
-        print(eval_pred.predictions)
-        input("Eval??")
+        print(eval_pred.predictions.shape)
+        print("LABELS", eval_pred.label_ids)
+        print(rewards_1[...,-1].shape)
+        
         # We assume that the first sample is preferred by default in groundtruth
-        result['representativeness'] = np.sum(
-            pos_predictions_scores > neg_predictions_scores) / len(pos_predictions_scores)
+        rep_mask1 = (rewards_1[..., -1] > rewards_2[..., -1]) & (labels_1[..., -1] >= labels_2[..., -1])
+        rep_mask2 = (rewards_1[..., -1] < rewards_2[..., -1]) & (labels_1[..., -1] <= labels_2[..., -1])
+        rep_mask3 = rep_mask = (rewards_1[..., -1] == rewards_2[..., -1]) & (labels_1[..., -1] == labels_2[..., -1])
+        rep_mask = rep_mask1 | rep_mask2 | rep_mask3
+        result['representativeness'] = np.sum(rep_mask) / len(rewards_1)
         
-        result['representativeness'] = np.sum(
-            pos_predictions_scores > neg_predictions_scores) / len(pos_predictions_scores)
-        
+        coh_mask1 = (rewards_1[..., 0:-1] >= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] >= labels_2[..., 0:-1])
+        coh_mask2 = (rewards_1[..., 0:-1] <= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] <= labels_2[..., 0:-1])
+        coh_mask3 = (rewards_1[..., 0:-1] == rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] == labels_2[..., 0:-1])
+        coh_mask = coh_mask1 | coh_mask2 | coh_mask3
+        result['coherence'] = np.sum(coh_mask, axis=0) / len(rewards_1)
+        assert result['coherence'].shape == (rewards_1.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(rewards_1.shape[-1]-1,)}"
+
         return result
 
     # This assumes that the data is collated using RewardDataCollatorWithPadding, and that the model returns multiple rewards for each input.

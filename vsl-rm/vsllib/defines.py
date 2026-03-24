@@ -2,7 +2,7 @@
 from typing import Literal, LiteralString
 
 NO_RATING_MASK = float('-inf')
-LOCAL_DATASET_PATH: LiteralString = "/home/ubuntu/ValueLearningInGenAI/processed_datasets/"
+LOCAL_DATASET_PATH: LiteralString = "~/ValueLearningInGenAI/processed_datasets/"
 
 ULTRAFEEDBACK_PROCESSED_PATH: LiteralString = LOCAL_DATASET_PATH + "ultrafeedback_pairs"
 ULTRAFEEDBACK: LiteralString = "openbmb/UltraFeedback"

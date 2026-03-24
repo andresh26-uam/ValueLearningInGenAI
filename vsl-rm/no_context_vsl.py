@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from dataclasses import dataclass, field
 from functools import partial
 import tempfile
@@ -6,6 +7,7 @@ from typing import Any, Dict, List, Optional, Union
 from transformers.utils import PaddingStrategy
 
 
+from transformers import Trainer
 # import evaluate
 import numpy as np
 import torch
@@ -51,9 +53,9 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=1)
+    per_device_train_batch_size: Optional[int] = field(default=10)
     per_device_eval_batch_size: Optional[int] = field(default=1)
-    gradient_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
+    gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     learning_rate: Optional[float] = field(default=1e-5)
     grounding_learning_rate: Optional[float] = field(default=1e-5)
     lagrange_learning_rate: Optional[float] = field(default=1e-2)
@@ -108,7 +110,8 @@ class ScriptArguments:
         metadata={"help": "Save the model every x steps"},
     )
     eval_every_steps: Optional[int] = field(
-        default=999999,
+        #default=999999,
+        default=1,
         metadata={"help": "Eval the model every x steps"},
     )
 
@@ -145,7 +148,7 @@ training_args = TrainingArguments(
     deepspeed=script_args.deepspeed,
     local_rank=script_args.local_rank,
     remove_unused_columns=False,
-    label_names=[],
+    #label_names=[],
     bf16=script_args.bf16,
     logging_strategy="steps",
     logging_steps=10,
@@ -153,80 +156,88 @@ training_args = TrainingArguments(
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
     warmup_ratio=0.03,
+    label_names=["labels"],
     #report_to=None, # 'wandb'
-    use_cpu=True,
+    #use_cpu=False,
 )
 
 #with tempfile.TemporaryDirectory() as tmp:
-model = AutoModelForSequenceClassification.from_pretrained(
-    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16)
-#)
-
-
-model.config.use_cache = not script_args.gradient_checkpointing
-if getattr(tokenizer, 'pad_token_id', None) is None:
-    tokenizer.add_special_tokens({'pad_token': '[PAD]'})
-model.config.pad_token_id = tokenizer.pad_token_id
-model.resize_token_embeddings(len(tokenizer))
-
-num_proc = 24  # Can adjust to be higher if you have more processors.
+# Do not force FP16 weights here: AMP/Accelerate expects master grads handling.
 
 
 extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
-dataset= PairwisePreferenceDataset(train_path, tokenizer, from_disk=True, extra_keep_keys=extra_keep_keys, retokenize=script_args.retokenize)
-print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
-original_columns = dataset.data.column_names
 
 
-mo_config = MORMForSequenceClassificationConfig(base_model=model, num_values=len(dataset.value_keys), 
-                                    hidden_sizes=[4096], value_layer_dropout=0.1, 
-                                    value_layer_intermediate_activation="SiLU", 
-                                    value_layer_final_activation="none")
-
-mo_model = MORMForSequenceClassification(config=mo_config)
-
-training_variables = MORMTrainingVariables(n_values=len(dataset.value_keys), initial_lambda=1.0, device=training_args.device, 
-                                           grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
-                                           gradient_accumulation_steps=script_args.gradient_accumulation_steps)
+def main_fun():
+    torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float16
+    model = AutoModelForSequenceClassification.from_pretrained(
+        script_args.model_name, num_labels=1, dtype=torch_dtype)
+    #)
 
 
-from transformers import Trainer
-sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
-
-print("Sub optimizer class: ", sub_optimizer_cls
-      , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
-
-trainer = MORewardTrainer(
-    model=mo_model,
-    args=training_args,
-    train_dataset=dataset.train_dataset,
-    eval_dataset=dataset.eval_dataset,
-    compute_metrics=MORewardTrainer.compute_metrics,
-    compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=training_variables),
-    optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
-        'params_gr': mo_model.reward_heads.parameters(),
-        'params_vs': mo_model.value_system_layer.parameters(),
-        'n_values': len(dataset.value_keys),
-        'lr_value_system': training_args.learning_rate,
-        'lr_grounding': training_args.learning_rate,
-        'max_grad_norm': training_args.max_grad_norm,
-        'lr_lambda': script_args.lagrange_learning_rate,
-        'initial_lambda': 1.0,
-        'lambda_decay': 1e-9,
-        'sub_optimizer_class': sub_optimizer_cls,
-        'training_variables': training_variables,
-        ** sub_optimizer_kwargs
-    }),
-    data_collator=MORewardDataCollatorWithPadding(
-        tokenizer=tokenizer, max_length=script_args.max_length),
-)
+    model.config.use_cache = not script_args.gradient_checkpointing
+    if getattr(tokenizer, 'pad_token_id', None) is None:
+        tokenizer.add_special_tokens({'pad_token': '[PAD]'})
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.resize_token_embeddings(len(tokenizer))
 
 
-trainer.train()
+    dataset= PairwisePreferenceDataset(train_path, tokenizer, from_disk=True, extra_keep_keys=extra_keep_keys, retokenize=script_args.retokenize)
+    print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
+    original_columns = dataset.data.column_names
+
+    pad_token_id = model.config.pad_token_id
+
+    mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
+                                                    dtype=torch_dtype, 
+                                            hidden_sizes=[4096], value_layer_dropout=0.1, 
+                                            value_layer_intermediate_activation="SiLU", 
+                                            value_layer_final_activation="none",
+                                            grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
+                                            gradient_accumulation_steps=script_args.gradient_accumulation_steps)
+
+    mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
+    sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
+
+    print("Sub optimizer class: ", sub_optimizer_cls
+            , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
+
+    dc = MORewardDataCollatorWithPadding(
+                tokenizer=tokenizer, max_length=script_args.max_length)
+    
+    trainer = MORewardTrainer(
+            model=mo_model,
+            args=training_args,
+            train_dataset=dataset.train_dataset,
+            eval_dataset=dataset.eval_dataset,
+            compute_metrics=MORewardTrainer.compute_metrics,
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
+                'params_gr': mo_model.reward_heads.parameters(),
+                'params_vs': mo_model.value_system_layer.parameters(),
+                'n_values': len(dataset.value_keys),
+                'lr_value_system': training_args.learning_rate,
+                'lr_grounding': training_args.learning_rate,
+                'max_grad_norm': training_args.max_grad_norm,
+                'lr_lambda': script_args.lagrange_learning_rate,
+                'initial_lambda': 1.0,
+                'lambda_decay': 1e-9,
+                'sub_optimizer_class': sub_optimizer_cls,
+                'training_variables': mo_model.training_variables,
+                ** sub_optimizer_kwargs
+            }),
+            data_collator=dc,
+    )
 
 
-print("Saving last checkpoint of the model")
-#model.save_pretrained(output_name + "/last_checkpoint")
-trainer.save_model(output_name + "/last_checkpoint")
-tokenizer.save_pretrained(output_name + "/last_checkpoint")
+    trainer.train()
 
+
+    print("Saving last checkpoint of the model")
+    #model.save_pretrained(output_name + "/last_checkpoint")
+    trainer.save_model(output_name + "/last_checkpoint")
+    tokenizer.save_pretrained(output_name + "/last_checkpoint")
+
+if __name__ == "__main__":
+        
+    main_fun()

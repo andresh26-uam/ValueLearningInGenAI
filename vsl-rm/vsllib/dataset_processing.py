@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import itertools
 import json
 from pathlib import Path
@@ -7,6 +9,12 @@ from typing import Any
 from datasets import Dataset, load_dataset,load_from_disk
 
 from defines import LOCAL_DATASET_PATH
+
+# IMport HF_TOKEN from .env
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
 
 # Load HF tokens.
 def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:

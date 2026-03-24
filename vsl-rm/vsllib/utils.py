@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Union
 
+from torch.nn.parameter import Parameter
 from transformers import AutoTokenizer
 
 
@@ -48,9 +49,9 @@ class MORewardDataCollatorWithPadding:
             return_tensors=self.return_tensors,
         )
 
-        labels_np = np.asarray(merged_labels, dtype=np.float32)
+        labels_np = np.asarray(merged_labels, dtype=np.float16)
         if self.return_tensors == "pt":
-            labels = th.as_tensor(labels_np, dtype=th.float32)
+            labels = th.tensor(labels_np, dtype=batch["input_ids"].dtype, device=batch["input_ids"].device)
         elif self.return_tensors == "np":
             labels = labels_np
         elif self.return_tensors == "tf":
@@ -71,11 +72,30 @@ class MORewardDataCollatorWithPadding:
         return batch
 
 
-class MORMTrainingVariables:
+class MORMTrainingVariables(th.nn.Module):
     lagrange_multipliers: th.Tensor
 
-    def __init__(self, n_values: int, initial_lambda: int =1.0 , device: th.DeviceObjType|str ='cpu', grounding_loss_tendency_update_ratio: float = 0.01, gradient_accumulation_steps=10, lambda_decay: float = 1e-9):
-        self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device)
+    def forward(self, grounding_losses: th.Tensor) -> th.Tensor:
+        total_loss = th.dot(self.lagrange_multipliers, grounding_losses.to(self.lagrange_multipliers.dtype))
+        return total_loss
+    def to(self, *args, **kwargs):
+        self.lagrange_multipliers = self.lagrange_multipliers.to(*args, **kwargs)
+        if self.minimum_grounding_loss_tendency is not None:
+            self.minimum_grounding_loss_tendency = self.minimum_grounding_loss_tendency.to(*args, **kwargs) 
+        if self.last_accumulated_grounding_loss is not None:
+            self.last_accumulated_grounding_loss = self.last_accumulated_grounding_loss.to(*args, **kwargs)
+        for i in range(len(self._cached_groundings)):
+            self._cached_groundings[i] = self._cached_groundings[i].to(*args, **kwargs) 
+        for i in range(len(self._cached_vs_losses)):
+            self._cached_vs_losses[i] = self._cached_vs_losses[i].to(*args, **kwargs)
+        return super().to(*args, **kwargs)
+    def parameters(self, recurse: bool = True) -> Any:
+        return self.lagrange_multipliers
+    
+    
+    def __init__(self, n_values: int, initial_lambda: int =1.0 , device: th.DeviceObjType|str ='cpu', dtype: th.Type = th.float32, grounding_loss_tendency_update_ratio: float = 0.01, gradient_accumulation_steps=10, lambda_decay: float = 1e-9):
+        super().__init__()
+        self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype)
         self.minimum_grounding_loss_tendency: th.Tensor | None = None
         self.last_accumulated_grounding_loss: th.Tensor | None = None
         self.grounding_loss_tendency_update_ratio = grounding_loss_tendency_update_ratio
@@ -88,15 +108,27 @@ class MORMTrainingVariables:
 
     def prepare_for_optimizer_step(self) -> None:
         with th.no_grad():
+            #print("THIS IS ME", self)
             for vi in range(len(self.lagrange_multipliers)):
                 self.lagrange_multipliers[vi].requires_grad_(True)
-                assert self.lagrange_multipliers[vi].grad is not None, f"Lagrange multiplier {vi} gradient is None before optimizer step."
+                #assert self.lagrange_multipliers[vi].grad is not None, f"Lagrange multiplier {vi} gradient is None before optimizer step."
             self.update_loss_tendencies()
-            gr_ideal_diff = th.clamp(self.last_accumulated_grounding_loss - self.minimum_grounding_loss_tendency, min=0.0)
-            lag_sum = 1+sum(self.lagrange_multipliers)
-            # This is the derivative w.r.t. lambda of "1/(1+lambda) * (gr_loss + vs_loss)". 
-            self.lagrange_multipliers.grad += -th.clamp(((gr_ideal_diff*(lag_sum)) - (self.last_accumulated_vs_loss - th.dot(gr_ideal_diff,self.lagrange_multipliers)))/th.pow(lag_sum, 2) , min=0.0)
-    
+            gr_ideal_diff = (self.last_accumulated_grounding_loss - self.minimum_grounding_loss_tendency).to(self.lagrange_multipliers.dtype)
+            lag_sum = 1.0+sum(self.lagrange_multipliers)
+            # This is the derivative w.r.t. lambda of "1/(1+lambda) * (gr_loss + vs_loss)".
+            # TODO check this again...
+            coeff = ((gr_ideal_diff*(lag_sum)) - (self.last_accumulated_vs_loss - self.forward(gr_ideal_diff)))/th.pow(lag_sum, 2) 
+            print("GR IDEAL DIFF", gr_ideal_diff)
+            print("LAST ACCUMULATED VS LOSS", self.last_accumulated_vs_loss)
+            print("forward", self.forward(gr_ideal_diff))
+            print("COEFF OF CHANGE, ", coeff)
+            input("See coeff")
+            grad = -th.clamp(coeff, min=0.0)
+            if self.lagrange_multipliers.grad is None:
+                self.lagrange_multipliers.grad = grad
+            else:
+                self.lagrange_multipliers.grad += grad
+
     def post_optimizer_step(self) -> None:
         with th.no_grad():
             for vi in range(len(self.lagrange_multipliers)):
@@ -109,7 +141,7 @@ class MORMTrainingVariables:
                         decay = (self.lagrange_multipliers[vi].detach()*self.lambda_decay)
                         self.lagrange_multipliers[vi].data = th.clamp(
                             self.lagrange_multipliers[vi].data - decay, min=self.initial_lambda)
-
+        
 
     def reset_lagrange_gradients(self) -> None:
         with th.no_grad():
@@ -121,23 +153,31 @@ class MORMTrainingVariables:
             self._cached_vs_losses = []
 
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
-        self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0)[0]
-        self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean(dim=0)[0]
-        if self.minimum_grounding_loss_tendency is None:
-            self.minimum_grounding_loss_tendency = self.last_accumulated_grounding_loss
-        else:
-            self.minimum_grounding_loss_tendency = self.grounding_loss_tendency_update_ratio * th.minimum(self.last_accumulated_grounding_loss, self.minimum_grounding_loss_tendency) + (1-self.grounding_loss_tendency_update_ratio)*self.minimum_grounding_loss_tendency
-            assert self.minimum_grounding_loss_tendency.shape == self.last_accumulated_grounding_loss.shape, f"Grounding loss tendency shape: {self.minimum_grounding_loss_tendency.shape}, Last grounding loss shape: {self.last_accumulated_grounding_loss.shape}"
+        with th.no_grad():
+            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0)
+
+            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().item()
+            assert self.last_accumulated_grounding_loss.shape == self.lagrange_multipliers.shape, f"Last accumulated grounding loss shape: {self.last_accumulated_grounding_loss.shape}, Lagrange multipliers shape: {self.lagrange_multipliers.shape}"
+            if self.minimum_grounding_loss_tendency is None:
+                self.minimum_grounding_loss_tendency = self.last_accumulated_grounding_loss.detach().clone()
+            else:
+                minimum = th.minimum(self.last_accumulated_grounding_loss, self.minimum_grounding_loss_tendency)
+
+                print("MINIMUM", minimum)
+                print("grounding loss tendency update ratio", self.grounding_loss_tendency_update_ratio)
+                print("BEFORE UPDATE minimum grounding loss tendency", self.minimum_grounding_loss_tendency)
+                self.minimum_grounding_loss_tendency = th.multiply(minimum, self.grounding_loss_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.grounding_loss_tendency_update_ratio))
+                assert self.minimum_grounding_loss_tendency.shape == self.last_accumulated_grounding_loss.shape, f"Grounding loss tendency shape: {self.minimum_grounding_loss_tendency.shape}, Last grounding loss shape: {self.last_accumulated_grounding_loss.shape}"
             
 
     def record_grounding_loss(self, gr_loss_detached: th.Tensor, vs_loss_detached: th.Tensor ) -> None:
         with th.no_grad():
+            print("THIS IS ME RECORDING", self)
             for vi in range(len(self.lagrange_multipliers)):
                 self.lagrange_multipliers[vi].requires_grad_(False)
             
             # This estimates the minimum obtainable loss for each value. The optimizer will take this into account
             
-
             if len(self._cached_groundings) < self.gradient_accumulation_steps:
                 self._cached_groundings.append(gr_loss_detached)
                 self._cached_vs_losses.append(vs_loss_detached)
@@ -147,5 +187,5 @@ class MORMTrainingVariables:
                 self._cached_vs_losses.pop(0)
                 self._cached_groundings.append(gr_loss_detached)
                 self._cached_vs_losses.append(vs_loss_detached)
-            
+
             

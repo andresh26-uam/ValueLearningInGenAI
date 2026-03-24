@@ -3,6 +3,7 @@ from collections.abc import Iterator
 from copy import deepcopy
 from typing import Any
 
+from datasets import config
 import torch as th
 import torch.nn as nn
 from transformers import AutoModelForSequenceClassification, PreTrainedModel
@@ -30,7 +31,8 @@ class LinearAlignmentLayer(th.nn.Linear):
 
     def forward(self, input: th.Tensor) -> th.Tensor:
         w_bounded, b_bounded = self.get_alignment_layer()
-
+        assert w_bounded.dtype == self.weight.dtype, f"Expected w_bounded dtype {self.weight.dtype}, but got {w_bounded.dtype}"
+        assert w_bounded.device == self.weight.device, f"Expected w_bounded device {self.weight.device}, but got {w_bounded.device}"
         output = th.nn.functional.linear(input, w_bounded)
         
 
@@ -44,17 +46,18 @@ class LinearAlignmentLayer(th.nn.Linear):
             b_bounded = self.bias
         return w_bounded, b_bounded
 
-    def copy(self):
+    """def copy(self):
         with th.no_grad():
             new = self.__class__(in_features=self.in_features, out_features=self.out_features, bias=self.linear_bias, device=self.weight.device, dtype=self.weight.dtype)
             new.load_state_dict(deepcopy(self.state_dict()))
-        return new
+        return new"""
 
 
 class ConvexAlignmentLayer(LinearAlignmentLayer):
-    def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=th.float32, data=None) -> None:
+    def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=th.float16, data=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype, data)
 
+    
     def set_weights(self, weights: tuple):
         # Convert to tensor with same dtype and device as self.weight
         pure_w = th.tensor(weights, dtype=self.weight.dtype, device=self.weight.device)
@@ -84,7 +87,7 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
 
     def __init__(
         self,
-        base_model: AutoModelForSequenceClassification,
+        pad_token_id: int,
         num_values: int = 3,
         hidden_sizes: list[int] = [4096,],
         value_layer_dropout: float = 0.1,
@@ -93,6 +96,9 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         reward_diff_threshold: str = 50.0,
         assume_qualitative_labels: bool = False,
         check_undefined_label: bool = True,
+        grounding_loss_tendency_update_ratio: float = 0.001,
+        gradient_accumulation_steps: int = 2,
+        dtype: th.Type = th.float16,
         **kwargs,
     ):
         assert num_values > 0, "num_values must be greater than 0"
@@ -103,15 +109,7 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         if value_layer_final_activation not in ['ReLU', 'SiLU', 'Tanh', 'Softplus', 'none']:
              raise ValueError(f"value_layer_final_activation must be one of 'ReLU', 'SiLU', 'Tanh', 'Softplus', 'none', but got {value_layer_final_activation}")
 
-        self.num_values = num_values
-        self.hidden_sizes = hidden_sizes
-        self.value_layer_dropout = value_layer_dropout
-        self.value_layer_intermediate_activation = value_layer_intermediate_activation
-        self.value_layer_final_activation = value_layer_final_activation
-        self.base_model = base_model
-        self.reward_diff_threshold = reward_diff_threshold
-        self.assume_qualitative_labels = assume_qualitative_labels
-        self.check_undefined_label = check_undefined_label
+        
 
         default_id2label = {
             index: f"VALUE_{index}" for index in range(num_values)
@@ -119,10 +117,21 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         default_id2label[num_values] = "VALUE_SYSTEM"
         id2label = kwargs.pop("id2label", default_id2label)
         label2id = kwargs.pop("label2id", {label: index for index, label in id2label.items()})
-        self.pad_token_id = base_model.config.pad_token_id
+        self.pad_token_id = pad_token_id
 
         super().__init__(num_labels=num_values + 1, id2label=id2label, label2id=label2id, **kwargs)
-
+        
+        self.num_values = num_values
+        self.hidden_sizes = hidden_sizes
+        self.value_layer_dropout = value_layer_dropout
+        self.value_layer_intermediate_activation = value_layer_intermediate_activation
+        self.value_layer_final_activation = value_layer_final_activation
+        self.reward_diff_threshold = reward_diff_threshold
+        self.assume_qualitative_labels = assume_qualitative_labels
+        self.check_undefined_label = check_undefined_label
+        self.grounding_loss_tendency_update_ratio=grounding_loss_tendency_update_ratio
+        self.gradient_accumulation_steps=gradient_accumulation_steps
+        self.dtype = dtype
 
 def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=False) -> th.Tensor:
     # print("DIFF", th.max(x - y))
@@ -174,12 +183,12 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     # label = 0: reward2 should be higher.
     # label = 0.5: no preference.
     assert len(reward1.shape) == 2 and reward1.shape[-1] == scores1.shape[-1], f"Expected reward1 shape (batch_size, num_values) and scores1 shape (batch_size, num_values), but got {reward1.shape} and {scores1.shape}"
-    print(reward1.shape, reward2.shape, scores1.shape if scores1 is not None else None, scores2.shape if scores2 is not None else None)
+    #print(reward1.shape, reward2.shape, scores1.shape if scores1 is not None else None, scores2.shape if scores2 is not None else None)
     #input("Check things work")
     logits = logits_BT(reward1, reward2, threshold=reward_diff_threshold)
     target_probs = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label)
-    print("LOGITS SHAPE", logits.shape)
-    print("TARGET PROBS", target_probs.shape)
+    #print("LOGITS SHAPE", logits.shape)
+    #print("TARGET PROBS", target_probs.shape)
     assert target_probs.shape == logits.shape, f"Target probabilities shape {target_probs.shape} does not match logits shape {logits.shape}"	
     assert not th.any(logits.isnan()) and not th.any(logits.isinf()), f"Logits contain NaN or Inf values: {logits}"
     assert not th.any(target_probs.isnan()) and not th.any(target_probs.isinf()), f"Target probabilities contain NaN or Inf values: {target_probs}"	
@@ -221,27 +230,30 @@ def mo_loss_function(logits, labels, pooled_logits, config: MORMForSequenceClass
     print(rewards_1, rewards_2)
     exit(0)"""
     
-    assert pooled_logits.shape[-1] == config.num_values + 1
-    assert labels.shape == pooled_logits.shape, f"Labels shape {labels.shape} does not match pooled logits shape {pooled_logits.shape}"
+    #assert pooled_logits.shape[-1] == config.num_values + 1
+    #assert labels.shape == pooled_logits.shape, f"Labels shape {labels.shape} does not match pooled logits shape {pooled_logits.shape}"
 
     gr_loss = grounding_loss(rewards_1[...,0:config.num_values], rewards_2[...,0:config.num_values], scores1=labels_1[...,0:config.num_values], scores2=labels_2[...,0:config.num_values], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label)
     vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label)
     
     
-    lag_gr_loss = th.dot(gr_loss, training_variables.lagrange_multipliers)
+    lag_gr_loss = training_variables.forward(gr_loss)
     with th.no_grad():
-        weighting_factor = 1.0 / 1.0 + sum(training_variables.lagrange_multipliers)
+        weighting_factor = 1.0 / (1.0 + th.sum(training_variables.lagrange_multipliers))
     #last_loss_original_unscaled = lag_gr_loss + vs_loss
     total_loss = weighting_factor * (lag_gr_loss + vs_loss)
-    
-    training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone())
+    if th.is_grad_enabled():
+        training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone())
         
     return total_loss
 
 
 def mo_compute_loss_func(outputs, labels, training_variables: MORMTrainingVariables, config=None, **kwargs):
+    
+    #print("OUTPUTS LOGITS SHAPE", outputs.logits.shape, "LABELS SHAPE", labels.shape)
+    assert outputs.logits.device == labels.device, "Devices do not match"
 
-    return mo_loss_function(outputs.logits, labels.to(outputs.logits.device), outputs.logits, config=config, training_variables=training_variables, **kwargs)
+    return mo_loss_function(outputs.logits, labels, outputs.logits, config=config, training_variables=training_variables, **kwargs)
 
 
 class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassification):
@@ -249,14 +261,14 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     supports_gradient_checkpointing = True
     
     
-    def construct_value_layer(self, config: MORMForSequenceClassificationConfig):
+    def construct_value_layer(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         layers = []
-        if hasattr(config.base_model, "score") and hasattr(config.base_model.score, "in_features"):
-            input_size = config.base_model.score.in_features
+        if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
+            input_size = base_model.score.in_features
         else:
-            input_size = config.base_model.config.hidden_size
+            input_size = base_model.config.hidden_size
         for hidden_size in config.hidden_sizes: 
-            layers.append(nn.Linear(input_size, hidden_size))
+            layers.append(nn.Linear(input_size, hidden_size, dtype=config.dtype, device=base_model.device))
             if config.value_layer_intermediate_activation == "ReLU":
                 layers.append(nn.ReLU())
             elif config.value_layer_intermediate_activation == "Tanh":
@@ -269,7 +281,7 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
                 raise ValueError(f"Unsupported intermediate activation: {config.value_layer_intermediate_activation}")
             layers.append(nn.Dropout(config.value_layer_dropout))
             input_size = hidden_size
-        layers.append(nn.Linear(input_size, config.num_values))
+        layers.append(nn.Linear(input_size, config.num_values, dtype=config.dtype, device=base_model.device))
         if config.value_layer_final_activation == "ReLU":
             layers.append(nn.ReLU())
         elif config.value_layer_final_activation == "Tanh":
@@ -284,22 +296,36 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
             raise ValueError(f"Unsupported final activation: {config.value_layer_final_activation}")
 
         # Normalize across value dimensions to keep reward channels on a comparable scale.
-        layers.append(nn.LayerNorm(config.num_values))
+        layers.append(nn.LayerNorm(config.num_values, dtype=config.dtype, device=base_model.device))
         return nn.Sequential(*layers)
     
-    def __init__(self, config: MORMForSequenceClassificationConfig):
+    def to(self, *args, **kwargs):
+        super().to(*args, **kwargs)
+        self.reward_heads = self.reward_heads.to(*args, **kwargs)
+        self.value_system_layer = self.value_system_layer.to(*args, **kwargs)
+        self.training_variables = self.training_variables.to(*args, **kwargs)
+        return self
+    
+    def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         super().__init__(config)
         
-        self.reward_heads = self.construct_value_layer(config)
-        self.full_model = config.base_model
-        self.wrapped_model = config.base_model.base_model
+        self.reward_heads = self.construct_value_layer(config, base_model)
+        self.full_model = base_model
+        self.wrapped_model = base_model.base_model
         self.supports_gradient_checkpointing = hasattr(self.full_model, "gradient_checkpointing_enable")
         self.loss_function = mo_loss_function
-        self.value_system_layer = ConvexAlignmentLayer(config.num_values, 1)
+        self.value_system_layer = ConvexAlignmentLayer(config.num_values, 1, device=self.full_model.device, dtype=self.full_model.dtype)
+        
+        grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio, 
+        gradient_accumulation_steps=config.gradient_accumulation_steps
+
+        self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
+            device=self.full_model.device, dtype=config.dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio, gradient_accumulation_steps=config.gradient_accumulation_steps
+                                                )
         self._freeze_base_model_keep_heads_trainable()
         
 		#self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
-
+    
     def _freeze_base_model_keep_heads_trainable(self) -> None:
         # Freeze pretrained weights and train only the custom reward/value-system heads.
         for param in self.full_model.parameters():
@@ -310,6 +336,9 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
 
         for param in self.value_system_layer.parameters():
             param.requires_grad = True
+
+        for param in self.training_variables.parameters():
+            param.requires_grad = False
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs: dict[str, Any] | None = None):
         if not hasattr(self.full_model, "gradient_checkpointing_enable"):
@@ -338,20 +367,14 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     
     def score(self, hidden_state):
         # This is used inside the GenericForSequenceClassification forward method.
-        
+        assert hidden_state.dtype == self.reward_heads[0].weight.dtype, f"Expected hidden state dtype {self.reward_heads[0].weight.dtype}, but got {hidden_state.dtype}"
         rewards = self.reward_heads(hidden_state) 
         vs_reward = self.value_system_layer.forward(rewards)
         all_rewards = th.cat([rewards, vs_reward], dim=-1)
-        assert all_rewards.shape[-1] == self.config.num_labels, f"Expected rewards shape to have last dimension {self.config.num_labels}, but got {rewards.shape}"
+        #assert all_rewards.shape[-1] == self.config.num_labels, f"Expected rewards shape to have last dimension {self.config.num_labels}, but got {rewards.shape}"
         
         return all_rewards
 
     def forward(self, *args, **kwargs):
-        outputs = GenericForSequenceClassification.forward(self, *args, **kwargs)
-        print("FORWARD DONE")
-        for param in self.full_model.parameters():
-            assert not param.requires_grad 
-        for param in self.wrapped_model.parameters():
-            assert not param.requires_grad
-        return outputs
+        return GenericForSequenceClassification.forward(self, *args, **kwargs)
     

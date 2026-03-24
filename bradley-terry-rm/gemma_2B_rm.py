@@ -157,7 +157,7 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=script_args.per_device_eval_batch_size,
     num_train_epochs=script_args.num_train_epochs,
     weight_decay=script_args.weight_decay,
-    evaluation_strategy="steps",
+    eval_strategy="steps",
     eval_steps=script_args.eval_every_steps,
     save_strategy="steps",
     save_steps=script_args.save_every_steps,
@@ -186,7 +186,7 @@ training_args = TrainingArguments(
 # )
 
 model = AutoModelForSequenceClassification.from_pretrained(
-    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16, use_flash_attention_2=True,
+    script_args.model_name, num_labels=1, torch_dtype=torch.bfloat16,
 )
 # model = get_peft_model(model, peft_config)
 # model.print_trainable_parameters()
@@ -247,7 +247,7 @@ def compute_metrics(eval_pred):
 
 
 class RewardTrainer(Trainer):
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch: int =None):
         rewards = model(
             input_ids=inputs["input_ids"], attention_mask=inputs["attention_mask"]
         )[0]
