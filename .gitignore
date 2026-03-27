@@ -210,3 +210,4 @@ processed_datasets/
 vsl-rm/models/
 
 ___*
+slurm*.out

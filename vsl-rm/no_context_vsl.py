@@ -1,11 +1,29 @@
 #!/usr/bin/env python3
+#SBATCH --job-name=ValueLearningInGenAI
+#SBATCH --chdir=/home/aholg/ValueLearningInGenAI
+#SBATCH --mem-per-gpu=8G
+#SBATCH --cpus-per-gpu=1
+#SBATCH --mincpus=1
+
 from dataclasses import dataclass, field
 from functools import partial
-import tempfile
-from typing import Any, Dict, List, Optional, Union
+import os
+from pathlib import Path
+import sys
+
+# Make local package imports robust when sbatch executes from a temporary path.
+for candidate in (
+    Path(__file__).resolve().parent,
+    Path.cwd() / "vsl-rm",
+    Path(os.getenv("HOME", "")) / "ValueLearningInGenAI" / "vsl-rm",
+):
+    if (candidate / "vsllib").exists():
+        sys.path.insert(0, str(candidate))
+        break
 
 from transformers.utils import PaddingStrategy
 
+from typing import Any, Dict, List, Optional, Union
 
 from transformers import Trainer
 # import evaluate
@@ -33,7 +51,6 @@ from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding
 # Define and parse arguments.
 
 # IMport HF_TOKEN from .env
-import os
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -46,6 +63,12 @@ class ScriptArguments:
         default=-1, metadata={"help": "Used for multi-gpu"})
     retokenize: Optional[bool] = field(
 		default=False, metadata={"help": "Whether to retokenize the dataset. Set this to False if you have already tokenized and saved the dataset to disk, and just want to load it."})
+    recalculate_embeddings: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to recalculate embeddings for the dataset."})
+    save_embedded_dataset: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
+    cleanup_dataset_cache_files: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to remove temporary Hugging Face dataset cache files after preprocessing."})
     deepspeed: Optional[str] = field(
         # default="dp3.json",
         default=None,
@@ -53,11 +76,11 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=10)
-    per_device_eval_batch_size: Optional[int] = field(default=1)
+    per_device_train_batch_size: Optional[int] = field(default=64)
+    per_device_eval_batch_size: Optional[int] = field(default=32)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    learning_rate: Optional[float] = field(default=1e-5)
-    grounding_learning_rate: Optional[float] = field(default=1e-5)
+    learning_rate: Optional[float] = field(default=1e-3)
+    grounding_learning_rate: Optional[float] = field(default=1e-3) # TODO
     lagrange_learning_rate: Optional[float] = field(default=1e-2)
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.001)
 
@@ -111,7 +134,7 @@ class ScriptArguments:
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=1,
+        default=100,
         metadata={"help": "Eval the model every x steps"},
     )
 
@@ -129,7 +152,6 @@ tokenizer.model_max_length = script_args.max_length
 
 # Get the dataset
 train_path = script_args.train_set_path
-eval_path = script_args.train_set_path # splits are done later.
 output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
 training_args = TrainingArguments(
@@ -171,22 +193,36 @@ extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.trai
 def main_fun():
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float16
     model = AutoModelForSequenceClassification.from_pretrained(
-        script_args.model_name, num_labels=1, dtype=torch_dtype)
+        script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
     #)
-
+    # send model to a gpu if available
+    
 
     model.config.use_cache = not script_args.gradient_checkpointing
     if getattr(tokenizer, 'pad_token_id', None) is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     model.config.pad_token_id = tokenizer.pad_token_id
     model.resize_token_embeddings(len(tokenizer))
-
-
-    dataset= PairwisePreferenceDataset(train_path, tokenizer, from_disk=True, extra_keep_keys=extra_keep_keys, retokenize=script_args.retokenize)
-    print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
-    original_columns = dataset.data.column_names
-
     pad_token_id = model.config.pad_token_id
+
+    dc = MORewardDataCollatorWithPadding(
+                tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype) # type: ignore
+
+    
+    
+    dataset= PairwisePreferenceDataset(train_path, tokenizer, 
+                                       from_disk=True, 
+                                       extra_keep_keys=extra_keep_keys, 
+                                       retokenize=script_args.retokenize,
+                                       recalculate_embeddings=script_args.recalculate_embeddings,
+                                       model_for_embeddings=model,
+                                       collator=dc,
+                                       cleanup_cache_files=bool(script_args.cleanup_dataset_cache_files),
+                                       )
+    print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
+    #exit(0)
+    original_columns = dataset.data.column_names
+    
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype, 
@@ -202,22 +238,21 @@ def main_fun():
     print("Sub optimizer class: ", sub_optimizer_cls
             , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
-    dc = MORewardDataCollatorWithPadding(
-                tokenizer=tokenizer, max_length=script_args.max_length)
     
     trainer = MORewardTrainer(
             model=mo_model,
             args=training_args,
             train_dataset=dataset.train_dataset,
+            
             eval_dataset=dataset.eval_dataset,
             compute_metrics=MORewardTrainer.compute_metrics,
             compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
-                'params_gr': mo_model.reward_heads.parameters(),
-                'params_vs': mo_model.value_system_layer.parameters(),
+                'params_gr': list(mo_model.reward_heads.parameters()),
+                'params_vs': list(mo_model.value_system_layer.parameters()),
                 'n_values': len(dataset.value_keys),
-                'lr_value_system': training_args.learning_rate,
-                'lr_grounding': training_args.learning_rate,
+                'lr_value_system': script_args.learning_rate,
+                'lr_grounding': script_args.grounding_learning_rate,
                 'max_grad_norm': training_args.max_grad_norm,
                 'lr_lambda': script_args.lagrange_learning_rate,
                 'initial_lambda': 1.0,

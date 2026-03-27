@@ -44,10 +44,10 @@ def _build_pair_row(sample: dict[str, Any], completion_a: dict[str, Any], comple
 	return {
 		"source": sample.get("source"),
 		"prompt": sample.get("instruction"),
-		"context1": _build_context(completion_a),
-		"labelcontext1": principle_a,
-		"context2": _build_context(completion_b),
-		"labelcontext2": principle_b,
+		#"context1": _build_context(completion_a),
+		#"labelcontext1": principle_a,
+		#"context2": _build_context(completion_b),
+		#"labelcontext2": principle_b,
 		"response1": completion_a.get("response"),
 		"response2": completion_b.get("response"),
 		"model1": completion_a.get("model"),
@@ -100,7 +100,7 @@ def ultrafeedback_processor(
 
 ultrafeedback_processor()
 # Show the rows with different principles for the same prompt upto 100 rows:
-processed_dataset = load_from_disk(LOCAL_DATASET_PATH + "ultrafeedback_pairs") 
+processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
 
 count = 0
 per_principle_count = {}
