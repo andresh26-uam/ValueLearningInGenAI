@@ -211,3 +211,5 @@ vsl-rm/models/
 
 ___*
 slurm*.out
+wandb/
+models/

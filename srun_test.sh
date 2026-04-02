@@ -1,11 +1,19 @@
 #!/usr/bin/env bash
+
+
+
 set -eu
 # Enable pipefail only when supported (e.g. bash, zsh).
 (set -o pipefail) >/dev/null 2>&1 && set -o pipefail || true
 
 # Run inside the Slurm context so we can read CUDA_VISIBLE_DEVICES assigned by srun.
-srun --gpus=1 --mem-per-gpu=32GB --pty bash -lc '
+srun --gpus=L40S:2 --mem-per-gpu=20G --pty bash -lc '
 set -euo pipefail
+#SBATCH --job-name=ValueLearningInGenAI
+#SBATCH --chdir=/home/aholg/ValueLearningInGenAI
+#SBATCH --mem-per-gpu=8G
+#SBATCH --cpus-per-gpu=1
+#SBATCH --mincpus=1
 
 gpu_ids="${CUDA_VISIBLE_DEVICES:-all}"
 if [[ -z "$gpu_ids" || "$gpu_ids" == "NoDevFiles" ]]; then

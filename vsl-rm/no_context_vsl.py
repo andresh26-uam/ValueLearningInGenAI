@@ -4,11 +4,14 @@
 #SBATCH --mem-per-gpu=8G
 #SBATCH --cpus-per-gpu=1
 #SBATCH --mincpus=1
+#SBATCH --gpus=L40S:1
 
 from dataclasses import dataclass, field
 from functools import partial
+import json
 import os
 from pathlib import Path
+import random
 import sys
 
 # Make local package imports robust when sbatch executes from a temporary path.
@@ -40,6 +43,7 @@ from transformers import (
     Trainer,
     TrainerCallback,
     TrainingArguments,
+    set_seed,
 )
 
 
@@ -76,13 +80,13 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=64)
-    per_device_eval_batch_size: Optional[int] = field(default=32)
+    per_device_train_batch_size: Optional[int] = field(default=16)
+    per_device_eval_batch_size: Optional[int] = field(default=16)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    learning_rate: Optional[float] = field(default=1e-3)
-    grounding_learning_rate: Optional[float] = field(default=1e-3) # TODO
+    learning_rate: Optional[float] = field(default=1e-5)
+    grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO
     lagrange_learning_rate: Optional[float] = field(default=1e-2)
-    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.001)
+    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
 
     weight_decay: Optional[float] = field(default=0.001)
     model_name: Optional[str] = field(
@@ -129,17 +133,60 @@ class ScriptArguments:
     max_length: Optional[int] = field(default=4096)
 
     save_every_steps: Optional[int] = field(
-        default=999999,
+        default=20,
         metadata={"help": "Save the model every x steps"},
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=100,
+        default=20,
         metadata={"help": "Eval the model every x steps"},
+    )
+    inner_optimization_iterations: Optional[int] = field(
+        default=5,
+        metadata={"help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
+    )
+    seed: Optional[int] = field(
+        default=42,
+        metadata={"help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
     )
 
 parser = HfArgumentParser(ScriptArguments) # type: ignore
 script_args = parser.parse_args_into_dataclasses()[0]
+
+
+def seed_everything(seed: int, deterministic: bool = True):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except Exception:
+            pass
+
+
+def save_checkpoint_with_seed(trainer: Trainer, tokenizer: AutoTokenizer, checkpoint_dir: str, seed: int):
+    trainer.save_model(checkpoint_dir)
+    tokenizer.save_pretrained(checkpoint_dir)
+
+    seed_info = {
+        "seed": seed,
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "torch_initial_seed": int(torch.initial_seed()),
+    }
+    with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
+        json.dump(seed_info, fp, indent=2, sort_keys=True)
+
+
+seed_everything(int(script_args.seed))
 
 # Load the value-head model and tokenizer.
 tokenizer_name = script_args.model_name
@@ -156,6 +203,8 @@ output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
 training_args = TrainingArguments(
     output_dir=output_name,
+    seed=int(script_args.seed),
+    data_seed=int(script_args.seed),
     learning_rate=script_args.learning_rate,
     per_device_train_batch_size=script_args.per_device_train_batch_size,
     per_device_eval_batch_size=script_args.per_device_eval_batch_size,
@@ -179,6 +228,7 @@ training_args = TrainingArguments(
     lr_scheduler_type=script_args.lr_scheduler_type,
     warmup_ratio=0.03,
     label_names=["labels"],
+    report_to="wandb", # 'wandb'
     #report_to=None, # 'wandb'
     #use_cpu=False,
 )
@@ -226,7 +276,7 @@ def main_fun():
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype, 
-                                            hidden_sizes=[4096], value_layer_dropout=0.1, 
+                                            hidden_sizes=[4096], value_layer_dropout=0.1,
                                             value_layer_intermediate_activation="SiLU", 
                                             value_layer_final_activation="none",
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
@@ -239,21 +289,23 @@ def main_fun():
             , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
     
-    trainer = MORewardTrainer(
+    trainer : Trainer = MORewardTrainer(
             model=mo_model,
             args=training_args,
             train_dataset=dataset.train_dataset,
             
             eval_dataset=dataset.eval_dataset,
             compute_metrics=MORewardTrainer.compute_metrics,
-            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': list(mo_model.reward_heads.parameters()),
+                'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()),
                 'params_vs': list(mo_model.value_system_layer.parameters()),
                 'n_values': len(dataset.value_keys),
                 'lr_value_system': script_args.learning_rate,
                 'lr_grounding': script_args.grounding_learning_rate,
                 'max_grad_norm': training_args.max_grad_norm,
+                'inner_optimization_iterations': script_args.inner_optimization_iterations,
                 'lr_lambda': script_args.lagrange_learning_rate,
                 'initial_lambda': 1.0,
                 'lambda_decay': 1e-9,
@@ -264,14 +316,23 @@ def main_fun():
             data_collator=dc,
     )
 
+    save_checkpoint_with_seed(
+        trainer=trainer,
+        tokenizer=tokenizer,
+        checkpoint_dir=output_name + "/last_checkpoint",
+        seed=int(script_args.seed),
+    )
 
     trainer.train()
-
+    
 
     print("Saving last checkpoint of the model")
-    #model.save_pretrained(output_name + "/last_checkpoint")
-    trainer.save_model(output_name + "/last_checkpoint")
-    tokenizer.save_pretrained(output_name + "/last_checkpoint")
+    save_checkpoint_with_seed(
+        trainer=trainer,
+        tokenizer=tokenizer,
+        checkpoint_dir=output_name + "/last_checkpoint",
+        seed=int(script_args.seed),
+    )
 
 if __name__ == "__main__":
         

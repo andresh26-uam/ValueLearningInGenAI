@@ -15,6 +15,7 @@ from networkx import constraint
 import numpy as np
 from pyarrow import dataset
 from rich import constrain
+from sympy import re
 import torch as th
 from torch.nn import Module
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -212,12 +213,12 @@ class PairwisePreferenceDataset(Dataset):
             removed_cache_files = self.data.cleanup_cache_files()
             print(f"Removed {removed_cache_files} dataset cache files")
 
-        print(self.data.column_names)
+        #print(self.data.column_names)
 
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
         self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.01, seed=split_seed)
+        self.train_dataset = self.train_dataset.train_test_split(test_size=0.02, seed=split_seed)
         self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
     def __len__(self):
@@ -246,25 +247,24 @@ class VSLOptimizer(th.optim.Optimizer):
         self.params_vs = params_vs
 
         print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
-        
-
-        copyargs= deepcopy(self.optimizer_kwargs)
-        copyargs['lr'] = lr_grounding
-        #copyargs['learning_rate'] = lr_grounding
         self.sub_optimizer_class = sub_optimizer_class
-        self.optimx = sub_optimizer_class(
-            params_gr, **copyargs)
+
+        self.optimx = self._create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class)
         if params_vs and len(params_vs) > 0:
-            copyargs= deepcopy(self.optimizer_kwargs)
-            copyargs['lr'] = lr_value_system
-            #copyargs['learning_rate'] = lr_value_system
-            self.optimy = sub_optimizer_class(
-                params_vs, **copyargs)
+            self.optimy = self._create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class)
         else:
             self.optimy = None
         # TODO: SCHEDULER COSINE...? ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
         # self.optimy_scheduler.step()
         super(VSLOptimizer, self).__init__([*params_gr, *params_vs], defaults)
+
+    def _create_sub_optimizer(self, params, lr, sub_optimizer_class):
+        copyargs= deepcopy(self.optimizer_kwargs)
+        copyargs['lr'] = lr
+        #copyargs['learning_rate'] = lr_grounding
+        
+        return sub_optimizer_class(
+            params, **copyargs)
 
     def get_state(self, copy=False)-> Dict[str, Any]:
         return {}
@@ -289,12 +289,18 @@ class VSLOptimizer(th.optim.Optimizer):
         return None
 
 class ConstrainedOptimizer(VSLOptimizer):
-    def __init__(self, params, params_gr, params_vs, n_values, max_grad_norm, lr_grounding=None,
-                 lr_value_system=None, lr_lambda=None, initial_lambda=1.0, lambda_decay=1e-9, inner_optimization_iterations=10,
+    def __init__(self, params, params_gr, params_vs, n_values, max_grad_norm, params_gr_ideal=None, lr_grounding=None,
+                 lr_value_system=None, lr_lambda=None, initial_lambda=1.0, lambda_decay=1e-9, inner_optimization_iterations=3,
                  training_variables: MORMTrainingVariables = None,
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
+        if params_gr_ideal is not None:
+            assert len(params_gr) == len(params_gr_ideal), "Grounding parameters and ideal grounding parameters must have the same length."
+            
+            self.params_gr_ideal = params_gr_ideal
+            self.optimx_ideal = self._create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class)
+
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
         self.initial_lambda = initial_lambda
         self.lambda_decay = lambda_decay
@@ -308,17 +314,23 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optim_lambdas = th.optim.Adam(
                 (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, betas=(0.5, 0.9))
         self.time = 0
+        self.training_variables.reset_lagrange_gradients()
     def zero_grad(self, set_to_none=True)-> None:
         super().zero_grad(set_to_none)
         if self.lr_lambda > 0:
-            self.training_variables.reset_lagrange_gradients()
+            self.training_variables.requires_grad_(False)
+            self.training_variables.zero_grad(set_to_none)
+            self.optim_lambdas.zero_grad(set_to_none)
+        if hasattr(self, 'optimx_ideal'):
+            self.optimx_ideal.zero_grad(set_to_none)
         return None
     
-    def stoic_gradients(self, loss_gr, loss_vs, **kwargs):
-        eta = 100.0 # TODO what is this...
-        x = self.params_gr # Possibly need flatten into single tensor.
-        w = self.params_vs
+    def stoic_gradients(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
         
+        x = self.params_gr # Possibly need flatten into single tensor.
+        
+        w = self.params_vs
+        #self.zero_grad()    
 
         
         # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
@@ -328,89 +340,61 @@ class ConstrainedOptimizer(VSLOptimizer):
         assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
         assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
-        if self.current_iteration < self.inner_optimization_iterations:
-            print("GROUNDING", self.current_iteration, loss_gr)
-            gx = th.autograd.grad(loss_gr, x, retain_graph=False, create_graph=True, allow_unused=False)
-            
-            for i, g in enumerate(gx):
-                if x[i].grad is None:
-                    x[i].grad = g
-                else:
-                    x[i].grad += g
+
+        self.optimx_ideal.zero_grad()
+        loss_sum = th.sum(loss_gr_ideal).detach()
+        for i in range(len(loss_gr_ideal)):
+                (loss_gr_ideal[i]/loss_sum).backward(create_graph=True, retain_graph=True)
+                self.optimx_ideal.step()
+                self.optimx_ideal.zero_grad()
+                #gx_ideal = th.autograd.grad(th.max(loss_gr_ideal), x_ideal, retain_graph=False, create_graph=True, allow_unused=False)
+                # Is this really useful?
+            #for i, g in enumerate(gx_ideal):
+            #    if x_ideal[i].grad is None:
+            #        x_ideal[i].grad = g
+            #    else:
+            #        x_ideal[i].grad += g
+                #print("PX", x_ideal[i].grad)
             #print("LR??", self.optimx.param_groups[0]['lr'], self.lr_grounding)
             #assert self.optimx.param_groups[0]['params'][i].grad is g
-        
+                
         #self.optimx.step()
         
-        elif self.current_iteration >= self.inner_optimization_iterations:
-            print("VS", self.current_iteration, loss_vs, loss_gr)
-            f_x = th.autograd.grad(loss_vs, x,
-                                retain_graph=True,
-                                create_graph=True)
-            v = []
-            for ipx, px in enumerate(x):
-                v.append(f_x[ipx].view(-1, 1).detach())
-            gx = th.autograd.grad(loss_gr, x, retain_graph=True, create_graph=True)
-            
-            for ipx, px in enumerate(x):
-                v_0 = v[ipx]
-                z_list = []
-                
-                gx_ = px.view(-1) - eta * gx[ipx].view(-1)
-
-                for _ in range(10): # number of Hessian Q steps
-                    Jacobian = torch.matmul(gx_, v_0)
-                    v_new = torch.autograd.grad(Jacobian, px, retain_graph=True)[0]
-                    #print("NEW V", v_new)
-                    v_0 = v_new.view(-1, 1).detach()
-                    z_list.append(v_0)
-
-                v_Q = eta * v_0 + torch.sum(torch.stack(z_list), dim=0)
-                print("VQ", v_Q.detach())
-                #gx = th.autograd.grad(loss_gr, x, retain_graph=True, create_graph=True).view(-1)???
-                gxwpx = torch.autograd.grad(torch.matmul(gx[ipx].view(1,-1), v_Q.detach()), w, retain_graph=True)
-                for ipw, pw in enumerate(w):
-                    if pw.grad is None:
-                        pw.grad = gxwpx[ipw]
-                    else:
-                        pw.grad -= gxwpx[ipw]
-                        print("PWG", pw.grad)
-
-        else:
-            gxw = 0.0
-        return None
+        self.training_variables.requires_grad_(False)
+        assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
+        if th.is_grad_enabled():
+            with th.no_grad():
+                self.training_variables.record_grounding_loss(loss_gr.detach().clone(), loss_vs.detach().clone(), loss_gr_ideal=loss_gr_ideal.detach().clone())
+        
+        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach())
+        loss.backward(**kwargs)
+        return loss
     def step(self, closure=None)->None:
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         
-        #print("LAGRANGE MULTIPLIERS BEFORE STEP:", self.training_variables.lagrange_multipliers)
+        print("LAGRANGE MULTIPLIERS BEFORE STEP:", self.training_variables.lagrange_multipliers)
         #print("TRAINING VARS", vars(self.training_variables))
         self.time += 1
         #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
         #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
 
-        if self.current_iteration < self.inner_optimization_iterations:
-            assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
-            self.optimx.step()
-            self.current_iteration += 1
-            print("STEPPED WITH", self.current_iteration)
-        elif self.optimy is not None:
-            assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
-            self.current_iteration = 0
-            self.optimx.step()
-            self.optimy.step()
+        assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
+       
+        self.optimx.step()
+        self.optimy.step()
+        
 
-        if self.lr_lambda > 0 and False: # Temporarily disable lambda optimization until checked stoic
+        if self.lr_lambda > 0: # Temporarily disable lambda optimization until checked stoic
             self.training_variables.prepare_for_optimizer_step()
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
-            print("OPTIM LAMBDAS", self.optim_lambdas.param_groups[0]['params'][0]  )
-            print("TRAINING_VARS", self.training_variables.lagrange_multipliers )
             
             self.optim_lambdas.step()
             self.training_variables.post_optimizer_step()
+            
+        self.zero_grad()
 
-        
-            # print("LAMBDA a", self.training_variables.lagrange_multipliers)
-        #print("LAGRANGE MULTIPLIERS AFTER STEP:", self.training_variables.lagrange_multipliers)
+        print("LAGRANGE MULTIPLIERS AFTER STEP:", self.training_variables.lagrange_multipliers)
+        #input("...")
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         return None
     
@@ -483,7 +467,7 @@ class MORewardTrainer(Trainer):
             return self.lr_scheduler
 
         optimizer = optimizer if optimizer is not None else self.optimizer
-        print("Creating scheduler with optimizer: ", optimizer, "???")
+        print("Creating scheduler with optimizer: ", optimizer)
         print(optimizer.__class__.__name__)
         #print(vars(optimizer))
         if (isinstance(optimizer, AcceleratedOptimizer) and isinstance(optimizer.optimizer, ConstrainedOptimizer)):
@@ -534,40 +518,44 @@ class MORewardTrainer(Trainer):
 
         
     
-    def compute_metrics(eval_pred):
-        result = {}
-        bsz = eval_pred.predictions.shape[0]
+    def compute_metrics(eval_pred) -> Dict[str, float]:
+        with th.no_grad():
+            result = {}
+            #print("PREDS?", eval_pred.predictions, len(eval_pred.predictions))
+            
+            if eval_pred.predictions.shape[0] % 2 == 1:
+                eval_pred.predictions = eval_pred.predictions[:-1]
+            bsz = eval_pred.predictions.shape[0]
 
-        jidx = th.arange(0, bsz, 2, device=eval_pred.predictions.device)
-        kidx = jidx + 1
-        rewards_1 = eval_pred.predictions[jidx]
-        rewards_2 = eval_pred.predictions[kidx]
-        #print(vars(eval_pred))
-        labels_1 = np.asarray(eval_pred.label_ids[jidx], dtype=rewards_1.dtype)
-        labels_2 = np.asarray(eval_pred.label_ids[kidx], dtype=rewards_2.dtype)
-
-        print(eval_pred)
-        print(eval_pred.predictions.shape)
-        print("LABELS", eval_pred.label_ids)
-        print(rewards_1[...,-1].shape)
-        
-        # We assume that the first sample is preferred by default in groundtruth
-        rep_mask1 = (rewards_1[..., -1] > rewards_2[..., -1]) & (labels_1[..., -1] >= labels_2[..., -1])
-        rep_mask2 = (rewards_1[..., -1] < rewards_2[..., -1]) & (labels_1[..., -1] <= labels_2[..., -1])
-        rep_mask3 = rep_mask = (rewards_1[..., -1] == rewards_2[..., -1]) & (labels_1[..., -1] == labels_2[..., -1])
-        indefinite_mask = (labels_1[..., -1] == NO_RATING_MASK) | (labels_2[..., -1] == NO_RATING_MASK)
-        rep_mask = (rep_mask1 | rep_mask2 | rep_mask3 )& ~indefinite_mask
-        result['representativeness'] = np.sum(rep_mask) / len(rewards_1)
-        
-        coh_mask1 = (rewards_1[..., 0:-1] >= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] >= labels_2[..., 0:-1])
-        coh_mask2 = (rewards_1[..., 0:-1] <= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] <= labels_2[..., 0:-1])
-        coh_mask3 = (rewards_1[..., 0:-1] == rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] == labels_2[..., 0:-1])
-        indefinite_mask = (labels_1[..., 0:-1] == NO_RATING_MASK) | (labels_2[..., 0:-1] == NO_RATING_MASK)
-        coh_mask = (coh_mask1 | coh_mask2 | coh_mask3) & ~indefinite_mask
-        result['coherence'] = np.sum(coh_mask, axis=0) / len(rewards_1)
-        assert result['coherence'].shape == (rewards_1.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(rewards_1.shape[-1]-1,)}"
-
-        return result
+            jidx = th.arange(0, bsz, 2, device=eval_pred.predictions.device)
+            kidx = jidx + 1
+            rewards_1 = eval_pred.predictions[jidx]
+            rewards_2 = eval_pred.predictions[kidx]
+            #print(vars(eval_pred))
+            labels_1 = np.asarray(eval_pred.label_ids[jidx], dtype=rewards_1.dtype)
+            labels_2 = np.asarray(eval_pred.label_ids[kidx], dtype=rewards_2.dtype)
+            
+            # We assume that the first sample is preferred by default in groundtruth
+            rep_mask1 = (rewards_1[..., -1] > rewards_2[..., -1]) & (labels_1[..., -1] >= labels_2[..., -1])
+            rep_mask2 = (rewards_1[..., -1] < rewards_2[..., -1]) & (labels_1[..., -1] <= labels_2[..., -1])
+            rep_mask3 = rep_mask = (rewards_1[..., -1] == rewards_2[..., -1]) & (labels_1[..., -1] == labels_2[..., -1])
+            indefinite_mask = (labels_1[..., -1] == NO_RATING_MASK) | (labels_2[..., -1] == NO_RATING_MASK)
+            rep_mask = (rep_mask1 | rep_mask2 | rep_mask3 )& ~indefinite_mask
+            result['representativeness'] = np.sum(rep_mask) / len(rewards_1)
+            
+            coh_mask1 = (rewards_1[..., 0:-1] >= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] >= labels_2[..., 0:-1])
+            coh_mask2 = (rewards_1[..., 0:-1] <= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] <= labels_2[..., 0:-1])
+            coh_mask3 = (rewards_1[..., 0:-1] == rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] == labels_2[..., 0:-1])
+            indefinite_mask = (labels_1[..., 0:-1] == NO_RATING_MASK) | (labels_2[..., 0:-1] == NO_RATING_MASK)
+            coh_mask = (coh_mask1 | coh_mask2 | coh_mask3) & ~indefinite_mask
+            chr = np.sum(coh_mask, axis=0) / len(rewards_1)
+            for c in range(rewards_1.shape[-1]-1):
+                result[f'coherence_v{c}'] = chr[c]
+            result['avg_coherence'] = np.mean(chr)
+            assert chr.shape == (rewards_1.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(rewards_1.shape[-1]-1,)}"
+            print("EVAL METRICS:", result)
+            #input("...")
+            return result
 
     def training_step(self, model: Module, inputs: Dict[str, th.Tensor | Any], num_items_in_batch: th.Tensor | int | None = None) -> th.Tensor:
         return self.training_step_stocbio(model, inputs, num_items_in_batch)
@@ -676,7 +664,12 @@ class MORewardTrainer(Trainer):
             raise NotImplementedError("LOMO optimizers are not currently supported for MORewardTrainer.")
             self.accelerator.lomo_backward(loss, learning_rate)
         #print(loss)
-        loss_gr = loss[:-1]
+        l=loss.shape[0]
+        assert l % 2 == 1, f"Expected odd number of rewards in loss tensor (num_values, num_values, 1), got {l}. Make sure your data collator is correctly collating pairs of samples with their labels."
+        loss_gr = loss[0:l//2]
+        loss_gr_ideal = loss[l//2:l-1]
+        #print("LOSS GR", loss_gr, "LOSS GR IDEAL", loss_gr_ideal, "LOSS VS", loss[l-1])
+        assert len(loss_gr) == len(loss_gr_ideal), f"Grounding loss and ideal grounding loss must have the same number of samples. Got {len(loss_gr)} and {len(loss_gr_ideal)}."
         loss_vs = loss[-1]
 
         optimizer = self.optimizer
@@ -688,6 +681,119 @@ class MORewardTrainer(Trainer):
             raise ValueError("Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
         
 
-        constrained_optim.stoic_gradients(th.min(loss_gr), loss_vs)
-        loss_combined = loss.mean()
+        loss_combined = constrained_optim.stoic_gradients(loss_gr, loss_gr_ideal, loss_vs)
+        
         return loss_combined
+    
+    def prediction_step(
+        self,
+        model: nn.Module,
+        inputs: dict[str, torch.Tensor | Any],
+        prediction_loss_only: bool,
+        ignore_keys: list[str] | None = None,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """
+        Perform an evaluation step on `model` using `inputs`.
+
+        Subclass and override to inject custom behavior.
+
+        Args:
+            model (`nn.Module`):
+                The model to evaluate.
+            inputs (`dict[str, torch.Tensor | Any]`):
+                The inputs and targets of the model.
+
+                The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
+                argument `labels`. Check your model's documentation for all accepted arguments.
+            prediction_loss_only (`bool`):
+                Whether or not to return the loss only.
+            ignore_keys (`list[str]`, *optional*):
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions.
+
+        Return:
+            tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss,
+            logits and labels (each being optional).
+        """
+        has_labels = False if len(self.label_names) == 0 else all(inputs.get(k) is not None for k in self.label_names)
+        # For CLIP-like models capable of returning loss values.
+        # If `return_loss` is not specified or being `None` in `inputs`, we check if the default value of `return_loss`
+        # is `True` in `model.forward`.
+        return_loss = inputs.get("return_loss")
+        if return_loss is None:
+            return_loss = self.can_return_loss
+        loss_without_labels = len(self.label_names) == 0 and return_loss
+
+        inputs = self._prepare_inputs(inputs)
+        if ignore_keys is None:
+            if hasattr(self.model, "config"):
+                ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", ["past_key_values"])
+            else:
+                ignore_keys = []
+
+        # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
+        if has_labels or loss_without_labels:
+            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
+            if len(labels) == 1:
+                labels = labels[0]
+        else:
+            labels = None
+
+        with torch.no_grad():
+            if is_sagemaker_mp_enabled():
+                raise NotImplementedError("Sagemaker model parallelism is not currently supported for MORewardTrainer.")
+                raw_outputs = smp_forward_only(model, inputs)
+                if has_labels or loss_without_labels:
+                    if isinstance(raw_outputs, dict):
+                        loss_mb = raw_outputs["loss"]
+                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys + ["loss"])
+                    else:
+                        loss_mb = raw_outputs[0]
+                        logits_mb = raw_outputs[1:]
+
+                    loss = loss_mb.reduce_mean().detach().cpu()
+                    logits = smp_nested_concat(logits_mb)
+                else:
+                    loss = None
+                    if isinstance(raw_outputs, dict):
+                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys)
+                    else:
+                        logits_mb = raw_outputs
+                    logits = smp_nested_concat(logits_mb)
+            else:
+                if has_labels or loss_without_labels:
+                    with self.compute_loss_context_manager():
+                        num_items_in_batch = self._get_num_items_in_batch([inputs], self.args.device)
+                        loss, outputs = self.compute_loss(
+                            model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+                        )
+                    if len(loss.shape) > 1:
+                        loss = loss.detach().mean(dim=0) #ELIMINATED!
+                    else:
+                        loss = loss.detach()
+                    assert loss.shape == (5,),  f"Expected loss to be a scalar tensor, got {loss.shape}. Make sure your model is returning a scalar loss value for evaluation."
+
+                    if isinstance(outputs, dict):
+                        #print("OUTPUTS???", outputs.keys(), outputs['logits'].shape)
+                        #input("?")
+                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
+                    else:
+                        logits = outputs[1:]
+                else:
+                    loss = None
+                    with self.compute_loss_context_manager():
+                        outputs = model(**inputs)
+                    if isinstance(outputs, dict):
+                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
+                    else:
+                        logits = outputs
+
+        if prediction_loss_only:
+            return (loss, None, None)
+
+        logits = nested_detach(logits)
+        #print("LOGITS???", logits, logits[0].shape)
+        if len(logits) == 1:
+            logits = logits[0]
+        #print("LOSS???", loss, loss.shape)
+        return (loss, logits, labels)
