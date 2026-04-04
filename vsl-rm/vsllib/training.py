@@ -33,7 +33,7 @@ from transformers.utils.generic import PaddingStrategy
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
-from vsllib.reward_models import MORMForSequenceClassification
+from vsllib.reward_models import MORMForSequenceClassification, accuracy_logits, accuracy_rewards_labels
 from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding
 
 
@@ -113,10 +113,6 @@ def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTo
         sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
         del output
         
-        #print("OUTPUT1 HIDDEN STATES", output1.last_hidden_state.shape)
-        #assert output1.shape[0] == len(sample[case[0]]), f"Expected batch size of {len(sample[case[0]])}, got {output1.last_hidden_state.shape[0]}"
-        
-
     return sample
 
 class PairwisePreferenceDataset(Dataset):
@@ -213,8 +209,6 @@ class PairwisePreferenceDataset(Dataset):
             removed_cache_files = self.data.cleanup_cache_files()
             print(f"Removed {removed_cache_files} dataset cache files")
 
-        #print(self.data.column_names)
-
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
         self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
@@ -227,10 +221,16 @@ class PairwisePreferenceDataset(Dataset):
 
 
 
-
+def _create_sub_optimizer(params: OrderedSet, lr: float, sub_optimizer_class: type[th.optim.Optimizer], optimizer_kwargs: dict) -> th.optim.Optimizer:
+        copyargs= deepcopy(optimizer_kwargs)
+        copyargs['lr'] = lr
+        #copyargs['learning_rate'] = lr_grounding
+        
+        return sub_optimizer_class(
+            params, **copyargs)
 
 class VSLOptimizer(th.optim.Optimizer):
-    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam, scheduler="cosine", **optimizer_kwargs):
+    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam,  **optimizer_kwargs):
         
         self.lr_grounding = lr_grounding
         self.lr_value_system = lr_value_system
@@ -249,22 +249,16 @@ class VSLOptimizer(th.optim.Optimizer):
         print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
         self.sub_optimizer_class = sub_optimizer_class
 
-        self.optimx = self._create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class)
+        self.optimx = _create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class, self.optimizer_kwargs)
         if params_vs and len(params_vs) > 0:
-            self.optimy = self._create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class)
+            self.optimy = _create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class, self.optimizer_kwargs)
         else:
             self.optimy = None
         # TODO: SCHEDULER COSINE...? ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
         # self.optimy_scheduler.step()
         super(VSLOptimizer, self).__init__([*params_gr, *params_vs], defaults)
 
-    def _create_sub_optimizer(self, params, lr, sub_optimizer_class):
-        copyargs= deepcopy(self.optimizer_kwargs)
-        copyargs['lr'] = lr
-        #copyargs['learning_rate'] = lr_grounding
-        
-        return sub_optimizer_class(
-            params, **copyargs)
+    
 
     def get_state(self, copy=False)-> Dict[str, Any]:
         return {}
@@ -290,7 +284,7 @@ class VSLOptimizer(th.optim.Optimizer):
 
 class ConstrainedOptimizer(VSLOptimizer):
     def __init__(self, params, params_gr, params_vs, n_values, max_grad_norm, params_gr_ideal=None, lr_grounding=None,
-                 lr_value_system=None, lr_lambda=None, initial_lambda=1.0, lambda_decay=1e-9, inner_optimization_iterations=3,
+                 lr_value_system=None, lr_lambda=None, initial_lambda=1.0, inner_optimization_iterations=3,
                  training_variables: MORMTrainingVariables = None,
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
@@ -299,11 +293,10 @@ class ConstrainedOptimizer(VSLOptimizer):
             assert len(params_gr) == len(params_gr_ideal), "Grounding parameters and ideal grounding parameters must have the same length."
             
             self.params_gr_ideal = params_gr_ideal
-            self.optimx_ideal = self._create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class)
+            self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
 
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
         self.initial_lambda = initial_lambda
-        self.lambda_decay = lambda_decay
         self.max_grad_norm = max_grad_norm
         self.training_variables: MORMTrainingVariables = training_variables
 
@@ -311,8 +304,8 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.inner_optimization_iterations = inner_optimization_iterations # Number of inner optimization steps for the value system per outer step.
 
         if self.lr_lambda > 0:
-            self.optim_lambdas = th.optim.Adam(
-                (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, betas=(0.5, 0.9))
+            self.optim_lambdas = th.optim.SGD(
+                (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, weight_decay=0.0)
         self.time = 0
         self.training_variables.reset_lagrange_gradients()
     def zero_grad(self, set_to_none=True)-> None:
@@ -325,7 +318,7 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal.zero_grad(set_to_none)
         return None
     
-    def stoic_gradients(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
+    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
         
         x = self.params_gr # Possibly need flatten into single tensor.
         
@@ -341,32 +334,18 @@ class ConstrainedOptimizer(VSLOptimizer):
         assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
 
-        self.optimx_ideal.zero_grad()
-        loss_sum = th.sum(loss_gr_ideal).detach()
-        for i in range(len(loss_gr_ideal)):
-                (loss_gr_ideal[i]/loss_sum).backward(create_graph=True, retain_graph=True)
-                self.optimx_ideal.step()
-                self.optimx_ideal.zero_grad()
-                #gx_ideal = th.autograd.grad(th.max(loss_gr_ideal), x_ideal, retain_graph=False, create_graph=True, allow_unused=False)
-                # Is this really useful?
-            #for i, g in enumerate(gx_ideal):
-            #    if x_ideal[i].grad is None:
-            #        x_ideal[i].grad = g
-            #    else:
-            #        x_ideal[i].grad += g
-                #print("PX", x_ideal[i].grad)
-            #print("LR??", self.optimx.param_groups[0]['lr'], self.lr_grounding)
-            #assert self.optimx.param_groups[0]['params'][i].grad is g
-                
-        #self.optimx.step()
+        if loss_gr_ideal is not None:
+            self.optimx_ideal.zero_grad()
+            loss_sum = th.sum(loss_gr_ideal).detach()
+            for i in range(len(loss_gr_ideal)):
+                    (loss_gr_ideal[i]/loss_sum).backward(retain_graph=True)
+                    self.optimx_ideal.step()
+                    self.optimx_ideal.zero_grad()
         
         self.training_variables.requires_grad_(False)
         assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
-        if th.is_grad_enabled():
-            with th.no_grad():
-                self.training_variables.record_grounding_loss(loss_gr.detach().clone(), loss_vs.detach().clone(), loss_gr_ideal=loss_gr_ideal.detach().clone())
         
-        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach())
+        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
         loss.backward(**kwargs)
         return loss
     def step(self, closure=None)->None:
@@ -384,14 +363,16 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.optimy.step()
         
 
-        if self.lr_lambda > 0: # Temporarily disable lambda optimization until checked stoic
+        if self.lr_lambda > 0:
             self.training_variables.prepare_for_optimizer_step()
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
             
             self.optim_lambdas.step()
+            print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
             self.training_variables.post_optimizer_step()
+
             
-        self.zero_grad()
+        #self.zero_grad()
 
         print("LAGRANGE MULTIPLIERS AFTER STEP:", self.training_variables.lagrange_multipliers)
         #input("...")
@@ -469,7 +450,7 @@ class MORewardTrainer(Trainer):
         optimizer = optimizer if optimizer is not None else self.optimizer
         print("Creating scheduler with optimizer: ", optimizer)
         print(optimizer.__class__.__name__)
-        #print(vars(optimizer))
+        
         if (isinstance(optimizer, AcceleratedOptimizer) and isinstance(optimizer.optimizer, ConstrainedOptimizer)):
             constrained_optim = optimizer.optimizer
         elif isinstance(optimizer, ConstrainedOptimizer):
@@ -479,7 +460,7 @@ class MORewardTrainer(Trainer):
             return super().create_scheduler(num_training_steps, optimizer)
         scheduler_name = SchedulerType(self.args.lr_scheduler_type)
         warmup_steps = self.args.get_warmup_steps(num_training_steps)
-        warmup_steps = 0 # TODO TODO TODO !!!!!!!!!
+        #warmup_steps = 0 # TODO TODO TODO !!!!!!!!!
 
         sched_x = get_scheduler(
                 name=scheduler_name,
@@ -518,10 +499,9 @@ class MORewardTrainer(Trainer):
 
         
     
-    def compute_metrics(eval_pred) -> Dict[str, float]:
+    def compute_metrics(eval_pred, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
             result = {}
-            #print("PREDS?", eval_pred.predictions, len(eval_pred.predictions))
             
             if eval_pred.predictions.shape[0] % 2 == 1:
                 eval_pred.predictions = eval_pred.predictions[:-1]
@@ -531,36 +511,28 @@ class MORewardTrainer(Trainer):
             kidx = jidx + 1
             rewards_1 = eval_pred.predictions[jidx]
             rewards_2 = eval_pred.predictions[kidx]
-            #print(vars(eval_pred))
-            labels_1 = np.asarray(eval_pred.label_ids[jidx], dtype=rewards_1.dtype)
-            labels_2 = np.asarray(eval_pred.label_ids[kidx], dtype=rewards_2.dtype)
             
+            labels_1 = eval_pred.label_ids[jidx]
+            labels_2 = eval_pred.label_ids[kidx]
+
             # We assume that the first sample is preferred by default in groundtruth
-            rep_mask1 = (rewards_1[..., -1] > rewards_2[..., -1]) & (labels_1[..., -1] >= labels_2[..., -1])
-            rep_mask2 = (rewards_1[..., -1] < rewards_2[..., -1]) & (labels_1[..., -1] <= labels_2[..., -1])
-            rep_mask3 = rep_mask = (rewards_1[..., -1] == rewards_2[..., -1]) & (labels_1[..., -1] == labels_2[..., -1])
-            indefinite_mask = (labels_1[..., -1] == NO_RATING_MASK) | (labels_2[..., -1] == NO_RATING_MASK)
-            rep_mask = (rep_mask1 | rep_mask2 | rep_mask3 )& ~indefinite_mask
-            result['representativeness'] = np.sum(rep_mask) / len(rewards_1)
-            
-            coh_mask1 = (rewards_1[..., 0:-1] >= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] >= labels_2[..., 0:-1])
-            coh_mask2 = (rewards_1[..., 0:-1] <= rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] <= labels_2[..., 0:-1])
-            coh_mask3 = (rewards_1[..., 0:-1] == rewards_2[..., 0:-1]) & (labels_1[..., 0:-1] == labels_2[..., 0:-1])
-            indefinite_mask = (labels_1[..., 0:-1] == NO_RATING_MASK) | (labels_2[..., 0:-1] == NO_RATING_MASK)
-            coh_mask = (coh_mask1 | coh_mask2 | coh_mask3) & ~indefinite_mask
-            chr = np.sum(coh_mask, axis=0) / len(rewards_1)
-            for c in range(rewards_1.shape[-1]-1):
-                result[f'coherence_v{c}'] = chr[c]
+            represent = accuracy_rewards_labels(rewards_1[..., -1], rewards_2[..., -1], labels_1[..., -1], labels_2[..., -1], threshold=50.0, epsilon=1.0e-1, assume_torch=False)
+            result['representativeness'] = represent
+
+            chr = accuracy_rewards_labels(rewards_1[..., 0:-1], rewards_2[..., 0:-1], labels_1[..., 0:-1], labels_2[..., 0:-1],  threshold=50.0, epsilon=1.0e-1 , assume_torch=False)
+            result['coherences'] = chr.tolist()
+            for i, ch in enumerate(result['coherences']):
+                result[f'coherence_{i}'] = float(ch)
             result['avg_coherence'] = np.mean(chr)
             assert chr.shape == (rewards_1.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(rewards_1.shape[-1]-1,)}"
             print("EVAL METRICS:", result)
+
+            training_variables.record_metrics(result, metric_type='validation')
             #input("...")
             return result
 
-    def training_step(self, model: Module, inputs: Dict[str, th.Tensor | Any], num_items_in_batch: th.Tensor | int | None = None) -> th.Tensor:
-        return self.training_step_stocbio(model, inputs, num_items_in_batch)
-    
-    def training_step_stocbio(
+    #overriden
+    def training_step(
         self,
         model: nn.Module,
         inputs: dict[str, torch.Tensor | Any],
@@ -584,33 +556,23 @@ class MORewardTrainer(Trainer):
             `torch.Tensor`: The tensor with training loss on this batch.
         """
         # Prepare buffers for context parallelism
-        ##print("CONTEXT????")
         cp_context, inputs = self._prepare_context_parallel_inputs(model, inputs)
-        ##print("CONTEXT DONE????")
-
+        
         # Context manager is no-op if CP isn't enabled
         with cp_context():
-            ##print("BEFORE TRAIN????")
             model.train()
-            ##print("AFTER TRAIN????")
             if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
                 self.optimizer.train()
-            ##print("BEFORE PREPARE INPUTS????")
             inputs = self._prepare_inputs(inputs)
-            ##print("AFTER PREPARE INPUTS????")
             if is_sagemaker_mp_enabled():
-                ##print("SAGE????")
                 raise NotImplementedError("Sagemaker model parallelism is not currently supported for MORewardTrainer.")
                 loss_mb = smp_forward_backward(model, inputs, self.args.gradient_accumulation_steps)
-                ##print("SAGE DONE????")
+                
                 return loss_mb.reduce_mean().detach().to(self.args.device)
 
             with self.compute_loss_context_manager():
-                ##print("LOSS????")
-                #CHANGED HERE. 
-                #loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
+                
                 loss = self.compute_loss(model, inputs, num_items_in_batch=num_items_in_batch)
-                ##print("LOSS DONE????")
 
             del inputs
             if (
@@ -638,12 +600,11 @@ class MORewardTrainer(Trainer):
                 kwargs["scale_wrt_gas"] = False
 
             
-            loss_single = self.gradients(loss=loss, **kwargs)
+            loss_single = self._gradients(loss=loss, **kwargs)
 
             return loss_single.detach()
-    # This assumes that the data is collated using RewardDataCollatorWithPadding, and that the model returns multiple rewards for each input.
-
-    def gradients(self, loss: th.Tensor, **kwargs):
+        
+    def _gradients(self, loss: th.Tensor, **kwargs):
         # Compute gradients for grounding and value system losses separately
 
         learning_rate = kwargs.get("learning_rate")
@@ -663,13 +624,19 @@ class MORewardTrainer(Trainer):
         elif learning_rate is not None and self.has_lomo_optimizer:
             raise NotImplementedError("LOMO optimizers are not currently supported for MORewardTrainer.")
             self.accelerator.lomo_backward(loss, learning_rate)
-        #print(loss)
+        
         l=loss.shape[0]
         assert l % 2 == 1, f"Expected odd number of rewards in loss tensor (num_values, num_values, 1), got {l}. Make sure your data collator is correctly collating pairs of samples with their labels."
-        loss_gr = loss[0:l//2]
-        loss_gr_ideal = loss[l//2:l-1]
-        #print("LOSS GR", loss_gr, "LOSS GR IDEAL", loss_gr_ideal, "LOSS VS", loss[l-1])
-        assert len(loss_gr) == len(loss_gr_ideal), f"Grounding loss and ideal grounding loss must have the same number of samples. Got {len(loss_gr)} and {len(loss_gr_ideal)}."
+        if l == self.model.num_values*2 +1: 
+            loss_gr = loss[0:l//2]
+            loss_gr_ideal = loss[l//2:l-1]
+            assert len(loss_gr) == len(loss_gr_ideal), f"Grounding loss and ideal grounding loss must have the same number of samples. Got {len(loss_gr)} and {len(loss_gr_ideal)}."
+        
+        else:
+            assert l == self.model.num_values + 1, f"Expected loss tensor to have shape (num_values + 1,), got {loss.shape}. Make sure your model is returning a loss tensor of shape (num_values + 1,) where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
+            loss_gr = loss[0:self.model.num_values]
+            loss_gr_ideal = None
+        
         loss_vs = loss[-1]
 
         optimizer = self.optimizer
@@ -681,7 +648,7 @@ class MORewardTrainer(Trainer):
             raise ValueError("Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
         
 
-        loss_combined = constrained_optim.stoic_gradients(loss_gr, loss_gr_ideal, loss_vs)
+        loss_combined = constrained_optim.custom_backward(loss_gr, loss_gr_ideal, loss_vs)
         
         return loss_combined
     
@@ -768,14 +735,12 @@ class MORewardTrainer(Trainer):
                             model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
                         )
                     if len(loss.shape) > 1:
-                        loss = loss.detach().mean(dim=0) #ELIMINATED!
+                        loss = loss.detach().mean(dim=0) #CHANGED FOR MULTILABEL LOSS!
                     else:
                         loss = loss.detach()
                     assert loss.shape == (5,),  f"Expected loss to be a scalar tensor, got {loss.shape}. Make sure your model is returning a scalar loss value for evaluation."
 
                     if isinstance(outputs, dict):
-                        #print("OUTPUTS???", outputs.keys(), outputs['logits'].shape)
-                        #input("?")
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
                     else:
                         logits = outputs[1:]
@@ -792,8 +757,6 @@ class MORewardTrainer(Trainer):
             return (loss, None, None)
 
         logits = nested_detach(logits)
-        #print("LOGITS???", logits, logits[0].shape)
         if len(logits) == 1:
             logits = logits[0]
-        #print("LOSS???", loss, loss.shape)
         return (loss, logits, labels)

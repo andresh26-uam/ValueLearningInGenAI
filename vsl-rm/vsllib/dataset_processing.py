@@ -106,34 +106,35 @@ count = 0
 per_principle_count = {}
 per_principle_count_same_principle = {}
 for i, row in enumerate(processed_dataset):
-	
-	if row["labelcontext1"] == row["labelcontext2"] and row["labelcontext1"] is not None and row["labelcontext2"] is not None:
-		pair = (row["labelcontext1"], row["labelcontext2"])
-		# order pair alphabetically to avoid counting (A, B) and (B, A) separately
-		pair = tuple(sorted(pair))
+    if "labelcontext1" not in row or "labelcontext2" not in row:
+        continue
+    if row["labelcontext1"] == row["labelcontext2"] and row["labelcontext1"] is not None and row["labelcontext2"] is not None:
+        pair = (row["labelcontext1"], row["labelcontext2"])
+        # order pair alphabetically to avoid counting (A, B) and (B, A) separately
+        pair = tuple(sorted(pair))
 
-		if pair not in per_principle_count_same_principle:
-			per_principle_count_same_principle[pair] = 0
-		
-		per_principle_count_same_principle[pair] += 1
-		
-	if row["labelcontext1"] != row["labelcontext2"]:
-		pair = (row["labelcontext1"], row["labelcontext2"])
-		# order pair alphabetically to avoid counting (A, B) and (B, A) separately
-		pair = tuple(sorted(pair))
+    if pair not in per_principle_count_same_principle:
+        per_principle_count_same_principle[pair] = 0
 
-		if pair not in per_principle_count:
-			per_principle_count[pair] = 0
-		
-		per_principle_count[pair] += 1
-		assert row['prompt'] == row['prompt']
-		count +=1
-		if count < 100:
-			print("-----START--------------------")
-			print(row['context1'])
-			print("-------------------------")
-			print(row['context2'])
-			print("-----END--------------------")
+        per_principle_count_same_principle[pair] += 1
+
+    if row["labelcontext1"] != row["labelcontext2"]:
+        pair = (row["labelcontext1"], row["labelcontext2"])
+        # order pair alphabetically to avoid counting (A, B) and (B, A) separately
+        pair = tuple(sorted(pair))
+
+    if pair not in per_principle_count:
+        per_principle_count[pair] = 0
+
+        per_principle_count[pair] += 1
+        assert row['prompt'] == row['prompt']
+        count +=1
+    if count < 100:
+        print("-----START--------------------")
+        print(row['context1'])
+        print("-------------------------")
+        print(row['context2'])
+        print("-----END--------------------")
 print("Total cases where responses have different principles for the same prompt:", count)
 print("Count of different principles across all pairs:", per_principle_count)
 print("Count of same principles across all pairs:", per_principle_count_same_principle)

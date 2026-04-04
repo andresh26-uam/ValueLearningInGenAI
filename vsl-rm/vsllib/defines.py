@@ -1,6 +1,6 @@
 
 from pathlib import Path
-from typing import LiteralString
+
 
 NO_RATING_MASK = float('-inf')
 
@@ -9,5 +9,5 @@ assert PROJECT_ROOT.name == "ValueLearningInGenAI", f"Expected project root to b
 LOCAL_DATASET_PATH = str(PROJECT_ROOT / "processed_datasets")
 
 ULTRAFEEDBACK_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "ultrafeedback_pairs")
-ULTRAFEEDBACK: LiteralString = "openbmb/UltraFeedback"
+ULTRAFEEDBACK: str = "openbmb/UltraFeedback"
 ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels"]

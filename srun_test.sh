@@ -1,44 +1,53 @@
 #!/usr/bin/env bash
-
-
-
-set -eu
-# Enable pipefail only when supported (e.g. bash, zsh).
-(set -o pipefail) >/dev/null 2>&1 && set -o pipefail || true
-
-# Run inside the Slurm context so we can read CUDA_VISIBLE_DEVICES assigned by srun.
-srun --gpus=L40S:2 --mem-per-gpu=20G --pty bash -lc '
-set -euo pipefail
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
-#SBATCH --mem-per-gpu=8G
+#SBATCH --mem-per-gpu=24G
 #SBATCH --cpus-per-gpu=1
 #SBATCH --mincpus=1
+#SBATCH --gpus=A100:1
 
-gpu_ids="${CUDA_VISIBLE_DEVICES:-all}"
-if [[ -z "$gpu_ids" || "$gpu_ids" == "NoDevFiles" ]]; then
-	gpu_ids="all"
+#SRUN --job-name=ValueLearningInGenAI
+#SRUN --chdir=/home/aholg/ValueLearningInGenAI
+#SRUN --mem-per-gpu=24G
+#SRUN --cpus-per-gpu=1
+#SRUN --mincpus=1
+#SRUN --gpus=A100:2
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+	echo "Usage: sbatch srun_test.sh <train_script.py> [script args ...]" >&2
+	exit 2
 fi
 
-IFS=',' read -r -a gpu_id_arr <<< "$gpu_ids"
-num_processes="${#gpu_id_arr[@]}"
+entrypoint="$1"
+shift
 
-num_machines="${NUM_MACHINES:-1}"
+num_processes="${SLURM_GPUS_ON_NODE:-${NUM_PROCESSES:-1}}"
+if ! [[ "$num_processes" =~ ^[0-9]+$ ]] || [[ "$num_processes" -lt 1 ]]; then
+	num_processes=1
+fi
+
+num_machines="${NUM_MACHINES:-${SLURM_NNODES:-1}}"
 
 config_file="accelerate_config/default_config.yaml"
 if [[ "$num_processes" -eq 1 ]]; then
 	config_file="accelerate_config/single_config.yaml"
 fi
 
+gpu_ids="${CUDA_VISIBLE_DEVICES:-}"
+if [[ -z "$gpu_ids" || "$gpu_ids" == "NoDevFiles" ]]; then
+	gpu_ids="$(seq -s, 0 $((num_processes - 1)))"
+fi
+
 echo "Running with GPU IDs: $gpu_ids"
 echo "Number of processes: $num_processes"
 echo "Number of machines: $num_machines"
-exec python -m accelerate.commands.launch \
+
+python -m accelerate.commands.launch \
 	--config_file="$config_file" \
 	--debug \
 	--num_processes="$num_processes" \
 	--num_machines="$num_machines" \
 	--gpu_ids="$gpu_ids" \
-	"$@"
-' _ "$@"
+	"$entrypoint" "$@"
 

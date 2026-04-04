@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
-#SBATCH --mem-per-gpu=8G
-#SBATCH --cpus-per-gpu=1
-#SBATCH --mincpus=1
-#SBATCH --gpus=L40S:1
 
 from dataclasses import dataclass, field
 from functools import partial
@@ -50,7 +46,7 @@ from transformers import (
 from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
-from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding
+from vsllib.utils import MORewardDataCollatorWithPadding
 
 # Define and parse arguments.
 
@@ -80,13 +76,20 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=16)
-    per_device_eval_batch_size: Optional[int] = field(default=16)
+    per_device_train_batch_size: Optional[int] = field(default=32)
+    per_device_eval_batch_size: Optional[int] = field(default=32)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
+    metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     learning_rate: Optional[float] = field(default=1e-5)
+    lambda_decay: Optional[float] = field(default=1e-5)
     grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO
     lagrange_learning_rate: Optional[float] = field(default=1e-2)
-    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
+    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.02)
+    use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
+    grad_on_only_worst_value: Optional[bool] = field(default=False)
+    zero_constraint: Optional[bool] = field(default=True)
+    use_ideal_grounding_model : Optional[bool] = field(default=False)
+
 
     weight_decay: Optional[float] = field(default=0.001)
     model_name: Optional[str] = field(
@@ -98,7 +101,7 @@ class ScriptArguments:
         },
     )
     bf16: Optional[bool] = field(
-        default=True,
+        default=False,
         metadata={
             "help": "This essentially cuts the training time in half if you want to sacrifice a little precision and have a supported GPU."
         },
@@ -226,7 +229,8 @@ training_args = TrainingArguments(
     optim_args={ },
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
-    warmup_ratio=0.03,
+    #warmup_ratio=0.03,
+    warmup_steps=50,
     label_names=["labels"],
     report_to="wandb", # 'wandb'
     #report_to=None, # 'wandb'
@@ -244,7 +248,7 @@ def main_fun():
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float16
     model = AutoModelForSequenceClassification.from_pretrained(
         script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
-    #)
+    #
     # send model to a gpu if available
     
 
@@ -276,11 +280,18 @@ def main_fun():
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype, 
+                                                    lambda_decay=script_args.lambda_decay,
                                             hidden_sizes=[4096], value_layer_dropout=0.1,
                                             value_layer_intermediate_activation="SiLU", 
                                             value_layer_final_activation="none",
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
-                                            gradient_accumulation_steps=script_args.gradient_accumulation_steps)
+                                            gradient_accumulation_steps=script_args.gradient_accumulation_steps,
+                                            metrics_accumulation_steps=script_args.metrics_accumulation_steps,
+                            use_metrics_or_losses_for_lagrange_updates=script_args.use_metrics_or_losses_for_lagrange_updates,
+                            grad_on_only_worst_value=script_args.grad_on_only_worst_value,
+                            zero_constraint=script_args.zero_constraint,
+                            use_ideal_grounding_model=script_args.use_ideal_grounding_model
+                                            )
 
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
     sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
@@ -295,11 +306,11 @@ def main_fun():
             train_dataset=dataset.train_dataset,
             
             eval_dataset=dataset.eval_dataset,
-            compute_metrics=MORewardTrainer.compute_metrics,
-            compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
+            compute_metrics=partial(MORewardTrainer.compute_metrics, training_variables=mo_model.training_variables),
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': list(mo_model.reward_heads.parameters()),
-                'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()),
+                'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
                 'params_vs': list(mo_model.value_system_layer.parameters()),
                 'n_values': len(dataset.value_keys),
                 'lr_value_system': script_args.learning_rate,
@@ -308,7 +319,6 @@ def main_fun():
                 'inner_optimization_iterations': script_args.inner_optimization_iterations,
                 'lr_lambda': script_args.lagrange_learning_rate,
                 'initial_lambda': 1.0,
-                'lambda_decay': 1e-9,
                 'sub_optimizer_class': sub_optimizer_cls,
                 'training_variables': mo_model.training_variables,
                 ** sub_optimizer_kwargs
