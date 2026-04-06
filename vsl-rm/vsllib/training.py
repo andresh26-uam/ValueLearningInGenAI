@@ -34,7 +34,7 @@ from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
 from vsllib.reward_models import MORMForSequenceClassification, accuracy_logits, accuracy_rewards_labels
-from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding
+from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, to_float
 
 
 
@@ -345,7 +345,8 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.training_variables.requires_grad_(False)
         assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
         
-        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        #loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        loss = loss_vs
         loss.backward(**kwargs)
         return loss
     def step(self, closure=None)->None:
@@ -438,6 +439,19 @@ class ConstrainedLRScheduler:
 from accelerate.optimizer import AcceleratedOptimizer
 
 class MORewardTrainer(Trainer):
+
+    training_variables: MORMTrainingVariables
+    
+
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+        is_eval_log = any(k.startswith("eval_") for k in logs.keys())
+        if self.model.training and not is_eval_log:
+            train_metrics = self.training_variables._collect_train_metrics_for_logging()
+            if train_metrics:
+                for key, value in train_metrics.items():
+                    logs.setdefault(f"train/{key}", value)
+        #TODO THIS MIGHT NOT WORK
+        return super().log(logs, start_time)
 
     def create_optimizer(self, model: MORMForSequenceClassification =None) -> th.optim.Optimizer:
         self.optimizer = super().create_optimizer(model)

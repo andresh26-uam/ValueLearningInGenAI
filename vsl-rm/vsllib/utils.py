@@ -110,9 +110,43 @@ class MORewardDataCollatorWithPadding:
     """
         return batch
 
-
+def to_float(value: Any) -> float:
+            if isinstance(value, th.Tensor):
+                if value.numel() == 1:
+                    return float(value.detach().cpu().item())
+                return float(value.detach().cpu().mean().item())
+            if isinstance(value, np.ndarray):
+                if value.size == 1:
+                    return float(value.item())
+                return float(value.mean())
+            return float(value)
 class MORMTrainingVariables(th.nn.Module):
 
+    def _collect_train_metrics_for_logging(self) -> Dict[str, float]:
+        self: MORMTrainingVariables = self
+        result: Dict[str, float] = {}
+
+
+        for i in range(len(self.last_accumulated_coherences)):
+            if self.last_accumulated_coherences[i] is not None:
+                result[f"coherence_v{i}"] = to_float(self.last_accumulated_coherences[i])
+
+        if self.last_accumulated_representativeness is not None:
+            result["representativeness"] = to_float(self.last_accumulated_representativeness)
+        
+        if self.last_accumulated_grounding_loss is not None:
+            result["grounding_loss"] = to_float(self.last_accumulated_grounding_loss)
+        if self.last_accumulated_vs_loss is not None:
+            result["value_system_loss"] = to_float(self.last_accumulated_vs_loss)
+        for i in range(len(self.lagrange_multipliers)):
+            if self.lagrange_multipliers[i] is not None:
+                result[f"lagrange_multiplier_{i}"] = to_float(self.lagrange_multipliers[i])
+        if self.maximum_coherences_tendency is not None:
+            result["maximum_coherences_tendency"] = to_float(self.maximum_coherences_tendency)
+        if self.minimum_grounding_loss_tendency is not None:
+            result["minimum_grounding_loss_tendency"] = to_float(self.minimum_grounding_loss_tendency)
+        return result
+    
     def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None) -> th.Tensor:
         
         
