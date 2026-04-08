@@ -46,7 +46,7 @@ from transformers import (
 from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
-from vsllib.utils import MORewardDataCollatorWithPadding
+from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
 
 # Define and parse arguments.
 
@@ -177,17 +177,7 @@ def seed_everything(seed: int, deterministic: bool = True):
             pass
 
 
-def save_checkpoint_with_seed(trainer: Trainer, tokenizer: AutoTokenizer, checkpoint_dir: str, seed: int):
-    trainer.save_model(checkpoint_dir)
-    tokenizer.save_pretrained(checkpoint_dir)
 
-    seed_info = {
-        "seed": seed,
-        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
-        "torch_initial_seed": int(torch.initial_seed()),
-    }
-    with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
-        json.dump(seed_info, fp, indent=2, sort_keys=True)
 
 
 seed_everything(int(script_args.seed))
@@ -326,13 +316,6 @@ def main_fun():
                 ** sub_optimizer_kwargs
             }),
             data_collator=dc,
-    )
-
-    save_checkpoint_with_seed(
-        trainer=trainer,
-        tokenizer=tokenizer,
-        checkpoint_dir=output_name + "/last_checkpoint",
-        seed=int(script_args.seed),
     )
 
     trainer.train()

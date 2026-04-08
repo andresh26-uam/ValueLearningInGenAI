@@ -173,13 +173,13 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, epsilon=1.0e-1, 
         rep_mask1 = (logits > 0) & (target_probs > 0.5)
         rep_mask2 = (logits < 0) & (target_probs < 0.5)
         rep_mask3 = (target_probs == 0.5) & ((logits <= epsilon) & (logits >= -epsilon))
-        indefinite_mask = (target_probs == NO_RATING_MASK)  if missing_mask is None else missing_mask
-        mask = (rep_mask1 | rep_mask2 | rep_mask3 | indefinite_mask) # IT SHOULD BE OR BECAUSE INDEFINITE IS OK!!!!
+        all_defined_cases = (target_probs != NO_RATING_MASK)  if missing_mask is None else ~missing_mask
+        mask = (rep_mask1 | rep_mask2 | rep_mask3 ) # IT SHOULD BE OR BECAUSE INDEFINITE IS OK!!!!
         if assume_torch:
             
-            accuracy = mask.float().mean(dim=0)
+            accuracy = mask.float().sum(dim=0)/(all_defined_cases).float().sum(dim=0)
         else:
-            accuracy = mask.astype(float).mean(axis=0)
+            accuracy = mask.astype(float).sum(axis=0)/(all_defined_cases).astype(float).sum(dim=0)
     if len(logits.shape) >= 2:
         assert accuracy.shape == (logits.shape[-1],), f"Expected loss shape {(logits.shape[-1],)}, got {accuracy.shape}"
     else:
@@ -285,7 +285,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     return mean
 
 
-def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0) -> th.Tensor | Tuple[th.Tensor, dict]:
+def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0) -> th.Tensor:
     missing_mask = (scores1 == NO_RATING_MASK) | (scores2 == NO_RATING_MASK) if check_undefined_label else None 
     logits_p = logits_BT(reward1, reward2, threshold=reward_diff_threshold, missing_mask=missing_mask, assume_torch=True)
     target_probs_p = scores_to_target_probs(scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label, missing_mask=missing_mask, assume_torch=True)

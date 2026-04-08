@@ -453,6 +453,7 @@ from accelerate.optimizer import AcceleratedOptimizer
 
 class MORewardTrainer(Trainer):
 
+    
     training_variables: MORMTrainingVariables
     model: MORMForSequenceClassification
 
@@ -470,9 +471,9 @@ class MORewardTrainer(Trainer):
         #TODO THIS MIGHT NOT WORK
         return super().log(logs, start_time)
 
-    def create_optimizer(self, model: MORMForSequenceClassification =None) -> th.optim.Optimizer:
+    """def create_optimizer(self, model: MORMForSequenceClassification =None) -> th.optim.Optimizer:
         self.optimizer = super().create_optimizer(model)
-        return self.optimizer
+        return self.optimizer"""
 
     def create_scheduler(self, num_training_steps: int, optimizer: Optional[th.optim.Optimizer] = None):
         if self.lr_scheduler is not None:

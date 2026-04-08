@@ -3,12 +3,14 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from heapq import merge
+import json
 import time
+import os
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from sympy import use
 from torch.nn.parameter import Parameter
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, loss
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, Trainer, loss
 
 
 from transformers.utils import PaddingStrategy
@@ -74,7 +76,17 @@ def infer_base_hidden_size(self, base_model: AutoModelForSequenceClassification|
             "config.hidden_size/d_model/n_embd/dim, or get_input_embeddings().embedding_dim."
         )
 
+def save_checkpoint_with_seed(trainer: Trainer, tokenizer: AutoTokenizer, checkpoint_dir: str, seed: int):
+    trainer.save_model(checkpoint_dir)
+    tokenizer.save_pretrained(checkpoint_dir)
 
+    seed_info = {
+        "seed": seed,
+        "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+        "torch_initial_seed": int(th.initial_seed()),
+    }
+    with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
+        json.dump(seed_info, fp, indent=2, sort_keys=True)
 @dataclass
 class MORewardDataCollatorWithPadding:
     tokenizer: PreTrainedTokenizerBase
