@@ -1,10 +1,12 @@
 
+from ast import Tuple
 from collections.abc import Iterator
 from copy import deepcopy
 from dataclasses import dataclass
 
 from functools import partial
-from typing import Any
+import re
+from typing import Any, Literal
 
 from datasets import config
 import numpy as np
@@ -100,14 +102,16 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         self,
         pad_token_id: int,
         num_values: int = 3,
-        hidden_sizes: list[int] = [4096,],
+        hidden_sizes: list[int] = [1024,1024,1024],
         value_layer_dropout: float = 0.1,
-        value_layer_intermediate_activation: str = "SiLU",
+        value_layer_intermediate_activation: str = "ReLU",
         value_layer_final_activation: str = "none",
+        layer_normalization: Literal['LayerNorm', 'BatchNorm', 'none'] = 'LayerNorm',
         reward_diff_threshold: str = 50.0,
         assume_qualitative_labels: bool = False,
         check_undefined_label: bool = True,
         grounding_loss_tendency_update_ratio: float = 0.001,
+        rew_center_coefficient: float = 0.0,
         gradient_accumulation_steps: int = 2,
         metrics_accumulation_steps: int = 2,
         use_metrics_or_losses_for_lagrange_updates: str = "metrics",
@@ -126,6 +130,8 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         if value_layer_final_activation not in ['ReLU', 'SiLU', 'Tanh', 'Softplus', 'none']:
              raise ValueError(f"value_layer_final_activation must be one of 'ReLU', 'SiLU', 'Tanh', 'Softplus', 'none', but got {value_layer_final_activation}")
 
+        if layer_normalization not in ['LayerNorm', 'BatchNorm', 'none']:
+            raise ValueError(f"layer_normalization must be one of 'LayerNorm', 'BatchNorm', 'none', but got {layer_normalization}")
         
 
         default_id2label = {
@@ -152,9 +158,11 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         self.use_metrics_or_losses_for_lagrange_updates = use_metrics_or_losses_for_lagrange_updates
         self.grad_on_only_worst_value = grad_on_only_worst_value
         self.zero_constraint = zero_constraint
+        self.rew_center_coefficient = rew_center_coefficient
         self.dtype = dtype
         self.lambda_decay = lambda_decay
         self.use_ideal_grounding_model = use_ideal_grounding_model
+        self.layer_normalization = layer_normalization  
 
 def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, epsilon=1.0e-1, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
     logits = logits_BT(reward1, reward2, threshold=threshold, check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
@@ -166,7 +174,7 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, epsilon=1.0e-1, 
         rep_mask2 = (logits < 0) & (target_probs < 0.5)
         rep_mask3 = (target_probs == 0.5) & ((logits <= epsilon) & (logits >= -epsilon))
         indefinite_mask = (target_probs == NO_RATING_MASK)  if missing_mask is None else missing_mask
-        mask = (rep_mask1 | rep_mask2 | rep_mask3 )& ~indefinite_mask
+        mask = (rep_mask1 | rep_mask2 | rep_mask3 | indefinite_mask) # IT SHOULD BE OR BECAUSE INDEFINITE IS OK!!!!
         if assume_torch:
             
             accuracy = mask.float().mean(dim=0)
@@ -237,7 +245,7 @@ def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_t
                 else:
                     target_probs[mask] = NO_RATING_MASK
     return target_probs
-def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=None, scores2: th.Tensor=None, reward_diff_threshold: float=50.0, return_metrics: bool=False, assume_qualitative_labels=False, check_undefined_label=True):
+def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=None, scores2: th.Tensor=None, reward_diff_threshold: float=50.0, return_metrics: bool=False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
     # label = 1: reward1 should be higher.
     # label = 0: reward2 should be higher.
@@ -263,9 +271,11 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
 
     loss = th.nn.functional.binary_cross_entropy_with_logits(
                 # /sum(weights)
-                logits, target_probs, reduction='none', reduce=False)
+                logits, target_probs, reduction='none', reduce=False) 
     assert loss.shape == reward1.shape, f"Expected loss shape {(reward1.shape[0],)}, got {loss.shape}"
     mean = th.mean(loss, dim=-2)
+    if rew_center_coefficient != 0:
+        mean += rew_center_coefficient * th.mean((reward1 + reward2)**2, dim=-2)
     assert mean.shape == (reward1.shape[-1],), f"Expected loss shape {(reward1.shape[-1],)}, got {loss.shape}"
     if return_metrics:
         metrics = {}
@@ -275,7 +285,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     return mean
 
 
-def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False):
+def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0) -> th.Tensor | Tuple[th.Tensor, dict]:
     missing_mask = (scores1 == NO_RATING_MASK) | (scores2 == NO_RATING_MASK) if check_undefined_label else None 
     logits_p = logits_BT(reward1, reward2, threshold=reward_diff_threshold, missing_mask=missing_mask, assume_torch=True)
     target_probs_p = scores_to_target_probs(scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label, missing_mask=missing_mask, assume_torch=True)
@@ -289,9 +299,11 @@ def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor
 
     loss = th.nn.functional.binary_cross_entropy_with_logits(
                 # /sum(weights)
-                logits, target_probs.detach(), reduction='mean')
+                logits, target_probs.detach(), reduction='mean') + rew_center_coefficient*th.mean((reward1 + reward2)**2, dim=-2) 
     #assert loss.shape == reward1.shape, f"Expected loss shape {(reward1.shape[0],)}, got {loss.shape}"
-    
+    if rew_center_coefficient != 0:
+        loss += rew_center_coefficient * th.mean((reward1 + reward2)**2)
+
     if return_metrics:
         metrics = {}
         metrics['representativeness'] = accuracy_logits(logits_p, target_probs_p, missing_mask=missing_mask)
@@ -299,7 +311,7 @@ def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor
     return loss
 
 
-def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: MORMForSequenceClassificationConfig =None, training_variables: MORMTrainingVariables =None, **kwargs):
+def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: MORMForSequenceClassificationConfig =None, training_variables: MORMTrainingVariables =None, accelerator=None, **kwargs):
     
     bsz = pooled_logits.size(0)
 
@@ -321,22 +333,27 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
     use_metrics = training_variables is not None and training_variables.use_metrics_or_losses == 'metrics'
     gr_loss = grounding_loss(rewards_1[...,0:-1], rewards_2[...,0:-1], scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics)
     if ideal_logits is not None:
-        gr_loss_ideal = grounding_loss(rewards_1_ideal, rewards_2_ideal, scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics)
-    vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics)
+        gr_loss_ideal = grounding_loss(rewards_1_ideal, rewards_2_ideal, scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+    vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
     
-    if use_metrics:
-        metrics_grounding: dict = gr_loss[1]
-        metrics_value_system: dict = vs_loss[1]
-        # join the two dicts
-        metrics = {**metrics_grounding, **metrics_value_system}
-        if ideal_logits is not None:
-            metrics_grounding_ideal: dict = gr_loss_ideal[1]
-            metrics = {**metrics, **{f"{k}_ideal": v for k, v in metrics_grounding_ideal.items()}}
-        vs_loss = vs_loss[0]
-        gr_loss = gr_loss[0]
-        gr_loss_ideal = gr_loss_ideal[0] if ideal_logits is not None else None
+    with th.no_grad():
+        if use_metrics:
+            metrics_grounding: dict = accelerator.gather_for_metrics(gr_loss[1])
+            metrics_value_system: dict = accelerator.gather_for_metrics(vs_loss[1])
+            # join the two dicts
+            metrics = {**metrics_grounding, **metrics_value_system}
+            if ideal_logits is not None:
+                metrics_grounding_ideal: dict = accelerator.gather_for_metrics(gr_loss_ideal[1])
+                metrics = {**metrics, **{f"{k}_ideal": v for k, v in metrics_grounding_ideal.items()}}
+    vs_loss = vs_loss[0]
+    gr_loss = gr_loss[0]
+    gr_loss_ideal = gr_loss_ideal[0] if ideal_logits is not None else None
     if th.is_grad_enabled():
-        training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone(), loss_gr_ideal=gr_loss_ideal.detach().clone() if ideal_logits is not None else None)
+        with th.no_grad():
+            grl = accelerator.gather(gr_loss).detach().clone()
+            vsl = accelerator.gather(vs_loss).detach().clone()
+            grli = accelerator.gather(gr_loss_ideal).detach().clone() if ideal_logits is not None else None
+            training_variables.record_grounding_loss(gr_loss_detached=grl, vs_loss_detached=vsl, gr_loss_ideal_detached=grli)
     if use_metrics:
         assert "representativeness" in metrics.keys() and "coherences" in metrics.keys(), f"Expected metrics to contain 'representativeness' and 'coherences', but got {metrics.keys()}"
         training_variables.record_metrics(metrics)
@@ -362,17 +379,16 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
         return th.cat([gr_loss, vs_loss.reshape(-1)])
 
 
-def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, **kwargs):
+def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, accelerator=None, **kwargs):
     
     #print("OUTPUTS LOGITS SHAPE", outputs.logits.shape, "LABELS SHAPE", labels.shape)
     assert outputs.logits.device == labels.device, "Devices do not match"
     id_logits = getattr(outputs, "ideal_logits", None)
-    return mo_loss_function(outputs.logits, labels, outputs.logits, ideal_logits = id_logits, config=config, training_variables=training_variables, **kwargs)
+    return mo_loss_function(outputs.logits, labels, outputs.logits, ideal_logits = id_logits, config=config, training_variables=training_variables, accelerator=accelerator, **kwargs)
 
 @dataclass
 class SequenceClassifierOutputWithPastAndIdeal(SequenceClassifierOutputWithPast):
     ideal_logits: th.Tensor = None
-    
 
 class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassification):
     base_model_prefix = "full_model"
@@ -385,12 +401,11 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
         training_variables_params = self.training_variables.parameters()
         return iter(list(reward_head_params) + list(value_system_params) + list(training_variables_params))"""
     
+    
+
     def construct_value_layer(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None):
         layers = []
-        if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
-            input_size = base_model.score.in_features
-        else:
-            input_size = base_model.config.hidden_size
+        input_size = self._infer_base_hidden_size(base_model)
         for hidden_size in config.hidden_sizes: 
             layers.append(nn.Linear(input_size, hidden_size, dtype=config.dtype, device=base_model.device))
             if config.value_layer_intermediate_activation == "ReLU":
@@ -421,7 +436,14 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
             raise ValueError(f"Unsupported final activation: {config.value_layer_final_activation}")
 
         # Normalize across value dimensions to keep reward channels on a comparable scale.
-        layers.append(nn.LayerNorm(config.num_values, dtype=config.dtype, device=base_model.device))
+        if config.layer_normalization == 'LayerNorm':
+            layers.append(nn.LayerNorm(config.num_values, dtype=config.dtype, device=base_model.device))
+        elif config.layer_normalization == 'BatchNorm':
+            layers.append(nn.BatchNorm1d(config.num_values, dtype=config.dtype, device=base_model.device))
+        elif config.layer_normalization == 'none':
+            pass
+        else:
+            raise ValueError(f"Unsupported normalization: {config.layer_normalization}")
         return nn.Sequential(*layers)
     
     def to(self, *args, **kwargs):

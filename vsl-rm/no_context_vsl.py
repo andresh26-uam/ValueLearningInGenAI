@@ -82,6 +82,7 @@ class ScriptArguments:
     metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     learning_rate: Optional[float] = field(default=1e-4)
     lambda_decay: Optional[float] = field(default=1e-5)
+    rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer)
     grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO must be > 1e-4 to make any effect??
     lagrange_learning_rate: Optional[float] = field(default=0.0) # TODO 0.01
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.02)
@@ -290,7 +291,8 @@ def main_fun():
                             use_metrics_or_losses_for_lagrange_updates=script_args.use_metrics_or_losses_for_lagrange_updates,
                             grad_on_only_worst_value=script_args.grad_on_only_worst_value,
                             zero_constraint=script_args.zero_constraint,
-                            use_ideal_grounding_model=script_args.use_ideal_grounding_model
+                            use_ideal_grounding_model=script_args.use_ideal_grounding_model,
+                            rew_center_coefficient=script_args.rew_center_coefficient,
                                             )
 
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
@@ -307,7 +309,7 @@ def main_fun():
             
             eval_dataset=dataset.eval_dataset,
             compute_metrics=partial(MORewardTrainer.compute_metrics, training_variables=mo_model.training_variables),
-            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables, accelerator=trainer.accelerator if hasattr(trainer, 'accelerator') else None),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': list(mo_model.reward_heads.parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,

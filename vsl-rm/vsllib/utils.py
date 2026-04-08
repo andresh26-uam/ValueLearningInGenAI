@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 
 from sympy import use
 from torch.nn.parameter import Parameter
-from transformers import AutoTokenizer, DefaultDataCollator, loss
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, loss
 
 
 from transformers.utils import PaddingStrategy
@@ -48,6 +48,31 @@ def fuse_parameters(model):
         i += p.numel()
     return params
 
+def infer_base_hidden_size(self, base_model: AutoModelForSequenceClassification|PreTrainedModel) -> int:
+        # Prefer the task head width if present.
+        if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
+            return int(base_model.score.in_features)
+
+        # Common transformer config names used across model families.
+        cfg = getattr(base_model, "config", None)
+        for attr in ("hidden_size", "d_model", "n_embd", "dim"):
+            value = getattr(cfg, attr, None)
+            if value is not None:
+                return int(value)
+
+        # Final fallback: infer from token embedding width.
+        input_emb = None
+        if hasattr(base_model, "get_input_embeddings"):
+            input_emb = base_model.get_input_embeddings()
+        if input_emb is not None and hasattr(input_emb, "embedding_dim"):
+            return int(input_emb.embedding_dim)
+        if input_emb is not None and hasattr(input_emb, "weight"):
+            return int(input_emb.weight.shape[-1])
+
+        raise ValueError(
+            "Could not infer base model hidden size. Expected one of: score.in_features, "
+            "config.hidden_size/d_model/n_embd/dim, or get_input_embeddings().embedding_dim."
+        )
 
 
 @dataclass
