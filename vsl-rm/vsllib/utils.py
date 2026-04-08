@@ -3,6 +3,7 @@
 from copy import deepcopy
 from dataclasses import dataclass
 from heapq import merge
+import time
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from sympy import use
@@ -17,6 +18,21 @@ import numpy as np
 from triton.language import dtype
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+
+
+def print_tensor_and_grad_fn(grad_fn, level=0):
+    indent = "  " * level
+    if grad_fn is None:
+        return
+    if getattr(grad_fn, 'variable', None) is not None:
+        if grad_fn.variable.requires_grad:
+            print(f"{indent}AccumulateGrad for tensor: {grad_fn.variable.shape}")
+    else:
+        print(f"{indent}Grad function: {grad_fn}")
+        if hasattr(grad_fn, 'next_functions'):
+            for next_fn in grad_fn.next_functions:
+                if next_fn[0] is not None:
+                    print_tensor_and_grad_fn(next_fn[0], level + 1)
 
 def fuse_parameters(model):
     """Move model parameters to a contiguous tensor, and return that tensor."""
@@ -127,10 +143,14 @@ class MORMTrainingVariables(th.nn.Module):
         result: Dict[str, float] = {}
 
 
-        for i in range(len(self.last_accumulated_coherences)):
-            if self.last_accumulated_coherences[i] is not None:
-                result[f"coherence_v{i}"] = to_float(self.last_accumulated_coherences[i])
-
+        if self.last_accumulated_coherences is not None:
+            for i in range(len(self.last_accumulated_coherences)):
+                if self.last_accumulated_coherences[i] is not None:
+                    result[f"coherence_v{i}"] = to_float(self.last_accumulated_coherences[i])
+        if self.last_accumulated_coherences_ideal is not None:
+            for i in range(len(self.last_accumulated_coherences_ideal)):
+                if self.last_accumulated_coherences_ideal[i] is not None:
+                    result[f"coherence_v{i}_ideal"] = to_float(self.last_accumulated_coherences_ideal[i])
         if self.last_accumulated_representativeness is not None:
             result["representativeness"] = to_float(self.last_accumulated_representativeness)
         
@@ -198,6 +218,7 @@ class MORMTrainingVariables(th.nn.Module):
         self.maximum_coherences_tendency: th.Tensor | None = None
 
         self.last_accumulated_grounding_loss: th.Tensor | None = None
+        self.last_accumulated_vs_loss: th.Tensor | None = None
 
         self.last_accumulated_grounding_loss_ideal: th.Tensor | None = None
         self.last_accumulated_coherences_ideal: th.Tensor | None = None
@@ -283,11 +304,7 @@ class MORMTrainingVariables(th.nn.Module):
                 update = self.lagrange_multipliers.data * (1.0 - self.lambda_decay)
                 self.lagrange_multipliers.data = th.clamp(update, min=self.initial_lambda, max=1000.0)
         #self.zero_grad()
-        self.last_accumulated_grounding_loss = None
-        self.last_accumulated_grounding_loss_ideal = None
-        self.last_accumulated_coherences_ideal = None
-        self.last_accumulated_coherences = None
-        self.last_accumulated_representativeness = None
+        
 
     def reset_lagrange_gradients(self) -> None:
         with th.no_grad():
@@ -364,13 +381,14 @@ class MORMTrainingVariables(th.nn.Module):
                 coherences = metrics.get("coherences", None)
                 if coherences is not None:
                     self._cached_coherences.append(coherences)
-                
-                avg_c = metrics.get("avg_coherence", None)
-                if avg_c is not None:
-                    self._cached_avg_coherence.append(avg_c)
+                    
+                    avg_c = metrics.get("avg_coherence", None)
+                    assert avg_c is not None, "Expected 'avg_coherence' in metrics when 'coherences' is present."
+                    if avg_c is not None:
+                        self._cached_avg_coherence.append(avg_c)
                 represent = metrics.get("representativeness", None)     
                 if represent is not None:
-                    self._cached_representativeness.append(metrics.get("representativeness", None))
+                    self._cached_representativeness.append(represent)
                 coherences_ideal = metrics.get("coherences_ideal", None)
                 if coherences_ideal is not None:
                     self._cached_coherences_ideal.append(coherences_ideal)

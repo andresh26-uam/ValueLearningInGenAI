@@ -80,18 +80,18 @@ class ScriptArguments:
     per_device_eval_batch_size: Optional[int] = field(default=32)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    learning_rate: Optional[float] = field(default=1e-5)
+    learning_rate: Optional[float] = field(default=1e-4)
     lambda_decay: Optional[float] = field(default=1e-5)
-    grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO
-    lagrange_learning_rate: Optional[float] = field(default=1e-2)
+    grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO must be > 1e-4 to make any effect??
+    lagrange_learning_rate: Optional[float] = field(default=0.0) # TODO 0.01
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.02)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
-    grad_on_only_worst_value: Optional[bool] = field(default=False)
+    grad_on_only_worst_value: Optional[bool] = field(default=True)
     zero_constraint: Optional[bool] = field(default=True)
     use_ideal_grounding_model : Optional[bool] = field(default=False)
 
 
-    weight_decay: Optional[float] = field(default=0.001)
+    weight_decay: Optional[float] = field(default=0.0001)
     model_name: Optional[str] = field(
         #default="mistralai/Mistral-7B-Instruct-v0.2",
         #default="meta-llama/Llama-3.2-1B",
@@ -136,17 +136,17 @@ class ScriptArguments:
     max_length: Optional[int] = field(default=4096)
 
     save_every_steps: Optional[int] = field(
-        default=20,
+        default=200,
         metadata={"help": "Save the model every x steps"},
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=20,
+        default=50,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
         default=5,
-        metadata={"help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
+        metadata={"help": "Inner optimization iterations for the ideal model."},
     )
     seed: Optional[int] = field(
         default=42,
@@ -230,7 +230,7 @@ training_args = TrainingArguments(
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
     #warmup_ratio=0.03,
-    warmup_steps=50,
+    warmup_steps=0, # TODO. 50?
     label_names=["labels"],
     report_to="wandb", # 'wandb'
     #report_to=None, # 'wandb'
@@ -245,7 +245,7 @@ extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.trai
 
 
 def main_fun():
-    torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float16
+    torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
     model = AutoModelForSequenceClassification.from_pretrained(
         script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
     #

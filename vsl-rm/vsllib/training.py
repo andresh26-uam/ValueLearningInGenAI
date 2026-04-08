@@ -34,7 +34,7 @@ from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
 from vsllib.reward_models import MORMForSequenceClassification, accuracy_logits, accuracy_rewards_labels
-from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, to_float
+from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, print_tensor_and_grad_fn, to_float
 
 
 
@@ -332,6 +332,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
         assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
         assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
+        assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
 
         if loss_gr_ideal is not None:
@@ -341,13 +342,21 @@ class ConstrainedOptimizer(VSLOptimizer):
                     (loss_gr_ideal[i]/loss_sum).backward(retain_graph=True)
                     self.optimx_ideal.step()
                     self.optimx_ideal.zero_grad()
-        
         self.training_variables.requires_grad_(False)
-        assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
+        if self.lr_lambda > 0:
+            
+            assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
         
         #loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
+        #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x])
         loss = loss_vs
+
         loss.backward(**kwargs)
+        
+        #print("GRADIENTS AFTER BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
+        #print("GRADIENTS AFTER BACKWARD - GR PARAMS:", [p.grad for p in x])
+        
         return loss
     def step(self, closure=None)->None:
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
@@ -359,24 +368,28 @@ class ConstrainedOptimizer(VSLOptimizer):
         #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
 
         assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
-       
+        assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
+        #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
+        #print("GRADIENTS BEFORE STEP - GR PARAMS:", [p.grad for p in self.params_gr])
         self.optimx.step()
         self.optimy.step()
         
 
+        self.training_variables.prepare_for_optimizer_step()
         if self.lr_lambda > 0:
-            self.training_variables.prepare_for_optimizer_step()
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
-            
+        
             self.optim_lambdas.step()
-            print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
-            self.training_variables.post_optimizer_step()
+        print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
+        self.training_variables.post_optimizer_step()
 
             
         #self.zero_grad()
-
+        #print("GRADIENTS AFTER STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
+        #print("GRADIENTS AFTER STEP - GR PARAMS:", [p.grad for p in self.params_gr])
+        
         print("LAGRANGE MULTIPLIERS AFTER STEP:", self.training_variables.lagrange_multipliers)
-        #input("...")
+        
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         return None
     
@@ -441,15 +454,19 @@ from accelerate.optimizer import AcceleratedOptimizer
 class MORewardTrainer(Trainer):
 
     training_variables: MORMTrainingVariables
-    
+    model: MORMForSequenceClassification
 
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
-            train_metrics = self.training_variables._collect_train_metrics_for_logging()
+            train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
+            w = self.model.value_system_layer.get_weights()
+            
+            for i in range(self.model.num_values):
+                train_metrics[f"vs_weight_{i}"] = to_float(w[i])
             if train_metrics:
                 for key, value in train_metrics.items():
-                    logs.setdefault(f"train/{key}", value)
+                    logs.setdefault(f"{key}", value) # Train/ is put by default
         #TODO THIS MIGHT NOT WORK
         return super().log(logs, start_time)
 
@@ -525,7 +542,9 @@ class MORewardTrainer(Trainer):
             kidx = jidx + 1
             rewards_1 = eval_pred.predictions[jidx]
             rewards_2 = eval_pred.predictions[kidx]
-            
+            print("REWARDS 1:", rewards_1[0:5, -1])
+            print("REWARDS 2:", rewards_2[0:5, -1])
+            #input("PAUSED")
             labels_1 = eval_pred.label_ids[jidx]
             labels_2 = eval_pred.label_ids[kidx]
 
@@ -652,6 +671,11 @@ class MORewardTrainer(Trainer):
             loss_gr_ideal = None
         
         loss_vs = loss[-1]
+        #print("LOSS GR:", loss_gr)
+        #print("LOSS GR IDEAL:", loss_gr_ideal)
+        #print("LOSS VS:", loss_vs)
+        #print_tensor_and_grad_fn(loss_vs.grad_fn)
+        #exit(0)
 
         optimizer = self.optimizer
         if (isinstance(optimizer, AcceleratedOptimizer) and isinstance(optimizer.optimizer, ConstrainedOptimizer)):

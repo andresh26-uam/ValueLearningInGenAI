@@ -50,6 +50,10 @@ class LinearAlignmentLayer(th.nn.Linear):
             b_bounded = self.bias
         return w_bounded, b_bounded
 
+    def get_weights(self):
+        with th.no_grad():
+            w_bounded, b_bounded = self.get_alignment_layer()
+            return w_bounded.clone().detach().view(-1).cpu().tolist()
     """def copy(self):
         with th.no_grad():
             new = self.__class__(in_features=self.in_features, out_features=self.out_features, bias=self.linear_bias, device=self.weight.device, dtype=self.weight.dtype)
@@ -60,20 +64,22 @@ class LinearAlignmentLayer(th.nn.Linear):
 class ConvexAlignmentLayer(LinearAlignmentLayer):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=th.float16, data=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype, data)
+        self.set_weights([1/self.weight.shape[1] for _ in range(self.weight.shape[1])])
 
     
     def set_weights(self, weights: tuple):
-        # Convert to tensor with same dtype and device as self.weight
-        pure_w = th.tensor(weights, dtype=self.weight.dtype, device=self.weight.device)
-        new_weights = th.log(pure_w+1e-8)
-        # Reshape to match weight shape
-        new_weights = new_weights.view_as(self.weight)
-        # Ensure requires_grad matches previous setting
-        new_weights.requires_grad = self.weight.requires_grad
-        # Update state dict in place
         with th.no_grad():
-            self.weight.copy_(new_weights)
-        assert th.allclose(pure_w, th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)), f"{new_weights} vs {th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)}"
+            # Convert to tensor with same dtype and device as self.weight
+            pure_w = th.tensor(weights, dtype=self.weight.dtype, device=self.weight.device)
+            new_weights = th.log(pure_w+1e-8)
+            # Reshape to match weight shape
+            new_weights = new_weights.view_as(self.weight)
+            # Ensure requires_grad matches previous setting
+            new_weights.requires_grad = self.weight.requires_grad
+            # Update state dict in place
+            self.load_state_dict({'weight': new_weights}, strict=False)
+            
+            assert th.allclose(pure_w, th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)), f"{new_weights} vs {th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)}"
 
     def get_alignment_layer(self):
         w_bounded = th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)
@@ -332,6 +338,7 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
     if th.is_grad_enabled():
         training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone(), loss_gr_ideal=gr_loss_ideal.detach().clone() if ideal_logits is not None else None)
     if use_metrics:
+        assert "representativeness" in metrics.keys() and "coherences" in metrics.keys(), f"Expected metrics to contain 'representativeness' and 'coherences', but got {metrics.keys()}"
         training_variables.record_metrics(metrics)
         
     
