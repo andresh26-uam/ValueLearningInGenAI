@@ -400,6 +400,29 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
         value_system_params = self.value_system_layer.parameters()
         training_variables_params = self.training_variables.parameters()
         return iter(list(reward_head_params) + list(value_system_params) + list(training_variables_params))"""
+
+    def _infer_base_hidden_size(self, base_model: AutoModelForSequenceClassification) -> int:
+        # SequenceClassification wrappers often expose the classifier head input width here.
+        if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
+            return int(base_model.score.in_features)
+
+        cfg = getattr(base_model, "config", None)
+        for attr in ("hidden_size", "d_model", "n_embd", "dim"):
+            value = getattr(cfg, attr, None)
+            if value is not None:
+                return int(value)
+
+        # Last fallback for models with custom configs but standard embedding modules.
+        input_emb = base_model.get_input_embeddings() if hasattr(base_model, "get_input_embeddings") else None
+        if input_emb is not None and hasattr(input_emb, "embedding_dim"):
+            return int(input_emb.embedding_dim)
+        if input_emb is not None and hasattr(input_emb, "weight"):
+            return int(input_emb.weight.shape[-1])
+
+        raise ValueError(
+            "Could not infer hidden size for reward heads. Expected one of: "
+            "score.in_features, config.hidden_size/d_model/n_embd/dim, or input embedding width."
+        )
     
     
 
