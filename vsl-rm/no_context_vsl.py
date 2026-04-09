@@ -10,6 +10,7 @@ from pathlib import Path
 import random
 import sys
 
+USE_CPU = True
 # Make local package imports robust when sbatch executes from a temporary path.
 for candidate in (
     Path(__file__).resolve().parent,
@@ -76,15 +77,18 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=32)
-    per_device_eval_batch_size: Optional[int] = field(default=32)
-    gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    learning_rate: Optional[float] = field(default=1e-4)
+    per_device_train_batch_size: Optional[int] = field(default=64)
+    per_device_eval_batch_size: Optional[int] = field(default=64)
+    gradient_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
+    metrics_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
     lambda_decay: Optional[float] = field(default=1e-5)
-    rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer)
-    grounding_learning_rate: Optional[float] = field(default=1e-5) # TODO must be > 1e-4 to make any effect??
+    rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
+    layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
+
+    learning_rate: Optional[float] = field(default=0.001)
+    grounding_learning_rate: Optional[float] = field(default=0.0001) # TODO must be > 1e-4 to make any effect??
     lagrange_learning_rate: Optional[float] = field(default=0.0) # TODO 0.01
+
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.02)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
     grad_on_only_worst_value: Optional[bool] = field(default=True)
@@ -92,7 +96,7 @@ class ScriptArguments:
     use_ideal_grounding_model : Optional[bool] = field(default=False)
 
 
-    weight_decay: Optional[float] = field(default=0.0001)
+    weight_decay: Optional[float] = field(default=0.000)
     model_name: Optional[str] = field(
         #default="mistralai/Mistral-7B-Instruct-v0.2",
         #default="meta-llama/Llama-3.2-1B",
@@ -108,7 +112,7 @@ class ScriptArguments:
         },
     )
     num_train_epochs: Optional[int] = field(
-        default=1,
+        default=10,
         metadata={"help": "The number of training epochs for the reward model."},
     )
     train_set_path: Optional[str] = field(
@@ -121,28 +125,33 @@ class ScriptArguments:
         metadata={"help": "The dir for output model"},
     )
     gradient_checkpointing: Optional[bool] = field(
-        default=True,
+        default=False,
         metadata={"help": "Enables gradient checkpointing."},
     )
     optim: Optional[str] = field(
         # default="adamw_hf",
-        default="paged_adamw_32bit",
+        default="paged_adamw_32bit" if not USE_CPU else "adamw_torch_fused", # TODO. adamw_torch_fused is much faster on CPU, but causes OOM on GPU for some reason. PagedAdamW_32bit is slower on CPU but works on GPU.
         # default="adamw_torch_fused",
         metadata={"help": "The optimizer to use."},
     )
     lr_scheduler_type: Optional[str] = field(
-        default="cosine",
+        default="cosine", # TODO "cosine" or "linear" or "constant"
         metadata={"help": "The lr scheduler"},
     )
     max_length: Optional[int] = field(default=4096)
 
+    run_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "The name of the run for logging purposes."},
+    )
+
     save_every_steps: Optional[int] = field(
-        default=200,
+        default=20000,
         metadata={"help": "Save the model every x steps"},
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=50,
+        default=100,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -195,6 +204,7 @@ tokenizer.model_max_length = script_args.max_length
 train_path = script_args.train_set_path
 output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
+run_name = script_args.run_name + f"_epo{script_args.num_train_epochs}_s{script_args.seed}" if script_args.run_name is not None else None
 training_args = TrainingArguments(
     output_dir=output_name,
     seed=int(script_args.seed),
@@ -224,8 +234,10 @@ training_args = TrainingArguments(
     warmup_steps=0, # TODO. 50?
     label_names=["labels"],
     report_to="wandb", # 'wandb'
+    max_grad_norm=0.01,
+    run_name = run_name ,
     #report_to=None, # 'wandb'
-    #use_cpu=False,
+    use_cpu=USE_CPU,
 )
 
 #with tempfile.TemporaryDirectory() as tmp:
@@ -262,6 +274,7 @@ def main_fun():
                                        recalculate_embeddings=script_args.recalculate_embeddings,
                                        model_for_embeddings=model,
                                        collator=dc,
+                                       split_seed=int(42),
                                        cleanup_cache_files=bool(script_args.cleanup_dataset_cache_files),
                                        )
     print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
@@ -272,9 +285,10 @@ def main_fun():
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype, 
                                                     lambda_decay=script_args.lambda_decay,
-                                            hidden_sizes=[4096], value_layer_dropout=0.1,
+                                            hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
                                             value_layer_intermediate_activation="SiLU", 
                                             value_layer_final_activation="none",
+                                            layer_normalization=script_args.layer_normalization if hasattr(script_args, "layer_normalization") else "LayerNorm",
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
                                             gradient_accumulation_steps=script_args.gradient_accumulation_steps,
                                             metrics_accumulation_steps=script_args.metrics_accumulation_steps,
@@ -299,7 +313,7 @@ def main_fun():
             
             eval_dataset=dataset.eval_dataset,
             compute_metrics=partial(MORewardTrainer.compute_metrics, training_variables=mo_model.training_variables),
-            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables, accelerator=trainer.accelerator if hasattr(trainer, 'accelerator') else None),
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': list(mo_model.reward_heads.parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,

@@ -3,6 +3,7 @@ from calendar import c
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import inspect
+import os
 from pathlib import Path
 from random import sample
 import shutil
@@ -18,7 +19,7 @@ from rich import constrain
 from sympy import re
 import torch as th
 from torch.nn import Module
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer as Optimizer
 from torch.utils.data import Dataset
 from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, Trainer, loss
@@ -152,7 +153,7 @@ class PairwisePreferenceDataset(Dataset):
             self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), num_proc=16, load_from_cache_file=not retokenize)
         
         if model_for_embeddings is not None and recalculate_embeddings:
-            batch_size = 16
+            batch_size = 4
             #self.data = self.data.select(range(min(1000, len(self.data))))
             with th.no_grad():
                 def _embed_shard(dataset_shard, device):
@@ -183,15 +184,15 @@ class PairwisePreferenceDataset(Dataset):
 
                     self.data = concatenate_datasets(mapped_shards)
                 else:
-                    device = th.device("cuda" if th.cuda.is_available() else "cpu")
-                    model_for_embeddings = model_for_embeddings.to(device)
-                    model_for_embeddings.eval()
-                    self.data = self.data.map(
-                        lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context),
-                        load_from_cache_file=False,
-                        batched=True,
-                        batch_size=batch_size,
-                    )
+                        model_for_embeddings = model_for_embeddings.to(th.device("cpu"))
+                        model_for_embeddings.eval()
+                        self.data = self.data.map(
+                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context),
+                            load_from_cache_file=False,
+                            batched=True,
+                            batch_size=batch_size,
+                            num_proc=4
+                        )
 
         if model_for_embeddings is not None and should_rewrite_embedded_dataset:
             output_path = Path(embedded_dataset_output_path)
@@ -212,7 +213,7 @@ class PairwisePreferenceDataset(Dataset):
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
         self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.02, seed=split_seed)
+        self.train_dataset = self.train_dataset.train_test_split(test_size=0.05, seed=split_seed)
         self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
     def __len__(self):
@@ -349,13 +350,14 @@ class ConstrainedOptimizer(VSLOptimizer):
         
         #loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
         #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
-        #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x])
+        #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
+        loss_gr = loss_gr.detach()
         loss = loss_vs
 
         loss.backward(**kwargs)
         
         #print("GRADIENTS AFTER BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
-        #print("GRADIENTS AFTER BACKWARD - GR PARAMS:", [p.grad for p in x])
+        #print("GRADIENTS AFTER BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
         
         return loss
     def step(self, closure=None)->None:
@@ -450,13 +452,18 @@ class ConstrainedLRScheduler:
         self.optimy = self.sub_optimizer_class(params_vs, lr=self.lr_value_system, **self.optimizer_kwargs)"""
 
 from accelerate.optimizer import AcceleratedOptimizer
+from accelerate import Accelerator
 
 class MORewardTrainer(Trainer):
 
     
     training_variables: MORMTrainingVariables
     model: MORMForSequenceClassification
+    accelerator: Accelerator
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.compute_loss_func = partial(self.compute_loss_func, accelerator=self.accelerator, training_variables=self.model.training_variables)
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
@@ -660,6 +667,7 @@ class MORewardTrainer(Trainer):
             self.accelerator.lomo_backward(loss, learning_rate)
         
         l=loss.shape[0]
+        assert l > 1
         assert l % 2 == 1, f"Expected odd number of rewards in loss tensor (num_values, num_values, 1), got {l}. Make sure your data collator is correctly collating pairs of samples with their labels."
         if l == self.model.num_values*2 +1: 
             loss_gr = loss[0:l//2]

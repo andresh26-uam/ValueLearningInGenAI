@@ -149,11 +149,13 @@ class MORewardDataCollatorWithPadding:
             "labels": batch["labels"],
             "embeddings": batch["embedding"].to(dtype=self.dtype) if "embedding" in batch else None,
             "context_embedding": batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch else None,
+            
             #"labels": th.cat([th.as_tensor(np.array(f['labels'], dtype=np.float16), dtype=th.float16) for f in features], dim=0).to(batch["input_ids"].device),
 			#"score": th.tensor([f.get("score", 0.0) for f in merged_features], dtype=th.float32),
 			#"value_ratings": [f.get("value_ratings", {}) for f in merged_features],
             "return_loss": True,
         }
+        
 
         """if 'embedding_1' in features[0] and 'embedding_2' in features[0]:
             batch["embedding_1"] = th.tensor([f["embedding_1"] for f in features]).to(batch["input_ids"].device, dtype=th.float16)
@@ -319,8 +321,6 @@ class MORMTrainingVariables(th.nn.Module):
                 worst_vi = th.argmin(-coeff).item()
                 coeff = coeff * th.nn.functional.one_hot(th.tensor(worst_vi, device=coeff.device), num_classes=coeff.shape[0])*self.lagrange_multipliers.shape[0]
                 print("WORST VI", worst_vi)
-                print("ONE HOT", th.nn.functional.one_hot(th.tensor(worst_vi, device=coeff.device), num_classes=coeff.shape[0]))
-                print("COEFF AFTER ONE HOT", coeff)
 
             grad = th.clamp(-coeff, max=0.0, min=-1000.0)
             
@@ -414,7 +414,7 @@ class MORMTrainingVariables(th.nn.Module):
                     if len(self._cached_coherences_ideal) > 0:
                         self._cached_coherences_ideal.pop(0)
                     self._cached_representativeness.pop(0)
-
+                
                 coherences = metrics.get("coherences", None)
                 if coherences is not None:
                     self._cached_coherences.append(coherences)
@@ -430,7 +430,7 @@ class MORMTrainingVariables(th.nn.Module):
                 if coherences_ideal is not None:
                     self._cached_coherences_ideal.append(coherences_ideal)
 
-    def record_grounding_loss(self, gr_loss_detached: th.Tensor, vs_loss_detached: th.Tensor, loss_gr_ideal=None) -> None:
+    def record_grounding_loss(self, gr_loss_detached: th.Tensor, vs_loss_detached: th.Tensor, gr_loss_ideal_detached=None) -> None:
         with th.no_grad():
             
             # This estimates the minimum obtainable loss for each value. The optimizer will take this into account
@@ -442,7 +442,7 @@ class MORMTrainingVariables(th.nn.Module):
                 self._cached_vs_losses.pop(0)
             self._cached_groundings.append(gr_loss_detached)
             self._cached_vs_losses.append(vs_loss_detached)
-            if loss_gr_ideal is not None:
-                self._cached_groundings_ideal.append(loss_gr_ideal)
+            if gr_loss_ideal_detached is not None:
+                self._cached_groundings_ideal.append(gr_loss_ideal_detached)
 
             
