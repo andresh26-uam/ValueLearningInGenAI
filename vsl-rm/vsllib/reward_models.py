@@ -55,7 +55,7 @@ class LinearAlignmentLayer(th.nn.Linear):
     def get_weights(self):
         with th.no_grad():
             w_bounded, b_bounded = self.get_alignment_layer()
-            return w_bounded.clone().detach().view(-1).cpu().tolist()
+            return w_bounded.detach().clone().view(-1).cpu().tolist()
     """def copy(self):
         with th.no_grad():
             new = self.__class__(in_features=self.in_features, out_features=self.out_features, bias=self.linear_bias, device=self.weight.device, dtype=self.weight.dtype)

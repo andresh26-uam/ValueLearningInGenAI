@@ -348,11 +348,11 @@ class ConstrainedOptimizer(VSLOptimizer):
             
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
         
-        #loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
         #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
         #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
-        loss_gr = loss_gr.detach()
-        loss = loss_vs
+        #loss_gr = loss_gr.detach()
+        #loss = loss_vs
 
         loss.backward(**kwargs)
         

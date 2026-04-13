@@ -77,19 +77,19 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=64)
-    per_device_eval_batch_size: Optional[int] = field(default=64)
-    gradient_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
-    metrics_accumulation_steps: Optional[int] = field(default=2) # TODO 32?
-    lambda_decay: Optional[float] = field(default=1e-5)
+    per_device_train_batch_size: Optional[int] = field(default=128)
+    per_device_eval_batch_size: Optional[int] = field(default=128)
+    gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
+    metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
+    lambda_decay: Optional[float] = field(default=1e-6)
     rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
 
-    learning_rate: Optional[float] = field(default=0.001)
-    grounding_learning_rate: Optional[float] = field(default=0.0001) # TODO must be > 1e-4 to make any effect??
-    lagrange_learning_rate: Optional[float] = field(default=0.0) # TODO 0.01
+    learning_rate: Optional[float] = field(default=0.002)
+    grounding_learning_rate: Optional[float] = field(default=0.002) # TODO must be > 1e-4 to make any effect??
+    lagrange_learning_rate: Optional[float] = field(default=0.05) # TODO 0.01
 
-    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.02)
+    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
     grad_on_only_worst_value: Optional[bool] = field(default=True)
     zero_constraint: Optional[bool] = field(default=True)
@@ -112,7 +112,7 @@ class ScriptArguments:
         },
     )
     num_train_epochs: Optional[int] = field(
-        default=10,
+        default=50,
         metadata={"help": "The number of training epochs for the reward model."},
     )
     train_set_path: Optional[str] = field(
@@ -125,7 +125,7 @@ class ScriptArguments:
         metadata={"help": "The dir for output model"},
     )
     gradient_checkpointing: Optional[bool] = field(
-        default=False,
+        default=True,
         metadata={"help": "Enables gradient checkpointing."},
     )
     optim: Optional[str] = field(
@@ -151,7 +151,7 @@ class ScriptArguments:
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=100,
+        default=200,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -247,7 +247,7 @@ training_args = TrainingArguments(
 extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
 
 
-def main_fun():
+def main_fun() -> None:
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
     model = AutoModelForSequenceClassification.from_pretrained(
         script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
