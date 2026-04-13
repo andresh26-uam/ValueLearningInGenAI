@@ -82,12 +82,12 @@ class ScriptArguments:
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     lambda_decay: Optional[float] = field(default=1e-6)
-    rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
+    rew_center_coefficient: Optional[float] = field(default=0.00) # TODO Recommended by TRL library (RewardTrainer): 0.01
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
 
-    learning_rate: Optional[float] = field(default=0.002)
-    grounding_learning_rate: Optional[float] = field(default=0.002) # TODO must be > 1e-4 to make any effect??
-    lagrange_learning_rate: Optional[float] = field(default=0.05) # TODO 0.01
+    learning_rate: Optional[float] = field(default=0.000)
+    grounding_learning_rate: Optional[float] = field(default=0.000) # TODO must be > 1e-4 to make any effect??
+    lagrange_learning_rate: Optional[float] = field(default=0.0) # TODO 0.01
 
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
@@ -97,12 +97,26 @@ class ScriptArguments:
 
 
     weight_decay: Optional[float] = field(default=0.000)
+    use_frozen_base_model: Optional[bool] = field(
+        default=True,
+        metadata={"help": "If True, use the base model's existing reward heads without adding new layers. Useful for models like ArmoRM."},
+    )
+    base_model_reward_head_indices: Optional[str] = field(
+        default=None,
+        metadata={"help": "Comma-separated indices of reward heads to use from base model (e.g., '0,1,2,3,4'). If None, uses all available."},
+    )
+    base_model_reward_heads_module_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Name of the module in base model containing reward heads. Auto-detected if None."},
+    )
+    base_model_value_system_module_name: Optional[str] = field(
+        default=None,
+        metadata={"help": "Name of the module in base model containing value system. Auto-detected if None."},
+    )
     model_name: Optional[str] = field(
-        #default="mistralai/Mistral-7B-Instruct-v0.2",
-        #default="meta-llama/Llama-3.2-1B",
-        default="HuggingFaceTB/SmolLM-135M-Instruct",
+        default="RLHFlow/ArmoRM-Llama3-8B-v0.1",
         metadata={
-            "help": "The model that you want to train from the Hugging Face hub. E.g. gpt2, gpt2-xl, bert, etc."
+            "help": "The model that you want to train from the Hugging Face hub. Use ArmoRM for frozen reward model evaluation."
         },
     )
     bf16: Optional[bool] = field(
@@ -247,19 +261,76 @@ training_args = TrainingArguments(
 extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
 
 
+def detect_armo_rm_modules(model):
+    """
+    Detect ArmoRM module names for reward heads and value system layer.
+    Returns: (reward_heads_module_name, value_system_module_name)
+    """
+    # Common ArmoRM module naming patterns
+    reward_heads_candidates = ['reward_heads', 'multi_obj_heads', 'rewards_head', 'reward_head']
+    value_system_candidates = ['gating_layer', 'value_system_layer', 'gating', 'score_layer']
+    
+    model_modules = dict(model.named_modules())
+    
+    # Find reward heads module
+    reward_heads_module_name = None
+    for candidate in reward_heads_candidates:
+        if candidate in model_modules:
+            reward_heads_module_name = candidate
+            print(f"Found reward heads module: {reward_heads_module_name}")
+            break
+    
+    # If not found, try to find it by checking for modules with specific attributes
+    if not reward_heads_module_name:
+        for name, module in model.named_modules():
+            if hasattr(module, 'forward') and 'reward' in name.lower():
+                reward_heads_module_name = name
+                print(f"Found reward heads module by name search: {reward_heads_module_name}")
+                break
+    
+    # Find value system (gating) module
+    value_system_module_name = None
+    for candidate in value_system_candidates:
+        if candidate in model_modules:
+            value_system_module_name = candidate
+            print(f"Found value system module: {value_system_module_name}")
+            break
+    
+    # If not found, try to find it by checking for modules with specific attributes
+    if not value_system_module_name:
+        for name, module in model.named_modules():
+            if hasattr(module, 'forward') and ('gating' in name.lower() or 'value_system' in name.lower()):
+                value_system_module_name = name
+                print(f"Found value system module by name search: {value_system_module_name}")
+                break
+    
+    return reward_heads_module_name, value_system_module_name
+
+
 def main_fun() -> None:
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
-    model = AutoModelForSequenceClassification.from_pretrained(
-        script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
-    #
-    # send model to a gpu if available
     
-
+    # Load base model with trust_remote_code for models like ArmoRM
+    model_kwargs = dict(torch_dtype=torch_dtype, trust_remote_code=True)
+    if script_args.use_frozen_base_model:
+        # For models like ArmoRM that have built-in reward structure
+        model = AutoModelForSequenceClassification.from_pretrained(
+            script_args.model_name, **model_kwargs)
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            script_args.model_name, num_labels=1, **model_kwargs).base_model
+    
+    # For non-frozen models, get base model; for frozen models, use as-is
+    if not script_args.use_frozen_base_model and hasattr(model, 'base_model'):
+        model = model.base_model
+    
+    # Configure model
     model.config.use_cache = not script_args.gradient_checkpointing
     if getattr(tokenizer, 'pad_token_id', None) is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
     model.config.pad_token_id = tokenizer.pad_token_id
-    model.resize_token_embeddings(len(tokenizer))
+    if hasattr(model, 'resize_token_embeddings'):
+        model.resize_token_embeddings(len(tokenizer))
     pad_token_id = model.config.pad_token_id
 
     dc = MORewardDataCollatorWithPadding(
@@ -271,7 +342,7 @@ def main_fun() -> None:
                                        from_disk=True, 
                                        extra_keep_keys=extra_keep_keys, 
                                        retokenize=script_args.retokenize,
-                                       recalculate_embeddings=script_args.recalculate_embeddings,
+                                       recalculate_embeddings=False,
                                        model_for_embeddings=model,
                                        collator=dc,
                                        split_seed=int(42),
@@ -281,8 +352,30 @@ def main_fun() -> None:
     #exit(0)
     original_columns = dataset.data.column_names
     
+    # Detect ArmoRM module names if using frozen base model
+    reward_heads_module_name = script_args.base_model_reward_heads_module_name
+    value_system_module_name = script_args.base_model_value_system_module_name
+    reward_head_indices = None
+    
+    if script_args.use_frozen_base_model:
+        if not reward_heads_module_name or not value_system_module_name:
+            reward_heads_module_name, value_system_module_name = detect_armo_rm_modules(model)
+        
+        # Parse reward head indices if provided
+        if script_args.base_model_reward_head_indices:
+            try:
+                reward_head_indices = [int(i.strip()) for i in script_args.base_model_reward_head_indices.split(',')]
+                print(f"Using reward head indices: {reward_head_indices}")
+                # Update num_values based on selected indices
+                num_values_to_use = len(reward_head_indices)
+            except ValueError as e:
+                print(f"Error parsing base_model_reward_head_indices: {e}")
+                raise
+        
+    else:
+        num_values_to_use = len(dataset.value_keys)
 
-    mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
+    mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=num_values_to_use,
                                                     dtype=torch_dtype, 
                                                     lambda_decay=script_args.lambda_decay,
                                             hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
@@ -297,6 +390,10 @@ def main_fun() -> None:
                             zero_constraint=script_args.zero_constraint,
                             use_ideal_grounding_model=script_args.use_ideal_grounding_model,
                             rew_center_coefficient=script_args.rew_center_coefficient,
+                            use_base_model_heads=script_args.use_frozen_base_model,
+                            base_model_reward_heads_module_name=reward_heads_module_name if script_args.use_frozen_base_model else None,
+                            base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
+                            base_model_reward_head_indices=reward_head_indices,
                                             )
 
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)

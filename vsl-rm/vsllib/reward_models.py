@@ -120,6 +120,10 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         lambda_decay: float = 0.0,
         use_ideal_grounding_model: bool = False,
         dtype: th.Type = th.float16,
+        use_base_model_heads: bool = False,
+        base_model_reward_heads_module_name: str = None,
+        base_model_value_system_module_name: str = None,
+        base_model_reward_head_indices: list = None,
         **kwargs,
     ):
         assert num_values > 0, "num_values must be greater than 0"
@@ -162,7 +166,11 @@ class MORMForSequenceClassificationConfig(PreTrainedConfig):
         self.dtype = dtype
         self.lambda_decay = lambda_decay
         self.use_ideal_grounding_model = use_ideal_grounding_model
-        self.layer_normalization = layer_normalization  
+        self.layer_normalization = layer_normalization
+        self.use_base_model_heads = use_base_model_heads
+        self.base_model_reward_heads_module_name = base_model_reward_heads_module_name
+        self.base_model_value_system_module_name = base_model_value_system_module_name
+        self.base_model_reward_head_indices = base_model_reward_head_indices if base_model_reward_head_indices is not None else list(range(num_values))  
 
 def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, epsilon=1.0e-2, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
     logits = logits_BT(reward1, reward2, threshold=threshold, check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
@@ -428,6 +436,19 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
         if self.use_ideal_grounding_model:
             yield from self.reward_heads_ideal.parameters(recurse=recurse)
 
+    def _extract_reward_heads_by_index(self, base_reward_heads, indices: list):
+        """
+        Extract reward heads at specified indices from the base model.
+        Handles both nn.ModuleList and other container types.
+        """
+        if isinstance(base_reward_heads, nn.ModuleList):
+            extracted = nn.ModuleList([base_reward_heads[i] for i in indices])
+        elif hasattr(base_reward_heads, '__getitem__'):
+            extracted = nn.ModuleList([base_reward_heads[i] for i in indices])
+        else:
+            raise ValueError(f"Cannot extract indices from reward heads of type {type(base_reward_heads)}")
+        return extracted
+
     def _infer_base_hidden_size(self, base_model: AutoModelForSequenceClassification) -> int:
         # SequenceClassification wrappers often expose the classifier head input width here.
         if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
@@ -507,10 +528,13 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
-        self.reward_heads = self.reward_heads.to(*args, **kwargs)
-        if self.use_ideal_grounding_model:
-            self.reward_heads_ideal = self.reward_heads_ideal.to(*args, **kwargs)
-        self.value_system_layer = self.value_system_layer.to(*args, **kwargs)
+        if not self.use_base_model_heads:
+            if self.reward_heads is not None:
+                self.reward_heads = self.reward_heads.to(*args, **kwargs)
+            if self.use_ideal_grounding_model and self.reward_heads_ideal is not None:
+                self.reward_heads_ideal = self.reward_heads_ideal.to(*args, **kwargs)
+            if self.value_system_layer is not None:
+                self.value_system_layer = self.value_system_layer.to(*args, **kwargs)
         self.training_variables = self.training_variables.to(*args, **kwargs)
         return self
     
@@ -522,14 +546,48 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         super().__init__(config)
         
-        self.reward_heads = self.construct_reward_head(config, base_model)
-        if config.use_ideal_grounding_model:
-            self.reward_heads_ideal = self.construct_reward_head(config, base_model)
         self.full_model = base_model
         self.supports_gradient_checkpointing = hasattr(self.full_model, "gradient_checkpointing_enable")
-        self.value_system_layer = ConvexAlignmentLayer(config.num_values, 1, device=self.full_model.device, dtype=self.full_model.dtype)
         self.num_values = config.num_values
         self.use_ideal_grounding_model = config.use_ideal_grounding_model
+        self.use_base_model_heads = getattr(config, 'use_base_model_heads', False)
+        self.base_model_reward_head_indices = getattr(config, 'base_model_reward_head_indices', None)
+        
+        # If using base model's existing heads (e.g., ArmoRM), extract them
+        if self.use_base_model_heads:
+            # Extract reward heads from base model using module name
+            reward_heads_module_name = getattr(config, 'base_model_reward_heads_module_name', None)
+            value_system_module_name = getattr(config, 'base_model_value_system_module_name', None)
+            reward_head_indices = self.base_model_reward_head_indices
+            
+            if reward_heads_module_name and hasattr(self.full_model, reward_heads_module_name):
+                base_reward_heads = getattr(self.full_model, reward_heads_module_name)
+                # Extract only specified indices if provided
+                if reward_head_indices is not None and len(reward_head_indices) > 0:
+                    self.reward_heads = self._extract_reward_heads_by_index(base_reward_heads, reward_head_indices)
+                    print(f"Using base model's reward heads from module '{reward_heads_module_name}' with indices: {reward_head_indices}")
+                else:
+                    self.reward_heads = base_reward_heads
+                    print(f"Using base model's reward heads from module: {reward_heads_module_name}")
+            else:
+                raise ValueError(f"use_base_model_heads=True but could not find reward heads module: {reward_heads_module_name}")
+            
+            if value_system_module_name and hasattr(self.full_model, value_system_module_name):
+                self.value_system_layer = getattr(self.full_model, value_system_module_name)
+                print(f"Using base model's value system from module: {value_system_module_name}")
+            else:
+                # Value system is optional
+                self.value_system_layer = None
+                if value_system_module_name:
+                    print(f"Warning: Could not find value system module: {value_system_module_name}. Setting to None.")
+            
+            self.reward_heads_ideal = None
+        else:
+            self.reward_heads = self.construct_reward_head(config, base_model)
+            if config.use_ideal_grounding_model:
+                self.reward_heads_ideal = self.construct_reward_head(config, base_model)
+            self.value_system_layer = ConvexAlignmentLayer(config.num_values, 1, device=self.full_model.device, dtype=self.full_model.dtype)
+            self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
 
         self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
             device=self.full_model.device, dtype=config.dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio, 
@@ -589,24 +647,35 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
         # This is used inside the GenericForSequenceClassification forward method.
         assert hidden_state.dtype == self.reward_heads_ideal.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads_ideal.reference_weight().dtype}, but got {hidden_state.dtype}"
         rewards = self.reward_heads_ideal(hidden_state)
-        vs_reward = self.value_system_layer.forward(rewards)
-
         
-        all_rewards = th.cat([rewards, vs_reward], dim=-1)
-        #assert all_rewards.shape[-1] == self.config.num_labels, f"Expected rewards shape to have last dimension {self.config.num_labels}, but got {rewards.shape}"
-        
+        if self.value_system_layer is not None:
+            vs_reward = self.value_system_layer.forward(rewards)
+            all_rewards = th.cat([rewards, vs_reward], dim=-1)
+        else:
+            all_rewards = rewards
         return all_rewards
     
     def score_normal(self, hidden_state):
         # This is used inside the GenericForSequenceClassification forward method.
-        assert hidden_state.dtype == self.reward_heads.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads.reference_weight().dtype}, but got {hidden_state.dtype}"
+        if self.use_base_model_heads:
+            # For base model heads, call the module directly
+            if self.reward_heads is not None:
+                return self.reward_heads(hidden_state)
+            else:
+                return hidden_state
+        
+        if self.reward_heads is None:
+            return hidden_state
+            
+        if hasattr(self.reward_heads, 'reference_weight'):
+            assert hidden_state.dtype == self.reward_heads.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads.reference_weight().dtype}, but got {hidden_state.dtype}"
         rewards = self.reward_heads(hidden_state)
-        vs_reward = self.value_system_layer.forward(rewards)
-
         
-        all_rewards = th.cat([rewards, vs_reward], dim=-1)
-        #assert all_rewards.shape[-1] == self.config.num_labels, f"Expected rewards shape to have last dimension {self.config.num_labels}, but got {rewards.shape}"
-        
+        if self.value_system_layer is not None:
+            vs_reward = self.value_system_layer.forward(rewards)
+            all_rewards = th.cat([rewards, vs_reward], dim=-1)
+        else:
+            all_rewards = rewards
         return all_rewards
 
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -620,10 +689,8 @@ class MORMForSequenceClassification(PreTrainedModel, GenericForSequenceClassific
     def forward(self, *args, **kwargs):
         self.score = self.score_normal
         if 'embeddings' in kwargs:
-            
             # If embeddings are provided, bypass the base model and directly compute rewards from embeddings.
             embeddings = kwargs.pop('embeddings')
-            
             all_rewards = self.score(embeddings)
             if self.forward_ideal_grounding:
                 grounding_ideal = self.reward_heads_ideal(embeddings)
