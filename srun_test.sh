@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
-#SBATCH --mem-per-gpu=24G
-#SBATCH --cpus-per-gpu=1
-#SBATCH --mincpus=1
-#SBATCH --gpus=1
+#SBATC_ --cpus-per-gpu=1
+#SBATC_ --mincpus=1
+#SBATCH --gpus=L40S:1
 
-#SRUN --job-name=ValueLearningInGenAI
-#SRUN --chdir=/home/aholg/ValueLearningInGenAI
-#SRUN --mem-per-gpu=24G
-#SRUN --cpus-per-gpu=1
-#SRUN --mincpus=1
-#SRUN --gpus=2
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

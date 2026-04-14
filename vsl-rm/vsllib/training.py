@@ -1,36 +1,25 @@
 from abc import abstractmethod
-from calendar import c
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-import inspect
-import os
 from pathlib import Path
-from random import sample
 import shutil
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from uuid import uuid4
-from click import File
 from datasets.arrow_dataset import Dataset
 from matplotlib.pylab import dtype
-from networkx import constraint
 import numpy as np
-from pyarrow import dataset
-from rich import constrain
-from sympy import re
 import torch as th
-from torch.nn import Module
 from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer as Optimizer
 from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, Trainer, loss
+from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer
 
 from transformers.trainer import *
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.optimization import get_scheduler
 from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
-from dataclasses import dataclass
-from transformers.utils.generic import PaddingStrategy
+
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
@@ -330,10 +319,12 @@ class ConstrainedOptimizer(VSLOptimizer):
         # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
         
         #print("BEFORE", x[0].data[0:10])
-        assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
-        assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
-        assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
-        assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
+        if len(w) > 0:
+            assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
+            assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
+        if len(x) > 0:
+            assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
+            #assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
 
         if loss_gr_ideal is not None:
@@ -368,13 +359,18 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.time += 1
         #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
         #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
-
-        assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
-        assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
-        #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
+        if self.lr_grounding > 0.0: 
+            assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
+        
+        if self.lr_value_system > 0.0:
+            assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
+            #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
         #print("GRADIENTS BEFORE STEP - GR PARAMS:", [p.grad for p in self.params_gr])
-        self.optimx.step()
-        self.optimy.step()
+            
+        if self.lr_grounding > 0.0:
+            self.optimx.step()
+        if self.optimy is not None and self.lr_value_system > 0.0:
+                self.optimy.step()
         
 
         self.training_variables.prepare_for_optimizer_step()

@@ -4,20 +4,16 @@ from copy import deepcopy
 from dataclasses import dataclass
 from heapq import merge
 import json
-import time
 import os
 from typing import Any, Dict, List, Literal, Optional, Union
 
-from sympy import use
-from torch.nn.parameter import Parameter
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, Trainer, loss
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, Trainer
 
 
 from transformers.utils import PaddingStrategy
 
 import torch as th
 import numpy as np
-from triton.language import dtype
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
@@ -92,6 +88,7 @@ class MORewardDataCollatorWithPadding:
     tokenizer: PreTrainedTokenizerBase
     padding: Union[bool, str, PaddingStrategy] = True
     max_length: Optional[int] = None
+    use_embeddings: bool = False
     pad_to_multiple_of: Optional[int] = 16
     return_tensors: str = "pt"
     dtype: Optional[th.dtype] = None
@@ -100,30 +97,34 @@ class MORewardDataCollatorWithPadding:
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
         merged_features = []
 
+
         for feature in features:
             pair_labels = feature["labels"]
-            c = feature.get("context_embedding", None)
-            merged_features.append(
-                {
+            c = feature.get("context_embedding", None) if self.use_embeddings else None
+            dic1 = {
                     "input_ids": feature["input_ids_1"],
                     "attention_mask": feature["attention_mask_1"],
-                    "embedding": feature.get("embedding_1", None),
-                    "context_embedding": c,
                     "labels": pair_labels[0],
                 }
-            )
-            
-            merged_features.append(
-                {
+            dic2 = {
                     "input_ids": feature["input_ids_2"],
                     "attention_mask": feature["attention_mask_2"],
-                    "embedding": feature.get("embedding_2", None),
-                    "context_embedding": c,
                     "labels": pair_labels[1],
                 }
+            if self.use_embeddings:
+                dic1["embedding"] = feature.get("embedding_1", None)
+                dic1["context_embedding"] = c
+                dic2["embedding"] = feature.get("embedding_2", None)
+                dic2["context_embedding"] = c
+            merged_features.append(
+                dic1
             )
-        if __debug__:
-            embed_before = th.tensor(merged_features[0].get("embedding", None))
+                
+            merged_features.append(
+                dic2
+            )
+        """if __debug__:
+            embed_before = th.tensor(merged_features[0].get("embedding", None))"""
 
         batch = self.tokenizer.pad(
             merged_features,
@@ -133,13 +134,13 @@ class MORewardDataCollatorWithPadding:
             return_tensors=self.return_tensors,
             
         )
-        if __debug__:
+        """if __debug__:
             embed_after = batch.get("embedding", None)[0]
             th.testing.assert_close(embed_before, embed_after, atol=1e-6, rtol=1e-6)
-        
+        """
         #print(batch.keys())
-        assert "embedding" in batch, "Expected 'embedding' key in the batch after padding."
-        assert "context_embedding" in batch, "Expected 'context_embedding' key in the batch after padding."
+        #assert "embedding" in batch, "Expected 'embedding' key in the batch after padding."
+        #assert "context_embedding" in batch, "Expected 'context_embedding' key in the batch after padding."
 
         
         assert batch["input_ids"].shape[:-1] == batch["labels"].shape[:-1], f"Input IDs shape: {batch['input_ids'].shape}, Labels shape: {batch['labels'].shape}"
@@ -147,22 +148,12 @@ class MORewardDataCollatorWithPadding:
             "input_ids": batch["input_ids"],
             "attention_mask": batch["attention_mask"],
             "labels": batch["labels"],
-            "embeddings": batch["embedding"].to(dtype=self.dtype) if "embedding" in batch else None,
-            "context_embedding": batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch else None,
-            
-            #"labels": th.cat([th.as_tensor(np.array(f['labels'], dtype=np.float16), dtype=th.float16) for f in features], dim=0).to(batch["input_ids"].device),
-			#"score": th.tensor([f.get("score", 0.0) for f in merged_features], dtype=th.float32),
-			#"value_ratings": [f.get("value_ratings", {}) for f in merged_features],
-            "return_loss": True,
+            "return_loss": True, 
         }
+        batch["embeddings"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch else None,
+        batch["context_embedding"] = batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch else None,
+            
         
-
-        """if 'embedding_1' in features[0] and 'embedding_2' in features[0]:
-            batch["embedding_1"] = th.tensor([f["embedding_1"] for f in features]).to(batch["input_ids"].device, dtype=th.float16)
-            batch["embedding_2"] = th.tensor([f["embedding_2"] for f in features]).to(batch["input_ids"].device, dtype=th.float16)
-        if 'context_embedding' in features[0]:
-            batch["context_embedding"] = th.tensor([f["context_embedding"] for f in features]).to(batch["input_ids"].device)
-    """
         return batch
 
 def to_float(value: Any) -> float:
@@ -296,7 +287,7 @@ class MORMTrainingVariables(th.nn.Module):
                 # Use metrics for the optimizer step
                 gr_ideal_diff = -(self.last_accumulated_coherences - self.maximum_coherences_tendency).detach()
                 
-                coeff = gr_ideal_diff / lag_sum
+                coeff = gr_ideal_diff.to(device=lag_sum.device) / lag_sum
                 
                 
             elif self.use_metrics_or_losses == 'losses':
@@ -305,7 +296,7 @@ class MORMTrainingVariables(th.nn.Module):
                 # This is the derivative w.r.t. lambda of "1/(1+lambda) * (lambda(gr_loss - gr_ideal) + vs_loss)".
                 #should be...? 1) forward = self.forward(grounding_losses=gr_ideal_diff, vs_losses=self.last_accumulated_vs_loss)
                 #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
-                coeff = gr_ideal_diff / lag_sum
+                coeff = gr_ideal_diff.to(device=lag_sum.device)  / lag_sum
                 # Use losses for the optimizer step
                 
             
@@ -363,29 +354,29 @@ class MORMTrainingVariables(th.nn.Module):
 
     def update_metrics_tendencies(self) -> None:
         with th.no_grad():
-            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone()
+            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
             
-            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach().clone().item()
+            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach().clone().cpu().item()
 
             coherence_target =  self.last_accumulated_coherences
             if len(self._cached_coherences_ideal) > 0:
-                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone()
+                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
 
                 coherence_target = th.maximum(self.last_accumulated_coherences, self.last_accumulated_coherences_ideal)
             if self.maximum_coherences_tendency is None:
                 self.maximum_coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
             else:
                 maximum = th.maximum(coherence_target, self.maximum_coherences_tendency)
-                self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone()
+                self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone().cpu()
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
         
         with th.no_grad():
-            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone()
+            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
             if len(self._cached_groundings_ideal) > 0:
-                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone()
+                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
             else:
-                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.clone()
-            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach().clone().item()
+                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach().clone().cpu()
+            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach().clone().cpu().item()
 
             minimum_actual = th.minimum(self.last_accumulated_grounding_loss, self.last_accumulated_grounding_loss_ideal).detach().clone()
             assert self.last_accumulated_grounding_loss.shape == self.lagrange_multipliers.shape, f"Last accumulated grounding loss shape: {self.last_accumulated_grounding_loss.shape}, Lagrange multipliers shape: {self.lagrange_multipliers.shape}"
@@ -394,7 +385,7 @@ class MORMTrainingVariables(th.nn.Module):
             else:
                 minimum = th.minimum(minimum_actual, self.minimum_grounding_loss_tendency)
 
-                self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone()
+                self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone().cpu()
                 assert self.minimum_grounding_loss_tendency.shape == self.last_accumulated_grounding_loss.shape, f"Grounding loss tendency shape: {self.minimum_grounding_loss_tendency.shape}, Last grounding loss shape: {self.last_accumulated_grounding_loss.shape}"
             
     def record_metrics(self, metrics: Dict[str, float|list], metric_type: Literal["train", "validation"] = "train") -> None:
@@ -445,4 +436,5 @@ class MORMTrainingVariables(th.nn.Module):
             if gr_loss_ideal_detached is not None:
                 self._cached_groundings_ideal.append(gr_loss_ideal_detached)
 
-            
+
+

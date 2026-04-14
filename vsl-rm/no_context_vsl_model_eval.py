@@ -21,6 +21,7 @@ for candidate in (
         sys.path.insert(0, str(candidate))
         break
 
+from sympy import use
 from transformers.utils import PaddingStrategy
 
 from typing import Any, Dict, List, Optional, Union
@@ -44,7 +45,7 @@ from transformers import (
 )
 
 
-from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
+from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH, VALUE_SYSTEM_OUTPUT
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
@@ -66,6 +67,9 @@ class ScriptArguments:
 		default=False, metadata={"help": "Whether to retokenize the dataset. Set this to False if you have already tokenized and saved the dataset to disk, and just want to load it."})
     recalculate_embeddings: Optional[bool] = field(
         default=False, metadata={"help": "Whether to recalculate embeddings for the dataset."})
+    use_embeddings: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to use embeddings for the dataset."})
+    
     save_embedded_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
@@ -77,8 +81,8 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
-    per_device_train_batch_size: Optional[int] = field(default=128)
-    per_device_eval_batch_size: Optional[int] = field(default=128)
+    per_device_train_batch_size: Optional[int] = field(default=4)
+    per_device_eval_batch_size: Optional[int] = field(default=4)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
     lambda_decay: Optional[float] = field(default=1e-6)
@@ -101,20 +105,10 @@ class ScriptArguments:
         default=True,
         metadata={"help": "If True, use the base model's existing reward heads without adding new layers. Useful for models like ArmoRM."},
     )
-    base_model_reward_head_indices: Optional[str] = field(
-        default=None,
-        metadata={"help": "Comma-separated indices of reward heads to use from base model (e.g., '0,1,2,3,4'). If None, uses all available."},
-    )
-    base_model_reward_heads_module_name: Optional[str] = field(
-        default=None,
-        metadata={"help": "Name of the module in base model containing reward heads. Auto-detected if None."},
-    )
-    base_model_value_system_module_name: Optional[str] = field(
-        default=None,
-        metadata={"help": "Name of the module in base model containing value system. Auto-detected if None."},
-    )
+
     model_name: Optional[str] = field(
         default="RLHFlow/ArmoRM-Llama3-8B-v0.1",
+        
         metadata={
             "help": "The model that you want to train from the Hugging Face hub. Use ArmoRM for frozen reward model evaluation."
         },
@@ -195,7 +189,7 @@ def seed_everything(seed: int, deterministic: bool = True):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         try:
-            torch.use_deterministic_algorithms(True, warn_only=True)
+            torch.use_deterministic_algorithms(True, warn_only=False)
         except Exception:
             pass
 
@@ -206,7 +200,7 @@ def seed_everything(seed: int, deterministic: bool = True):
 seed_everything(int(script_args.seed))
 
 # Load the value-head model and tokenizer.
-tokenizer_name = script_args.model_name
+tokenizer_name = script_args.model_name 
 tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_auth_token=True)
 
 # Adjusted according to the base model
@@ -261,61 +255,18 @@ training_args = TrainingArguments(
 extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
 
 
-def detect_armo_rm_modules(model):
-    """
-    Detect ArmoRM module names for reward heads and value system layer.
-    Returns: (reward_heads_module_name, value_system_module_name)
-    """
-    # Common ArmoRM module naming patterns
-    reward_heads_candidates = ['reward_heads', 'multi_obj_heads', 'rewards_head', 'reward_head']
-    value_system_candidates = ['gating_layer', 'value_system_layer', 'gating', 'score_layer']
-    
-    model_modules = dict(model.named_modules())
-    
-    # Find reward heads module
-    reward_heads_module_name = None
-    for candidate in reward_heads_candidates:
-        if candidate in model_modules:
-            reward_heads_module_name = candidate
-            print(f"Found reward heads module: {reward_heads_module_name}")
-            break
-    
-    # If not found, try to find it by checking for modules with specific attributes
-    if not reward_heads_module_name:
-        for name, module in model.named_modules():
-            if hasattr(module, 'forward') and 'reward' in name.lower():
-                reward_heads_module_name = name
-                print(f"Found reward heads module by name search: {reward_heads_module_name}")
-                break
-    
-    # Find value system (gating) module
-    value_system_module_name = None
-    for candidate in value_system_candidates:
-        if candidate in model_modules:
-            value_system_module_name = candidate
-            print(f"Found value system module: {value_system_module_name}")
-            break
-    
-    # If not found, try to find it by checking for modules with specific attributes
-    if not value_system_module_name:
-        for name, module in model.named_modules():
-            if hasattr(module, 'forward') and ('gating' in name.lower() or 'value_system' in name.lower()):
-                value_system_module_name = name
-                print(f"Found value system module by name search: {value_system_module_name}")
-                break
-    
-    return reward_heads_module_name, value_system_module_name
-
 
 def main_fun() -> None:
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
     
     # Load base model with trust_remote_code for models like ArmoRM
     model_kwargs = dict(torch_dtype=torch_dtype, trust_remote_code=True)
+    
     if script_args.use_frozen_base_model:
         # For models like ArmoRM that have built-in reward structure
+        
         model = AutoModelForSequenceClassification.from_pretrained(
-            script_args.model_name, **model_kwargs)
+                script_args.model_name, **model_kwargs)
     else:
         model = AutoModelForSequenceClassification.from_pretrained(
             script_args.model_name, num_labels=1, **model_kwargs).base_model
@@ -352,28 +303,20 @@ def main_fun() -> None:
     #exit(0)
     original_columns = dataset.data.column_names
     
-    # Detect ArmoRM module names if using frozen base model
-    reward_heads_module_name = script_args.base_model_reward_heads_module_name
-    value_system_module_name = script_args.base_model_value_system_module_name
-    reward_head_indices = None
+    # Detect base-model output attribute names if using frozen base model
+    reward_heads_module_name = REWARD_HEADS_OUTPUT.get(script_args.model_name, None)
+    value_system_module_name = VALUE_SYSTEM_OUTPUT.get(script_args.model_name, None)
+    reward_head_indices = REWARD_HEADS_INDICES.get(script_args.model_name, None)
+    num_values_to_use = len(dataset.value_keys)
     
     if script_args.use_frozen_base_model:
-        if not reward_heads_module_name or not value_system_module_name:
-            reward_heads_module_name, value_system_module_name = detect_armo_rm_modules(model)
-        
         # Parse reward head indices if provided
-        if script_args.base_model_reward_head_indices:
-            try:
-                reward_head_indices = [int(i.strip()) for i in script_args.base_model_reward_head_indices.split(',')]
-                print(f"Using reward head indices: {reward_head_indices}")
-                # Update num_values based on selected indices
-                num_values_to_use = len(reward_head_indices)
-            except ValueError as e:
-                print(f"Error parsing base_model_reward_head_indices: {e}")
-                raise
-        
-    else:
-        num_values_to_use = len(dataset.value_keys)
+        if reward_head_indices is not None:
+            print(f"Using reward head indices: {reward_head_indices}")
+            # Update num_values based on selected indices
+            assert num_values_to_use == len(reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
+            #num_values_to_use = len(reward_head_indices)
+    
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=num_values_to_use,
                                                     dtype=torch_dtype, 
@@ -399,6 +342,9 @@ def main_fun() -> None:
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
     sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
 
+    params_gr = list(mo_model.reward_heads.parameters()) if mo_model.reward_heads is not None else model.parameters()
+    params_vs = list(mo_model.value_system_layer.parameters()) if mo_model.value_system_layer is not None else []
+    
     print("Sub optimizer class: ", sub_optimizer_cls
             , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
@@ -412,10 +358,10 @@ def main_fun() -> None:
             compute_metrics=partial(MORewardTrainer.compute_metrics, training_variables=mo_model.training_variables),
             compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
-                'params_gr': list(mo_model.reward_heads.parameters()),
+                'params_gr': params_gr,
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
-                'params_vs': list(mo_model.value_system_layer.parameters()),
-                'n_values': len(dataset.value_keys),
+                'params_vs': params_vs,
+                'n_values': mo_config.num_values,
                 'lr_value_system': script_args.learning_rate,
                 'lr_grounding': script_args.grounding_learning_rate,
                 'max_grad_norm': training_args.max_grad_norm,

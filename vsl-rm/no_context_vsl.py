@@ -66,6 +66,9 @@ class ScriptArguments:
 		default=False, metadata={"help": "Whether to retokenize the dataset. Set this to False if you have already tokenized and saved the dataset to disk, and just want to load it."})
     recalculate_embeddings: Optional[bool] = field(
         default=False, metadata={"help": "Whether to recalculate embeddings for the dataset."})
+    use_embeddings: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to use embeddings for the dataset."})
+    
     save_embedded_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
@@ -263,7 +266,7 @@ def main_fun() -> None:
     pad_token_id = model.config.pad_token_id
 
     dc = MORewardDataCollatorWithPadding(
-                tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype) # type: ignore
+                tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=True) # type: ignore
 
     
     
