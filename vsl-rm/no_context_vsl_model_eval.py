@@ -46,7 +46,7 @@ from transformers import (
 
 
 from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH, VALUE_SYSTEM_OUTPUT
-from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
+from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
 
@@ -153,6 +153,15 @@ class ScriptArguments:
         metadata={"help": "The name of the run for logging purposes."},
     )
 
+    loss_func_type: Optional[str] = field(
+        default=MOLossFunctions.ONLY_VALUES_IN_KWARGS,
+        metadata={"help": "The name of the run for logging purposes."},
+    )
+    loss_func_type_kwargs: Optional[str] = field(
+        default=json.dumps({'value_indexes': [2]}),
+        metadata={"help": "A json string of the kwargs to use for the loss function. E.g. for ONLY_VALUES_IN_KWARGS, you can specify which value indexes to use for the grounding loss."},
+    )
+    
     save_every_steps: Optional[int] = field(
         default=20000,
         metadata={"help": "Save the model every x steps"},
@@ -320,6 +329,8 @@ def main_fun() -> None:
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=num_values_to_use,
                                                     dtype=torch_dtype, 
+                                                    loss_function=script_args.loss_func_type,
+                                                    loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs),
                                                     lambda_decay=script_args.lambda_decay,
                                             hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
                                             value_layer_intermediate_activation="SiLU", 
@@ -355,7 +366,7 @@ def main_fun() -> None:
             train_dataset=dataset.train_dataset,
             
             eval_dataset=dataset.eval_dataset,
-            compute_metrics=partial(MORewardTrainer.compute_metrics, training_variables=mo_model.training_variables),
+            compute_metrics=partial(MORewardTrainer.compute_metrics, config=mo_config, training_variables=mo_model.training_variables),
             compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': params_gr,

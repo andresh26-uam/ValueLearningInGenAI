@@ -23,10 +23,10 @@ from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
-from vsllib.reward_models import MORMForSequenceClassification, accuracy_logits, accuracy_rewards_labels
+from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_rewards_labels, get_missing_rating_mask, logits_BT, parse_loss_function, rewards_and_labels_to_logits_and_targets, scores_to_target_probs
 from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, print_tensor_and_grad_fn, to_float
 
-
+from accelerate.utils import recursively_apply
 
 def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
     keep_keys = ["option1", "option2", "input_ids_1", "attention_mask_1", "input_ids_2", "attention_mask_2", "labels"]
@@ -202,7 +202,7 @@ class PairwisePreferenceDataset(Dataset):
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
         self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.05, seed=split_seed)
+        self.train_dataset = self.train_dataset.train_test_split(test_size=0.005, seed=split_seed)
         self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
     def __len__(self):
@@ -308,12 +308,15 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal.zero_grad(set_to_none)
         return None
     
-    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
+    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, config: MORMForSequenceClassificationConfig, **kwargs) -> th.Tensor:
         
         x = self.params_gr # Possibly need flatten into single tensor.
         
         w = self.params_vs
         #self.zero_grad()    
+
+        loss_func = config.loss_func_type
+        loss_func_kwargs=config.loss_func_type_kwargs
 
         
         # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
@@ -339,7 +342,18 @@ class ConstrainedOptimizer(VSLOptimizer):
             
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
         
-        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        if loss_func == MOLossFunctions.DEFAULT:
+            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        elif loss_func == MOLossFunctions.ONLY_GROUNDING:
+            loss_vs = loss_vs.detach() if loss_vs is not None else None
+            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
+        elif loss_func == MOLossFunctions.ONLY_VALUE_SYSTEM:
+            loss_gr = loss_gr.detach() if loss_gr is not None else None
+            loss = loss_vs
+        elif loss_func == MOLossFunctions.ONLY_VALUES_IN_KWARGS:
+            loss = loss_gr[loss_func_kwargs['value_indexes']] if loss_gr is not None else None
+        else:
+            raise ValueError(f"Unsupported loss function {loss_func}")
         #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
         #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
         #loss_gr = loss_gr.detach()
@@ -458,8 +472,14 @@ class MORewardTrainer(Trainer):
     accelerator: Accelerator
 
     def __init__(self, **kwargs):
+        args=kwargs.get("args")
+        if "loss" not in args.include_for_metrics:
+            args.include_for_metrics.append("loss")
+        kwargs["args"] = args
         super().__init__(**kwargs)
         self.compute_loss_func = partial(self.compute_loss_func, accelerator=self.accelerator, training_variables=self.model.training_variables)
+        self.model.loss_function = self.compute_loss_func
+
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
@@ -534,25 +554,32 @@ class MORewardTrainer(Trainer):
 
         
     
-    def compute_metrics(eval_pred, training_variables: MORMTrainingVariables) -> Dict[str, float]:
+    def compute_metrics(eval_pred, config: MORMForSequenceClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
+            loss_func = parse_loss_function(config)
             result = {}
             
-            if eval_pred.predictions.shape[0] % 2 == 1:
-                eval_pred.predictions = eval_pred.predictions[:-1]
-            bsz = eval_pred.predictions.shape[0]
-
-            jidx = th.arange(0, bsz, 2, device=eval_pred.predictions.device)
-            kidx = jidx + 1
-            rewards_1 = eval_pred.predictions[jidx]
-            rewards_2 = eval_pred.predictions[kidx]
-            print("REWARDS 1:", rewards_1[0:5, -1])
-            print("REWARDS 2:", rewards_2[0:5, -1])
-            #input("PAUSED")
-            labels_1 = eval_pred.label_ids[jidx]
-            labels_2 = eval_pred.label_ids[kidx]
-
+            print("EVAL PREDICTIONS SHAPE:", eval_pred.predictions.shape)
+            print("EVAL LABELS SHAPE:", eval_pred.label_ids.shape)
+            print("EVAL KEYS", dir(eval_pred))
+            
             # We assume that the first sample is preferred by default in groundtruth
+            logits_shortened = eval_pred.predictions
+            labels_shortened = eval_pred.label_ids
+
+            print("EVAL PREDICTIONS", logits_shortened)
+            print("EVAL LABELS:", labels_shortened)
+            
+            loss_all = eval_pred.losses
+            print("EVAL LOSSES:", loss_all, loss_all.shape)
+            loss_vs = loss_all[-1]
+            loss_gr = loss_all[0:-1]
+
+            result['grounding_loss'] = to_float(loss_gr)
+            for i in range(len(loss_gr)):
+                result[f'grounding_loss_{i}'] = to_float(loss_gr[i])    
+            result['value_system_loss'] = to_float(loss_vs)
+
             represent = accuracy_rewards_labels(rewards_1[..., -1], rewards_2[..., -1], labels_1[..., -1], labels_2[..., -1], threshold=50.0, epsilon=1.0e-1, assume_torch=False)
             result['representativeness'] = represent
 
@@ -691,7 +718,7 @@ class MORewardTrainer(Trainer):
             raise ValueError("Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
         
 
-        loss_combined = constrained_optim.custom_backward(loss_gr, loss_gr_ideal, loss_vs)
+        loss_combined = constrained_optim.custom_backward(loss_gr, loss_gr_ideal, loss_vs, config=self.model.config)
         
         return loss_combined
     
@@ -799,7 +826,232 @@ class MORewardTrainer(Trainer):
         if prediction_loss_only:
             return (loss, None, None)
 
+
+        
         logits = nested_detach(logits)
         if len(logits) == 1:
             logits = logits[0]
+        print("LOGITS AFTER PRED", logits.shape)
+        logits, labels, _ = rewards_and_labels_to_logits_and_targets(logits, labels, config=self.model.config, assume_torch=True)
+        
+        
         return (loss, logits, labels)
+    
+
+    
+    def evaluation_loop(
+        self,
+        dataloader: DataLoader,
+        description: str,
+        prediction_loss_only: bool | None = None,
+        ignore_keys: list[str] | None = None,
+        metric_key_prefix: str = "eval",
+    ) -> EvalLoopOutput:
+        """
+        Prediction/evaluation loop, shared by `Trainer.evaluate()` and `Trainer.predict()`.
+
+        Works both with or without labels.
+        """
+        args = self.args
+
+        prediction_loss_only = prediction_loss_only if prediction_loss_only is not None else args.prediction_loss_only
+
+        # if eval is called w/o train, handle model prep here
+        if self.is_deepspeed_enabled and self.deepspeed is None:
+            _, _ = deepspeed_init(self, num_training_steps=0, inference=True)
+
+        model = self._wrap_model(self.model, training=False)
+
+        if len(self.accelerator._models) == 0 and model is self.model:
+            start_time = time.time()
+            model = (
+                self.accelerator.prepare(model)
+                if self.is_deepspeed_enabled or (self.is_fsdp_enabled and not self.args.torch_compile)
+                else self.accelerator.prepare_model(model, evaluation_mode=True)
+            )
+            self.model_preparation_time = round(time.time() - start_time, 4)
+
+            if self.is_fsdp_enabled:
+                self.model = model
+
+            # for the rest of this function `model` is the outside model, whether it was wrapped or not
+            if model is not self.model:
+                self.model_wrapped = model
+
+            # backward compatibility
+            if self.is_deepspeed_enabled:
+                self.deepspeed = self.model_wrapped
+
+        # if full fp16 or bf16 eval is wanted and this ``evaluation`` or ``predict`` isn't called
+        # while ``train`` is running, cast it to the right dtype first and then put on device
+        if not self.is_in_train:
+            if args.fp16_full_eval:
+                model = model.to(dtype=torch.float16, device=args.device)
+            elif args.bf16_full_eval:
+                model = model.to(dtype=torch.bfloat16, device=args.device)
+
+        batch_size = self.args.eval_batch_size
+
+        logger.info(f"\n***** Running {description} *****")
+        if has_length(dataloader):
+            logger.info(f"  Num examples = {self.num_examples(dataloader)}")
+        else:
+            logger.info("  Num examples: Unknown")
+        logger.info(f"  Batch size = {batch_size}")
+
+        if hasattr(model, "eval") and callable(model.eval):
+            model.eval()
+        if hasattr(self.optimizer, "eval") and callable(self.optimizer.eval):
+            self.optimizer.eval()
+
+        self.callback_handler.eval_dataloader = dataloader
+        # Do this before wrapping.
+        eval_dataset = getattr(dataloader, "dataset", None)
+
+        # Initialize containers
+        all_losses = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
+        all_preds = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
+        all_labels = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
+        all_inputs = EvalLoopContainer(self.args.eval_do_concat_batches, padding_index=-100)
+
+        metrics = None
+        eval_set_kwargs = {}
+
+        # Will be useful when we have an iterable dataset so don't know its length.
+        observed_num_examples = 0
+
+        # Main evaluation loop
+        for step, inputs in enumerate(dataloader):
+            # Update the observed num examples
+            observed_batch_size = find_batch_size(inputs)
+            if observed_batch_size is not None:
+                observed_num_examples += observed_batch_size
+                # For batch samplers, batch_size is not known by the dataloader in advance.
+                if batch_size is None:
+                    batch_size = observed_batch_size
+
+            # Prediction step
+            losses, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+            main_input_name = getattr(self.model, "main_input_name", "input_ids")
+            inputs_decode = (
+                self._prepare_input(inputs[main_input_name]) if "inputs" in args.include_for_metrics else None
+            )
+
+            if is_torch_xla_available():
+                xm.mark_step()
+
+            # Update containers
+            if losses is not None:
+                # This is the only change in this function.
+                if len(losses.shape) == 0:
+                    losses = self.gather_function(losses.repeat(batch_size))
+                elif len(losses.shape) == 1:
+                    losses = self.gather_function(losses.unsqueeze_(0).repeat(batch_size, 1))
+                    assert losses.shape[0] == batch_size, f"Expected losses to have shape ({batch_size},) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
+                    assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size}, {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
+                
+                all_losses.add(losses)
+            if inputs_decode is not None:
+                inputs_decode = self.accelerator.pad_across_processes(inputs_decode, dim=1, pad_index=-100)
+                inputs_decode = self.gather_function(inputs_decode)
+                if not self.args.batch_eval_metrics or description == "Prediction":
+                    all_inputs.add(inputs_decode)
+            if labels is not None:
+                # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
+                labels = self.accelerator.pad_across_processes(labels, dim=1, pad_index=-100)
+            if logits is not None:
+                logits = self.accelerator.pad_across_processes(logits, dim=1, pad_index=-100)
+                if self.preprocess_logits_for_metrics is not None:
+                    logits = self.preprocess_logits_for_metrics(logits, labels)
+                logits = self.gather_function(logits)
+                print(f"Logits shape after gather: {logits.shape}")
+                if not self.args.batch_eval_metrics or description == "Prediction":
+                    all_preds.add(logits)
+                    print(f"AL PREDs shape after gather: {all_preds.get_arrays().shape}")
+            if labels is not None:
+                labels = self.gather_function(labels)
+                if not self.args.batch_eval_metrics or description == "Prediction":
+                    all_labels.add(labels)
+
+            self.control = self.callback_handler.on_prediction_step(args, self.state, self.control)
+
+            if self.args.batch_eval_metrics:
+                if self.compute_metrics is not None and logits is not None and labels is not None:
+                    is_last_step = self.accelerator.gradient_state.end_of_dataloader
+                    batch_kwargs = {}
+                    batch_kwargs["losses"] = losses if "loss" in args.include_for_metrics else None
+                    batch_kwargs["inputs"] = inputs if "inputs" in args.include_for_metrics else None
+                    metrics = self.compute_metrics(
+                        EvalPrediction(predictions=logits, label_ids=labels, **batch_kwargs),
+                        compute_result=is_last_step,
+                    )
+
+                del losses, logits, labels, inputs
+                torch.cuda.empty_cache()
+
+            # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
+            elif args.eval_accumulation_steps is not None and (step + 1) % args.eval_accumulation_steps == 0:
+                all_losses.to_cpu_and_numpy()
+                all_preds.to_cpu_and_numpy()
+                all_labels.to_cpu_and_numpy()
+                all_inputs.to_cpu_and_numpy()
+
+                del losses, logits, labels, inputs
+                torch.cuda.empty_cache()
+
+        # After all calls to `.gather_function`, reset to `gather_for_metrics`:
+        self.gather_function = self.accelerator.gather_for_metrics
+
+        # Gather all remaining tensors and put them back on the CPU
+        all_losses = all_losses.get_arrays()
+        print("LIBRARY ALL LOSSES", all_losses.shape)
+        all_preds = all_preds.get_arrays()
+        all_labels = all_labels.get_arrays()
+        all_inputs = all_inputs.get_arrays()
+
+        # Number of samples
+        if has_length(eval_dataset):
+            num_samples = len(eval_dataset)
+        # The instance check is weird and does not actually check for the type, but whether the dataset has the right
+        # methods. Therefore we need to make sure it also has the attribute.
+        elif isinstance(eval_dataset, IterableDatasetShard) and getattr(eval_dataset, "num_examples", 0) > 0:
+            num_samples = eval_dataset.num_examples
+        else:
+            if has_length(dataloader):
+                num_samples = self.num_examples(dataloader)
+            else:  # both len(dataloader.dataset) and len(dataloader) fail
+                num_samples = observed_num_examples
+        if num_samples == 0 and observed_num_examples > 0:
+            num_samples = observed_num_examples
+
+        # Metrics!
+        if (
+            self.compute_metrics is not None
+            and all_preds is not None
+            and all_labels is not None
+            and not self.args.batch_eval_metrics
+        ):
+            eval_set_kwargs["losses"] = all_losses if "loss" in args.include_for_metrics else None
+            eval_set_kwargs["inputs"] = all_inputs if "inputs" in args.include_for_metrics else None
+            metrics = self.compute_metrics(
+                EvalPrediction(predictions=all_preds, label_ids=all_labels, **eval_set_kwargs)
+            )
+        elif metrics is None:
+            metrics = {}
+
+        # To be JSON-serializable, we need to remove numpy types or zero-d tensors
+        metrics = denumpify_detensorize(metrics)
+
+        if isinstance(all_losses, list) and all_losses:
+            metrics[f"{metric_key_prefix}_loss"] = np.concatenate(all_losses).mean().item()
+        elif isinstance(all_losses, np.ndarray):
+            metrics[f"{metric_key_prefix}_loss"] = all_losses.mean().item()
+        if hasattr(self, "model_preparation_time"):
+            metrics[f"{metric_key_prefix}_model_preparation_time"] = self.model_preparation_time
+
+        # Prefix all keys with metric_key_prefix + '_'
+        for key in list(metrics.keys()):
+            if not key.startswith(f"{metric_key_prefix}_"):
+                metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
+
+        return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)

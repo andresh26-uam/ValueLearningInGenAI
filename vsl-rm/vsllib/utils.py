@@ -189,6 +189,10 @@ class MORMTrainingVariables(th.nn.Module):
         
         if self.last_accumulated_grounding_loss is not None:
             result["grounding_loss"] = to_float(self.last_accumulated_grounding_loss)
+            for v in range(len(self.lagrange_multipliers)):
+                if self.last_accumulated_grounding_loss is not None:
+                    result[f"grounding_loss_{v}"] = to_float(self.last_accumulated_grounding_loss[v])
+            
         if self.last_accumulated_vs_loss is not None:
             result["value_system_loss"] = to_float(self.last_accumulated_vs_loss)
         for i in range(len(self.lagrange_multipliers)):
