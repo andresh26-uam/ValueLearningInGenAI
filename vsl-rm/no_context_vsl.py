@@ -10,7 +10,7 @@ from pathlib import Path
 import random
 import sys
 
-USE_CPU = False
+USE_CPU = True
 # Make local package imports robust when sbatch executes from a temporary path.
 for candidate in (
     Path(__file__).resolve().parent,
@@ -291,7 +291,7 @@ def main_fun() -> None:
                                             hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
                                             value_layer_intermediate_activation="SiLU", 
                                             value_layer_final_activation="none",
-                                            layer_normalization=script_args.layer_normalization if hasattr(script_args, "layer_normalization") else "LayerNorm",
+                                            layer_normalization=script_args.layer_normalization,
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
                                             gradient_accumulation_steps=script_args.gradient_accumulation_steps,
                                             metrics_accumulation_steps=script_args.metrics_accumulation_steps,

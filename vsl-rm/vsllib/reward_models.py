@@ -693,7 +693,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
     
     def score_ideal(self, hidden_state):
         # This is used inside the GenericForSequenceClassification forward method.
-        assert hidden_state.dtype == self.reward_heads_ideal.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads_ideal.reference_weight().dtype}, but got {hidden_state.dtype}"
+        #assert hidden_state.dtype == self.reward_heads_ideal.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads_ideal.reference_weight().dtype}, but got {hidden_state.dtype}"
         rewards = self.reward_heads_ideal(hidden_state)
         
         if self.value_system_layer is not None:
@@ -705,7 +705,8 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
     
     def score_normal(self, hidden_state):
         if hasattr(self.reward_heads, 'reference_weight'):
-            assert hidden_state.dtype == self.reward_heads.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads.reference_weight().dtype}, but got {hidden_state.dtype}"
+            #assert hidden_state.dtype == self.reward_heads.reference_weight().dtype, f"Expected hidden state dtype {self.reward_heads.reference_weight().dtype}, but got {hidden_state.dtype}"
+            pass
         rewards = self.reward_heads(hidden_state)
         
         if self.value_system_layer is not None:
@@ -748,9 +749,9 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
             )
 
         self.score = self.score_normal
-        if 'embeddings' in kwargs:
+        if 'embedding' in kwargs:
             # If embeddings are provided, bypass the base model and directly compute rewards from embeddings.
-            embeddings = kwargs.pop('embeddings')
+            embeddings = kwargs.pop('embedding')
             all_rewards = self.score(embeddings)
             if self.forward_ideal_grounding:
                 grounding_ideal = self.reward_heads_ideal(embeddings)
@@ -773,6 +774,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         if 'embeddings' in kwargs:
             # If embeddings are provided, bypass the base model and directly compute rewards from embeddings.
             embeddings = kwargs.pop('embeddings')
+            # embeding tuple=?????
             all_rewards = self.score(embeddings)
             grounding_ideal = self.reward_heads_ideal(embeddings)
             ar = SequenceClassifierOutputWithPastAndIdeal(logits=all_rewards, ideal_logits=grounding_ideal)

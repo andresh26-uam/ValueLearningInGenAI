@@ -144,15 +144,18 @@ class MORewardDataCollatorWithPadding:
 
         
         assert batch["input_ids"].shape[:-1] == batch["labels"].shape[:-1], f"Input IDs shape: {batch['input_ids'].shape}, Labels shape: {batch['labels'].shape}"
-        batch = {
+        """batch = {
             "input_ids": batch["input_ids"],
             "attention_mask": batch["attention_mask"],
             "labels": batch["labels"],
             "return_loss": True, 
-        }
-        batch["embeddings"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch else None,
-        batch["context_embedding"] = batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch else None,
-            
+        }"""
+        batch["return_loss"] = True
+        batch["embedding"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch.keys() else None
+        batch["context_embedding"] = batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch.keys() else None
+        if self.use_embeddings:
+            assert batch["embedding"] is not None, "Expected 'embedding' key in the batch when use_embeddings is True."
+            assert batch["context_embedding"] is not None, "Expected 'context_embedding' key in the batch when use_embeddings is True."
         
         return batch
 
