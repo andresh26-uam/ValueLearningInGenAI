@@ -801,10 +801,10 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         self.supports_gradient_checkpointing = hasattr(self.full_model, "gradient_checkpointing_enable")
         self.num_values = config.num_values
         self.use_ideal_grounding_model = config.use_ideal_grounding_model
-        self.use_base_model_heads = getattr(config, 'use_base_model_heads', False)
-        self.base_model_reward_head_indices = getattr(config, 'base_model_reward_head_indices', None)
-        self.base_model_rewards_attr_name = getattr(config, 'base_model_reward_heads_module_name', None)
-        self.base_model_score_attr_name = getattr(config, 'base_model_value_system_module_name', None)
+        self.use_base_model_heads = config.use_base_model_heads
+        self.base_model_reward_head_indices = config.base_model_reward_head_indices
+        self.base_model_rewards_attr_name = config.base_model_reward_heads_module_name
+        self.base_model_score_attr_name = config.base_model_value_system_module_name
         
         # In base-model mode, consume reward/score attributes from base model outputs.
         if self.use_base_model_heads:
@@ -877,6 +877,26 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
 	"""
     def set_value_system_layer(self, layer: nn.Module):
         self.value_system_layer = layer
+
+    def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        if self.config.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_OR_ALL_GROUNDING:
+            if self.reward_heads is not None:
+                return self.reward_heads.parameters(recurse=recurse)
+            elif self.use_base_model_heads:
+                # In base model mode, we assume all parameters require grad, but we only want to return the reward head parameters for optimization.
+                return self.full_model.parameters(recurse=recurse)
+        else:
+            return iter([])
+    
+    def value_system_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        if self.config.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+            if self.value_system_layer is not None:
+                return self.value_system_layer.parameters(recurse=recurse)
+            elif self.use_base_model_heads:
+                # In base model mode, we assume all parameters require grad, but we only want to return the reward head parameters for optimization.
+                return self.full_model.parameters(recurse=recurse)
+        else:
+            return iter([])
     
     def score_ideal(self, hidden_state):
         # This is used inside the GenericForSequenceClassification forward method.
@@ -918,25 +938,27 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         self.training_variables.zero_grad(set_to_none)
 
     def forward(self, *args, **kwargs):
+        #print("FORWARD CALLED WITH ARGS", self.use_base_model_heads)
+        #exit(0)
         if self.use_base_model_heads:
-            labels = kwargs.pop("labels", None)
-            kwargs.pop("embeddings", None)
+            kwargs.pop("labels", None)
+            kwargs.pop("embedding", None)
             kwargs.pop("context_embedding", None)
 
-            return_loss =kwargs.pop("return_loss", None)
+            kwargs.pop("return_loss", None)
 
             # TODO this will not work with other models, do not know how to check this.
             kwargs.pop("num_items_in_batch")
             base_output = self.full_model(*args, **kwargs, return_dict=True)
             pooled_logits = self._extract_logits_from_base_output(base_output)
-            
+            del base_output
             #print("LABELS SHAPE", labels.shape)
 
             return SequenceClassifierOutputWithPast(
                 logits=pooled_logits,
-                past_key_values=getattr(base_output, "past_key_values", None),
-                hidden_states=getattr(base_output, "hidden_states", None),
-                attentions=getattr(base_output, "attentions", None),
+                #past_key_values=getattr(base_output, "past_key_values", None),
+                #hidden_states=getattr(base_output, "hidden_states", None),
+                #attentions=getattr(base_output, "attentions", None),
             )
 
         self.score = self.score_normal

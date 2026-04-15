@@ -4,7 +4,8 @@
 #SBATC_ --cpus-per-gpu=1
 #SBATC_ --mincpus=1
 #SBATCH --gpus=L40S:1
-
+#SBATCH --mem-per-gpu=24G
+#SBATCH --time=24:00:00
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

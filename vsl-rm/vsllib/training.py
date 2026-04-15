@@ -56,14 +56,21 @@ class VSLOptimizer(th.optim.Optimizer):
         print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
         self.sub_optimizer_class = sub_optimizer_class
 
-        self.optimx = _create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class, self.optimizer_kwargs)
+        if params_vs and len(params_gr) > 0:
+            self.optimx = _create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class, self.optimizer_kwargs)
+        else:
+            self.optimx = None
         if params_vs and len(params_vs) > 0:
             self.optimy = _create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class, self.optimizer_kwargs)
         else:
             self.optimy = None
         # TODO: SCHEDULER COSINE...? ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
         # self.optimy_scheduler.step()
-        super(VSLOptimizer, self).__init__([*params_gr, *params_vs], defaults)
+        all_params = [*params_gr, *params_vs]
+        if len(all_params) == 0:
+            all_params = [th.nn.Parameter(th.empty(0), requires_grad=True)] # Dummy parameter for initialization.
+            print("WARNING: No parameters provided to VSLOptimizer. Initializing with dummy parameter.")
+        super(VSLOptimizer, self).__init__(all_params, defaults)
 
     
 
@@ -77,14 +84,16 @@ class VSLOptimizer(th.optim.Optimizer):
     @abstractmethod
     def zero_grad(self, set_to_none=True)-> None:
         super().zero_grad(set_to_none)
-        self.optimx.zero_grad(set_to_none)
+        if self.optimx is not None:
+            self.optimx.zero_grad(set_to_none)
         if self.optimy is not None:
             self.optimy.zero_grad(set_to_none)
         return None
 
     @abstractmethod
     def step(self, closure=None)-> None:
-        self.optimx.step()
+        if self.optimx is not None:
+            self.optimx.step()
         if self.optimy is not None:
             self.optimy.step()
         return None
@@ -194,7 +203,11 @@ class ConstrainedOptimizer(VSLOptimizer):
                 self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
             #print("YEs", loss_func_kwargs['value_indices'])
             #input("?")
-
+        elif self.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_EVER:
+            loss_gr = loss_gr.detach() if loss_gr is not None else None
+            loss_vs = loss_vs.detach() if loss_vs is not None else None
+            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss) + th.tensor(0.0, requires_grad=True) # Add dummy loss to allow backward to be called without error, even though no gradients will be computed.
+            
         else:
             raise ValueError(f"Unsupported loss function {self.loss_func_type}")
         #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
@@ -203,6 +216,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         #loss = loss_vs
 
         loss.backward(**kwargs)
+        
         
         #print("GRADIENTS AFTER BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
         #print("GRADIENTS AFTER BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
@@ -224,7 +238,7 @@ class ConstrainedOptimizer(VSLOptimizer):
             #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
         #print("GRADIENTS BEFORE STEP - GR PARAMS:", [p.grad for p in self.params_gr])
             
-        if self.lr_grounding > 0.0:
+        if self.optimx is not None and self.lr_grounding > 0.0:
             self.optimx.step()
         if self.optimy is not None and self.lr_value_system > 0.0:
                 self.optimy.step()
@@ -265,9 +279,9 @@ class ConstrainedLRScheduler:
     def step(self, metric=None):
         for scheduler in self._all_schedulers:
             if isinstance(scheduler, ReduceLROnPlateau):
-                scheduler.step(metric)
+                    scheduler.step(metric)
             else:
-                scheduler.step()
+                    scheduler.step()
 
     def state_dict(self):
         return {
@@ -292,7 +306,8 @@ class ConstrainedLRScheduler:
             lrs.extend(self.sched_y.get_last_lr())
         if self.sched_lambda is not None:
             lrs.extend(self.sched_lambda.get_last_lr())
-            
+        if len(lrs) == 0:
+            return [0.0]
         return lrs
 
     """@override
@@ -325,10 +340,12 @@ class MORewardTrainer(Trainer):
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
             train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
-            w = self.model.value_system_layer.get_weights()
             
-            for i in range(self.model.num_values):
-                train_metrics[f"vs_weight_{i}"] = to_float(w[i])
+            if self.model.value_system_layer is not None:
+                w = self.model.value_system_layer.get_weights()
+            
+                for i in range(self.model.num_values):
+                    train_metrics[f"vs_weight_{i}"] = to_float(w[i])
             if train_metrics:
                 for key, value in train_metrics.items():
                     logs.setdefault(f"{key}", value) # Train/ is put by default
@@ -358,12 +375,14 @@ class MORewardTrainer(Trainer):
         warmup_steps = self.args.get_warmup_steps(num_training_steps)
         #warmup_steps = 0 # TODO TODO TODO !!!!!!!!!
 
-        sched_x = get_scheduler(
-                name=scheduler_name,
-                optimizer=constrained_optim.optimx,
-                num_warmup_steps=warmup_steps,
-                num_training_steps=num_training_steps,
-            )
+        sched_x = None
+        if constrained_optim.optimx is not None:
+            sched_x = get_scheduler(
+                    name=scheduler_name,
+                    optimizer=constrained_optim.optimx,
+                    num_warmup_steps=warmup_steps,
+                    num_training_steps=num_training_steps,
+                )
 
         sched_y = None
         if constrained_optim.optimy is not None:

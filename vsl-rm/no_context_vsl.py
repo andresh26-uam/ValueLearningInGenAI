@@ -10,9 +10,7 @@ from pathlib import Path
 import random
 import sys
 
-from httpx import options
-
-USE_CPU = True
+USE_CPU = False
 # Make local package imports robust when sbatch executes from a temporary path.
 for candidate in (
     Path(__file__).resolve().parent,
@@ -23,10 +21,8 @@ for candidate in (
         sys.path.insert(0, str(candidate))
         break
 
-from dateutil.rrule import MO
-from transformers.utils import PaddingStrategy
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Optional
 
 from transformers import Trainer
 # import evaluate
@@ -62,6 +58,8 @@ class ScriptArguments:
     """
     These arguments vary depending on how many GPUs you have, what their capacity and features are, and what size model you want to train.
     """
+    use_frozen_base_model: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to use a frozen base model with built-in reward structure (e.g. ArmoRM). If False, we will use the base model as a starting point and train the reward heads from scratch."})
     local_rank: Optional[int] = field(
         default=-1, metadata={"help": "Used for multi-gpu"})
     retokenize: Optional[bool] = field(
@@ -109,6 +107,7 @@ class ScriptArguments:
         metadata={"help": "A json string of the kwargs to use for the loss function. E.g. for ONLY_VALUES_IN_KWARGS, you can specify which value indexes to use for the grounding loss."},
     )
 
+    
     weight_decay: Optional[float] = field(default=0.000)
     model_name: Optional[str] = field(
         #default="mistralai/Mistral-7B-Instruct-v0.2",
@@ -119,7 +118,7 @@ class ScriptArguments:
         },
     )
     bf16: Optional[bool] = field(
-        default=False,
+        default=True,
         metadata={
             "help": "This essentially cuts the training time in half if you want to sacrifice a little precision and have a supported GPU."
         },
@@ -164,7 +163,7 @@ class ScriptArguments:
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=50,
+        default=100,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -281,7 +280,6 @@ def main_fun() -> None:
     #
     # send model to a gpu if available
     
-
     model.config.use_cache = not script_args.gradient_checkpointing
     if getattr(tokenizer, 'pad_token_id', None) is None:
         tokenizer.add_special_tokens({'pad_token': '[PAD]'})
@@ -343,7 +341,8 @@ def main_fun() -> None:
                             base_model_reward_heads_module_name=reward_heads_module_name if script_args.use_frozen_base_model else None,
                             base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
                             base_model_reward_head_indices=reward_head_indices,
-                                            )
+                            use_base_model_heads=script_args.use_frozen_base_model
+                            )
 
     
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
@@ -352,7 +351,10 @@ def main_fun() -> None:
     print("Sub optimizer class: ", sub_optimizer_cls
             , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
-    
+    print("Script arguments: ")
+    from pprint import pprint
+    pprint(vars(script_args))
+    #exit(0)
     trainer : Trainer = MORewardTrainer(
             model=mo_model,
             args=training_args,
@@ -361,9 +363,9 @@ def main_fun() -> None:
             compute_metrics=partial(MORewardTrainer.compute_metrics, config=mo_config, training_variables=mo_model.training_variables),
             compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
-                'params_gr': list(mo_model.reward_heads.parameters()),
+                'params_gr': list(mo_model.grounding_parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
-                'params_vs': list(mo_model.value_system_layer.parameters()),
+                'params_vs': list(mo_model.value_system_parameters()),
                 'n_values': len(dataset.value_keys),
                 'lr_value_system': script_args.learning_rate,
                 'lr_grounding': script_args.grounding_learning_rate,

@@ -1,0 +1,1 @@
+sbatch srun_test.sh vsl-rm/no_context_vsl.py --model_name="RLHFlow/ArmoRM-Llama3-8B-v0.1" --loss_func_type="EVALUATION_ONLY" --use_frozen_base_model --use_embeddings="False" --save_embedded_dataset="False" --num_train_epochs=5 --eval_every_steps=1 --per_device_train_batch_size=16 --per_device_eval_batch_size=16 --gradient_accumulation_steps=1
