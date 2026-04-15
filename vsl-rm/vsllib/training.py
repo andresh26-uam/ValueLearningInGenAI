@@ -11,202 +11,19 @@ import numpy as np
 import torch as th
 from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer as Optimizer
-from torch.utils.data import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer, Trainer
 
 from transformers.trainer import *
 
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.optimization import get_scheduler
-from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.defines import NO_RATING_MASK
-from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_rewards_labels, get_missing_rating_mask, logits_BT, parse_loss_function, rewards_and_labels_to_logits_and_targets, scores_to_target_probs
+from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_rewards_labels, get_missing_rating_mask, logits_BT, parse_loss_function, rewards_and_labels_to_logits_and_targets, scores_to_target_probs
 from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, print_tensor_and_grad_fn, to_float
 
 from accelerate.utils import recursively_apply
 
-def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
-    keep_keys = ["option1", "option2", "input_ids_1", "attention_mask_1", "input_ids_2", "attention_mask_2", "labels"]
-    if extra_keep_keys:
-        keep_keys.extend(extra_keep_keys)
-    sample['option1'] = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
-    sample['option2'] = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
-    if use_context:
-        if sample.get("context", None) is not None:
-            ctx = sample['context']
-        else:
-            ctx = sample['prompt']
-        ctemplate = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': ctx}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
-        tok_context = tokenizer(ctemplate, truncation=True)
-        sample['context_input_ids'] = tok_context["input_ids"]
-        sample['context_attention_mask'] = tok_context["attention_mask"]
-        keep_keys.extend(["context_input_ids", "context_attention_mask", "context"])
-    
-    tokenized_pos = tokenizer(sample['option1'], truncation=True)
-    tokenized_neg = tokenizer(sample['option2'], truncation=True)
-    sample["input_ids_1"] = tokenized_pos["input_ids"]
-    sample["attention_mask_1"] = tokenized_pos["attention_mask"]
-    sample["input_ids_2"] = tokenized_neg["input_ids"]
-    sample["attention_mask_2"] = tokenized_neg["attention_mask"]
-    value_ratings1 = []
-    value_ratings2 = []
-    for key in value_keys:
-        if sample.get(f"{key}_1", 'N/A') == 'N/A' or sample.get(f"{key}_2", 'N/A') == 'N/A':
-            value_ratings1.append(NO_RATING_MASK)
-            value_ratings2.append(NO_RATING_MASK)
-        else:
-            value_ratings1.append(float(sample.get(f"{key}_1", NO_RATING_MASK)))
-            value_ratings2.append(float(sample.get(f"{key}_2", NO_RATING_MASK)))
-            
-    sample["labels"] = th.tensor(np.array([[*value_ratings1, sample.get("score1", NO_RATING_MASK)] , [*value_ratings2, sample.get("score2", NO_RATING_MASK)]]), dtype=th.float16)
-    
-    if delete_other_keys:	
-        keys_to_delete = [key for key in sample.keys() if key not in keep_keys and not key.startswith("value_")]
-    for key in keys_to_delete:
-        del sample[key]	
-    return sample
-
-def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True) -> dict:
-    # THIS ASSUMES BATCHED MAPPING FUNCTION.
-    model_device = next(model.parameters()).device
-    for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", "context_embedding")]):
-        if ic == 2 and not use_context:
-            continue
-        merged_features = {
-            "input_ids": sample[case[0]],
-            "attention_mask": sample[case[1]],
-        }
-        
-        batch = tokenizer.pad(
-            merged_features,
-            padding=collator.padding,
-            max_length=collator.max_length,
-            pad_to_multiple_of=collator.pad_to_multiple_of,
-            return_tensors=collator.return_tensors,
-        )
-        inputs = batch["input_ids"].to(model_device)
-        atm = batch["attention_mask"].to(model_device)
-        output = model(
-            input_ids=inputs,
-            attention_mask=atm,
-            return_dict=True,
-        ).last_hidden_state
-        # Pick the last non-padding token embedding for each sequence.
-        last_token_idx = atm.sum(dim=1) - 1
-
-        sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
-        del output
-        
-    return sample
-
-class PairwisePreferenceDataset(Dataset):
-    
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True):
-        should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
-
-        if model_for_embeddings is not None and embedded_dataset_output_path is None:
-            embedded_dataset_output_path = f"{path.rstrip('/')}_embed_{model_for_embeddings.config._name_or_path.replace('/', '_')}"
-
-        if recalculate_embeddings:
-            shutil.rmtree(embedded_dataset_output_path, ignore_errors=True)
-
-        if from_disk:
-
-            if model_for_embeddings is not None and not should_rewrite_embedded_dataset:
-                try:
-                    self.data = load_from_disk(embedded_dataset_output_path).shuffle(seed=split_seed)
-                except FileNotFoundError:
-                    print(f"Embedded dataset not found at {embedded_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
-                    self.data = load_from_disk(path).shuffle(seed=split_seed)
-            else:
-                
-                self.data = load_from_disk(path).shuffle(seed=split_seed)
-        else:
-            self.data = load_dataset(path, split="train").shuffle(seed=split_seed) 
-        
-        self.max_length = tokenizer.model_max_length
-        # Extract value keys from the first data item
-        if self.data:
-            self.value_keys = [key for key in self.data[0].keys() if key.startswith("value_") and key.endswith("_1")]
-            self.value_keys = [key.replace("_1", "") for key in self.value_keys]
-        else:
-            self.value_keys = []
-        
-        if self.data[0].get("labels") is None:
-            self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), num_proc=16, load_from_cache_file=not retokenize)
-        
-        if model_for_embeddings is not None and recalculate_embeddings:
-            batch_size = 4
-            #self.data = self.data.select(range(min(1000, len(self.data))))
-            with th.no_grad():
-                def _embed_shard(dataset_shard, device):
-                    local_model = deepcopy(model_for_embeddings).to(device)
-                    local_model.eval()
-                    return dataset_shard.map(
-                        lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context),
-                        load_from_cache_file=False,
-                        batched=True,
-                        batch_size=batch_size,
-                    )
-
-                if th.cuda.is_available() and th.cuda.device_count() > 1:
-                    n_gpus = th.cuda.device_count()
-                    print(f"Embedding map sharded across {n_gpus} GPUs")
-
-                    shards = [
-                        self.data.shard(num_shards=n_gpus, index=i, contiguous=True)
-                        for i in range(n_gpus)
-                    ]
-
-                    with ThreadPoolExecutor(max_workers=n_gpus) as executor:
-                        futures = [
-                            executor.submit(_embed_shard, shard, th.device(f"cuda:{i}"))
-                            for i, shard in enumerate(shards)
-                        ]
-                        mapped_shards = [f.result() for f in futures]
-
-                    self.data = concatenate_datasets(mapped_shards)
-                else:
-                        model_for_embeddings = model_for_embeddings.to(th.device("cpu"))
-                        model_for_embeddings.eval()
-                        self.data = self.data.map(
-                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context),
-                            load_from_cache_file=False,
-                            batched=True,
-                            batch_size=batch_size,
-                            num_proc=4
-                        )
-
-        if model_for_embeddings is not None and should_rewrite_embedded_dataset:
-            output_path = Path(embedded_dataset_output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_output_path = output_path.parent / f".{output_path.name}.tmp-{uuid4().hex}"
-            if temp_output_path.exists():
-                shutil.rmtree(temp_output_path)
-            self.data.save_to_disk(str(temp_output_path))
-            if output_path.exists():
-                shutil.rmtree(output_path)
-            temp_output_path.replace(output_path)
-            print(f"Saved embedded dataset to {output_path}")
-
-        if cleanup_cache_files:
-            removed_cache_files = self.data.cleanup_cache_files()
-            print(f"Removed {removed_cache_files} dataset cache files")
-
-        assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
-        self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
-        self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.005, seed=split_seed)
-        self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
-
-    def __len__(self):
-        return len(self.data)
     
 
 
@@ -276,7 +93,14 @@ class ConstrainedOptimizer(VSLOptimizer):
     def __init__(self, params, params_gr, params_vs, n_values, max_grad_norm, params_gr_ideal=None, lr_grounding=None,
                  lr_value_system=None, lr_lambda=None, initial_lambda=1.0, inner_optimization_iterations=3,
                  training_variables: MORMTrainingVariables = None,
+                 config: MORMForSequenceClassificationConfig = None,
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
+        
+        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+            lr_value_system = 0.0
+        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_ALL_GROUNDINGS:
+            lr_grounding = 0.0
+
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
         if params_gr_ideal is not None:
@@ -286,6 +110,12 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
 
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
+        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_LAGRANGE_MULTIPLIERS or (len(config.loss_func_type_kwargs.get('value_indices')) == 1 and config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS):
+            self.lr_lambda = 0.0
+
+        self.loss_func_type = config.loss_func_type
+        self.loss_func_kwargs=config.loss_func_type_kwargs
+
         self.initial_lambda = initial_lambda
         self.max_grad_norm = max_grad_norm
         self.training_variables: MORMTrainingVariables = training_variables
@@ -293,6 +123,8 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.current_iteration = 0
         self.inner_optimization_iterations = inner_optimization_iterations # Number of inner optimization steps for the value system per outer step.
 
+
+        
         if self.lr_lambda > 0:
             self.optim_lambdas = th.optim.SGD(
                 (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, weight_decay=0.0)
@@ -308,15 +140,14 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal.zero_grad(set_to_none)
         return None
     
-    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, config: MORMForSequenceClassificationConfig, **kwargs) -> th.Tensor:
+    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
         
         x = self.params_gr # Possibly need flatten into single tensor.
         
         w = self.params_vs
         #self.zero_grad()    
 
-        loss_func = config.loss_func_type
-        loss_func_kwargs=config.loss_func_type_kwargs
+        
 
         
         # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
@@ -339,21 +170,33 @@ class ConstrainedOptimizer(VSLOptimizer):
                     self.optimx_ideal.zero_grad()
         self.training_variables.requires_grad_(False)
         if self.lr_lambda > 0:
-            
             assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
         
-        if loss_func == MOLossFunctions.DEFAULT:
-            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
-        elif loss_func == MOLossFunctions.ONLY_GROUNDING:
+        target_gr_loss = loss_gr_ideal.detach() if loss_gr_ideal is not None else None
+
+        if self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_EVERYTHING:
+            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss)
+        elif (self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_ALL_GROUNDING) and (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
             loss_vs = loss_vs.detach() if loss_vs is not None else None
-            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=loss_gr_ideal.detach() if loss_gr_ideal is not None else None)
-        elif loss_func == MOLossFunctions.ONLY_VALUE_SYSTEM:
+            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss)
+        elif self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS_ALONE:
             loss_gr = loss_gr.detach() if loss_gr is not None else None
+            loss_gr.requires_grad_(False)
+            self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
             loss = loss_vs
-        elif loss_func == MOLossFunctions.ONLY_VALUES_IN_KWARGS:
-            loss = loss_gr[loss_func_kwargs['value_indexes']] if loss_gr is not None else None
+        elif self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_GROUNDING:
+            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss, selected_indices=self.loss_func_kwargs['value_indices'])
+            unselected_indices = [i for i in range(len(loss_gr)) if i not in self.loss_func_kwargs['value_indices']]
+            loss_gr[unselected_indices] = loss_gr[unselected_indices].detach()
+            if len(self.loss_func_kwargs['value_indices']) > 1:
+                self.training_variables.lagrange_multipliers[unselected_indices] = self.training_variables.lagrange_multipliers[unselected_indices].detach()
+            else: 
+                self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
+            #print("YEs", loss_func_kwargs['value_indices'])
+            #input("?")
+
         else:
-            raise ValueError(f"Unsupported loss function {loss_func}")
+            raise ValueError(f"Unsupported loss function {self.loss_func_type}")
         #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
         #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
         #loss_gr = loss_gr.detach()
@@ -389,8 +232,6 @@ class ConstrainedOptimizer(VSLOptimizer):
 
         self.training_variables.prepare_for_optimizer_step()
         if self.lr_lambda > 0:
-            assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
-        
             self.optim_lambdas.step()
         print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
         self.training_variables.post_optimizer_step()
@@ -556,39 +397,38 @@ class MORewardTrainer(Trainer):
     
     def compute_metrics(eval_pred, config: MORMForSequenceClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
-            loss_func = parse_loss_function(config)
             result = {}
             
-            print("EVAL PREDICTIONS SHAPE:", eval_pred.predictions.shape)
-            print("EVAL LABELS SHAPE:", eval_pred.label_ids.shape)
-            print("EVAL KEYS", dir(eval_pred))
+            #print("EVAL PREDICTIONS SHAPE:", eval_pred.predictions.shape)
+            #print("EVAL LABELS SHAPE:", eval_pred.label_ids.shape)
+            #print("EVAL KEYS", dir(eval_pred))
             
             # We assume that the first sample is preferred by default in groundtruth
             logits_shortened = eval_pred.predictions
             labels_shortened = eval_pred.label_ids
 
-            print("EVAL PREDICTIONS", logits_shortened)
-            print("EVAL LABELS:", labels_shortened)
+            #print("EVAL PREDICTIONS", logits_shortened)
+            #print("EVAL LABELS:", labels_shortened)
             
             loss_all = eval_pred.losses
-            print("EVAL LOSSES:", loss_all, loss_all.shape)
-            loss_vs = loss_all[-1]
-            loss_gr = loss_all[0:-1]
+            losses = np.mean(loss_all, axis=0)
+            loss_vs = losses[-1]
+            loss_gr = losses[0:-1]
 
             result['grounding_loss'] = to_float(loss_gr)
             for i in range(len(loss_gr)):
                 result[f'grounding_loss_{i}'] = to_float(loss_gr[i])    
             result['value_system_loss'] = to_float(loss_vs)
 
-            represent = accuracy_rewards_labels(rewards_1[..., -1], rewards_2[..., -1], labels_1[..., -1], labels_2[..., -1], threshold=50.0, epsilon=1.0e-1, assume_torch=False)
+            represent = accuracy_logits(logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
             result['representativeness'] = represent
 
-            chr = accuracy_rewards_labels(rewards_1[..., 0:-1], rewards_2[..., 0:-1], labels_1[..., 0:-1], labels_2[..., 0:-1],  threshold=50.0, epsilon=1.0e-1 , assume_torch=False)
+            chr = accuracy_logits(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
             result['coherences'] = chr.tolist()
             for i, ch in enumerate(result['coherences']):
                 result[f'coherence_{i}'] = float(ch)
             result['avg_coherence'] = np.mean(chr)
-            assert chr.shape == (rewards_1.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(rewards_1.shape[-1]-1,)}"
+            assert chr.shape == (logits_shortened.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
             print("EVAL METRICS:", result)
 
             training_variables.record_metrics(result, metric_type='validation')
@@ -718,7 +558,7 @@ class MORewardTrainer(Trainer):
             raise ValueError("Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
         
 
-        loss_combined = constrained_optim.custom_backward(loss_gr, loss_gr_ideal, loss_vs, config=self.model.config)
+        loss_combined = constrained_optim.custom_backward(loss_gr, loss_gr_ideal, loss_vs)
         
         return loss_combined
     
@@ -831,7 +671,7 @@ class MORewardTrainer(Trainer):
         logits = nested_detach(logits)
         if len(logits) == 1:
             logits = logits[0]
-        print("LOGITS AFTER PRED", logits.shape)
+            
         logits, labels, _ = rewards_and_labels_to_logits_and_targets(logits, labels, config=self.model.config, assume_torch=True)
         
         
@@ -947,8 +787,9 @@ class MORewardTrainer(Trainer):
                     losses = self.gather_function(losses.repeat(batch_size))
                 elif len(losses.shape) == 1:
                     losses = self.gather_function(losses.unsqueeze_(0).repeat(batch_size, 1))
-                    assert losses.shape[0] == batch_size, f"Expected losses to have shape ({batch_size},) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
-                    assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size}, {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
+                    if not self.accelerator.gradient_state.end_of_dataloader:
+                        assert losses.shape[0] == batch_size, f"Expected losses to have shape ({batch_size},) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
+                    assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size} (or smaller), {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
                 
                 all_losses.add(losses)
             if inputs_decode is not None:
@@ -964,10 +805,8 @@ class MORewardTrainer(Trainer):
                 if self.preprocess_logits_for_metrics is not None:
                     logits = self.preprocess_logits_for_metrics(logits, labels)
                 logits = self.gather_function(logits)
-                print(f"Logits shape after gather: {logits.shape}")
                 if not self.args.batch_eval_metrics or description == "Prediction":
                     all_preds.add(logits)
-                    print(f"AL PREDs shape after gather: {all_preds.get_arrays().shape}")
             if labels is not None:
                 labels = self.gather_function(labels)
                 if not self.args.batch_eval_metrics or description == "Prediction":
@@ -1004,7 +843,7 @@ class MORewardTrainer(Trainer):
 
         # Gather all remaining tensors and put them back on the CPU
         all_losses = all_losses.get_arrays()
-        print("LIBRARY ALL LOSSES", all_losses.shape)
+        #print("LIBRARY ALL LOSSES", all_losses.shape)
         all_preds = all_preds.get_arrays()
         all_labels = all_labels.get_arrays()
         all_inputs = all_inputs.get_arrays()

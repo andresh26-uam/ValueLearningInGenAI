@@ -1,18 +1,15 @@
 
-from ast import Tuple, parse
 from collections.abc import Iterator
-from copy import deepcopy
 from dataclasses import dataclass
 
 import enum
 from functools import partial
 import re
-from typing import Any, Callable, Dict, Literal, Unpack
+import time
+from typing import Any, Callable, Dict, Literal, Optional, Unpack
 
-from datasets import config
 import numpy as np
 import torch as th
-from torch import accelerator
 import torch.nn as nn
 from transformers import AutoModelForSequenceClassification, PreTrainedModel
 from transformers.utils import logging
@@ -24,7 +21,7 @@ logger = logging.get_logger(__name__)
 from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
 
 from vsllib.defines import NO_RATING_MASK
-from vsllib.utils import MORMTrainingVariables
+from vsllib.utils import MORMTrainingVariables, print_tensor_and_grad_fn
 class LinearAlignmentLayer(th.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=None, data=None, n_values=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype)
@@ -104,8 +101,29 @@ class MOLossFunctions(enum.Enum):
     DEFAULT = "DEFAULT"
     ONLY_GROUNDING = "ONLY_GROUNDING"
     ONLY_VALUE_SYSTEM = "ONLY_VALUE_SYSTEM"
+    ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS = "ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS"
     ONLY_VALUES_IN_KWARGS = "ONLY_VALUES_IN_KWARGS"
+    EVALUATION_ONLY = "EVALUATION_ONLY"
 
+    
+
+class MOLossFunctionsCategories():
+    REQUIRES_GRAD_ON_EVERYTHING = [MOLossFunctions.DEFAULT]
+    REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS = [MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT]
+    REQUIRES_GRAD_ON_SOME_GROUNDING = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
+    REQUIRES_GRAD_ON_ALL_GROUNDING = [MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT]
+    REQUIRES_GRAD_ON_SOME_OR_ALL_GROUNDING = REQUIRES_GRAD_ON_SOME_GROUNDING + REQUIRES_GRAD_ON_ALL_GROUNDING
+    
+    REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS_ALONE = [MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS]
+
+    
+    NEEDS_NO_GRAD_ON_VALUE_SYSTEM_WEIGHTS = [MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUES_IN_KWARGS, MOLossFunctions.EVALUATION_ONLY]
+
+    NEEDS_NO_GRAD_EVER = [MOLossFunctions.EVALUATION_ONLY]
+
+    NEEDS_NO_GRAD_ON_ALL_GROUNDINGS = REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS_ALONE + NEEDS_NO_GRAD_EVER
+
+    NEEDS_NO_GRAD_ON_LAGRANGE_MULTIPLIERS = [MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.EVALUATION_ONLY, MOLossFunctions.ONLY_VALUE_SYSTEM]
 
 class MORMForSequenceClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
@@ -141,7 +159,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         base_model_reward_heads_module_name: str = None,
         base_model_value_system_module_name: str = None,
         base_model_reward_head_indices: list = None,
-        loss_func: str = MOLossFunctions.DEFAULT,
+        loss_func_type: str = MOLossFunctions.DEFAULT,
         loss_func_kwargs: dict = None,
         **kwargs,
     ):
@@ -189,7 +207,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.use_base_model_heads = use_base_model_heads
         self.base_model_reward_heads_module_name = base_model_reward_heads_module_name
         self.base_model_value_system_module_name = base_model_value_system_module_name
-        self.loss_func_type = MOLossFunctions(loss_func)
+        self.loss_func_type = MOLossFunctions(loss_func_type)
         self.loss_func_type_kwargs = loss_func_kwargs if loss_func_kwargs is not None else {}
         self.base_model_reward_head_indices = base_model_reward_head_indices if base_model_reward_head_indices is not None else list(range(num_values))
 
@@ -312,7 +330,7 @@ def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_t
     return target_probs
 
 
-def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor=None, return_metrics: bool=False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor=None) -> th.Tensor:
+def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor=None, return_metrics: bool=False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor=None, no_grad_on_indexes: Optional[list[int]] = None) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
     # label = 1: reward1 should be higher.
     # label = 0: reward2 should be higher.
@@ -331,13 +349,44 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     assert not th.any(target_probs.isnan()) and not th.any(target_probs.isinf()), f"Target probabilities contain NaN or Inf values: {target_probs}"	
     assert th.all(target_probs >= 0.0) and th.all(target_probs<= 1.0), f"Target probabilities should be in [0, 1], but got {target_probs}"
 
-    loss = th.nn.functional.binary_cross_entropy_with_logits(
+    
+    if no_grad_on_indexes:
+        loss = th.empty_like(logits)
+        detached_idx = th.as_tensor(no_grad_on_indexes, device=logits.device, dtype=th.long)
+        not_detached_idx = th.tensor([i for i in range(logits.shape[-1]) if i not in no_grad_on_indexes], device=logits.device, dtype=th.long)
+        assert detached_idx.numel() > 0, "no_grad_on_indexes should be non-empty when provided"
+        assert th.all((detached_idx >= 0) & (detached_idx < logits.shape[-1])).item(), (
+            f"no_grad_on_indexes contains invalid indices for last dimension size {logits.shape[-1]}: {no_grad_on_indexes}"
+        )
+        logits[..., detached_idx] = logits[..., detached_idx].detach().requires_grad_(False)
+
+        """pf = time.perf_counter()
+        with th.no_grad():
+            loss[..., detached_idx] = th.nn.functional.binary_cross_entropy_with_logits(
                 # /sum(weights)
-                logits, target_probs, reduction='none', reduce=False) 
+                logits[..., detached_idx], target_probs[..., detached_idx], reduction='none') 
+        loss[..., not_detached_idx] = th.nn.functional.binary_cross_entropy_with_logits(
+                # /sum(weights)
+                logits[..., not_detached_idx], target_probs[..., not_detached_idx], reduction='none') 
+        pf2 = time.perf_counter()"""
+        pf = time.perf_counter()
+        loss = th.nn.functional.binary_cross_entropy_with_logits(
+                # /sum(weights)
+                logits, target_probs, reduction='none') 
+        pf2 = time.perf_counter()
+
+        #print(f"Loss computation time with no_grad_on_indexes: {pf2 - pf:.4f} seconds")
+        #input("...")
+    else:
+        loss = th.nn.functional.binary_cross_entropy_with_logits(
+                # /sum(weights)
+                logits, target_probs, reduction='none')
     assert loss.shape == logits.shape, f"Expected loss shape {(logits.shape[0],)}, got {loss.shape}"
     mean = th.mean(loss, dim=-2)
     if rew_center_coefficient != 0 and rew_sum is not None:
-        mean += rew_center_coefficient * th.mean((rew_sum)**2, dim=-2)
+        centering = th.mean((rew_sum)**2, dim=-2)
+        assert centering.shape == mean.shape, f"Expected centering shape {mean.shape}, got {centering.shape}"
+        mean += rew_center_coefficient * centering
     assert mean.shape == (logits.shape[-1],), f"Expected loss shape {(logits.shape[-1],)}, got {loss.shape}"
     if return_metrics:
         metrics = {}
@@ -391,7 +440,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
     missing_mask = others['missing_mask']
-    rew_sum = grounding_rew_sum
+    rew_sum = others['rew_sum']
 
     assert len(reward1.shape) == 2 and reward1.shape[-1] == scores1.shape[-1], f"Expected reward1 shape (batch_size, num_values) and scores1 shape (batch_size, num_values), but got {reward1.shape} and {scores1.shape}"
     
@@ -402,7 +451,7 @@ def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
     missing_mask = others['missing_mask']
-    rew_sum = grounding_rew_sum
+    rew_sum = others['rew_sum']
 
     return value_system_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask)
 
@@ -433,25 +482,33 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
     #assert labels.shape == pooled_logits.shape, f"Labels shape {labels.shape} does not match pooled logits shape {pooled_logits.shape}"
     use_metrics = training_variables is not None and training_variables.use_metrics_or_losses == 'metrics'
 
-    if config.loss_func_type == MOLossFunctions.ONLY_VALUE_SYSTEM:
+    if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_ALL_GROUNDINGS:
         with th.no_grad():
             gr_loss = grounding_loss_logits(logits[...,0:-1], labels[...,0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
             
-    elif config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS:
+    elif config.loss_func_type in   MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_GROUNDING:
         #gr_loss = grounding_loss(rewards_1[...,0:-1], rewards_2[...,0:-1], scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
-        gr_loss = grounding_loss_logits(logits[...,0:-1], labels[...,0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
-        if use_metrics:
-            gr_loss[0][config.base_model_reward_head_indices].detach_()
-        assert gr_loss[config.base_model_reward_head_indices].grad_fn is not None, "Expected gr_loss to have gradients for the specified reward head indices, but got None"
-        not_indices = [i for i in range(logits.shape[-1]) if i not in config.base_model_reward_head_indices]
-        assert gr_loss[not_indices].grad_fn is None, "Expected gr_loss to have no gradients for the specified reward head indices, but got None"
+        value_indices = config.loss_func_type_kwargs.get('value_indices', config.base_model_reward_head_indices)
+        if value_indices is None:
+            value_indices = list(range(logits.shape[-1] - 1))
+        not_grad_indices = [i for i in range(logits.shape[-1] - 1) if i not in value_indices]
+        gr_loss = grounding_loss_logits(
+            logits[...,0:-1],
+            labels[...,0:-1],
+            rew_sum=grounding_rew_sum,
+            missing_mask=grounding_mask,
+            check_undefined_label=config.check_undefined_label,
+            return_metrics=use_metrics,
+            rew_center_coefficient=config.rew_center_coefficient,
+            no_grad_on_indexes=not_grad_indices,
+        )
     else:
         gr_loss = grounding_loss_logits(logits[...,0:-1], labels[...,0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
         
     if ideal_logits is not None:
         gr_loss_ideal = grounding_loss_logits(ideal_logits[...,0:-1], labels[...,0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
     
-    if config.loss_func_type == MOLossFunctions.ONLY_GROUNDING or config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS:
+    if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
         with th.no_grad():
             #vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
             vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
@@ -517,14 +574,37 @@ class SequenceClassifierOutputWithPastAndIdeal(SequenceClassifierOutputWithPast)
 
 
 class MultiValueRewardHead(nn.Module):
-    def __init__(self, value_heads: nn.ModuleList, normalization: nn.Module):
+    def __init__(self, value_heads: nn.ModuleList, normalization: nn.Module, optimized_head_indices: Optional[list[int]] = None):
         super().__init__()
         self.value_heads = value_heads
         self.normalization = normalization
+        self.optimized_head_indices = optimized_head_indices if optimized_head_indices is not None else list(range(len(value_heads)))
+        for head_i in range(len(value_heads)):
+            if head_i in self.optimized_head_indices:
+                self.value_heads[head_i].requires_grad_(True)
+            else:
+                self.value_heads[head_i].requires_grad_(False)
+    
+    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        yield from self.normalization.parameters(recurse=recurse)
+
+        if self.optimized_head_indices is None:
+            yield from self.value_heads.parameters(recurse=recurse)
+        else:
+            for head_i, head in enumerate(self.value_heads):
+                if head_i in self.optimized_head_indices:
+                    yield from head.parameters(recurse=recurse)
 
     def forward(self, hidden_state: th.Tensor) -> th.Tensor:
-        
-        rewards = th.cat([head(hidden_state) for head in self.value_heads], dim=-1)
+        rewards_list = []
+        for head_i, head in enumerate(self.value_heads):
+            if head_i in self.optimized_head_indices:
+                rewards_list.append(head(hidden_state))
+            else:
+                with th.no_grad():
+                    rewards_list.append(head(hidden_state))
+
+        rewards = th.cat(rewards_list, dim=-1)
         return self.normalization(rewards)
 
     def reference_weight(self) -> th.Tensor:
@@ -546,15 +626,13 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         if self.use_base_model_heads:
             return self.full_model.parameters(recurse=recurse)
         
-        if self.reward_heads is not None:
+        if self.reward_heads is not None and (self.config.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_OR_ALL_GROUNDING):
             yield from self.reward_heads.parameters(recurse=recurse)
-        if self.value_system_layer is not None:
+        if self.value_system_layer is not None and (self.config.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
             yield from self.value_system_layer.parameters(recurse=recurse)
         #yield from self.training_variables.parameters(recurse=recurse)
-        if self.use_ideal_grounding_model:
+        if self.use_ideal_grounding_model and (self.config.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_OR_ALL_GROUNDING):
             yield from self.reward_heads_ideal.parameters(recurse=recurse)
-
-        
 
     def _select_reward_indices(self, rewards: th.Tensor) -> th.Tensor:
         indices = self.base_model_reward_head_indices
@@ -698,7 +776,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
             for _ in range(config.num_values)
         ])
         normalization = self.construct_value_normalization(config, base_model)
-        return MultiValueRewardHead(value_heads=value_heads, normalization=normalization)
+        return MultiValueRewardHead(value_heads=value_heads, normalization=normalization, optimized_head_indices=config.loss_func_type_kwargs.get('value_indices', None))
     
     def to(self, *args, **kwargs):
         super().to(*args, **kwargs)
@@ -758,7 +836,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
 
         self.loss_function = partial(parse_loss_function(self.config), training_variables=self.training_variables, config=self.config)
         
-        
+        self.zero_grad(set_to_none=True)
 		#self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
     
     def _freeze_base_model_keep_heads_trainable(self) -> None:
@@ -819,7 +897,11 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         rewards = self.reward_heads(hidden_state)
         
         if self.value_system_layer is not None:
-            vs_reward = self.value_system_layer.forward(rewards)
+            if self.config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+                with th.no_grad():
+                    vs_reward = self.value_system_layer.forward(rewards)
+            else:
+                vs_reward = self.value_system_layer.forward(rewards)
             all_rewards = th.cat([rewards, vs_reward], dim=-1)
         else:
             all_rewards = rewards

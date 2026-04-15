@@ -39,18 +39,17 @@ from transformers import (
     AutoModelForSequenceClassification,
     AutoTokenizer,
     HfArgumentParser,
-    PreTrainedTokenizerBase,
     Trainer,
-    TrainerCallback,
     TrainingArguments,
     set_seed,
 )
 
 
-from vsllib.defines import ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH
-from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func, mo_loss_function
-from vsllib.training import ConstrainedOptimizer, MORewardTrainer, PairwisePreferenceDataset
+from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH, VALUE_SYSTEM_OUTPUT
+from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func, mo_loss_function
+from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
+from vsllib.dataset_processing import PairwisePreferenceDataset
 
 # Define and parse arguments.
 
@@ -106,7 +105,7 @@ class ScriptArguments:
         metadata={"help": "The name of the run for logging purposes."},
     )
     loss_func_type_kwargs: Optional[str] = field(
-        default=json.dumps({'value_indexes': [2]}),
+        default=json.dumps({'value_indices': [2]}),
         metadata={"help": "A json string of the kwargs to use for the loss function. E.g. for ONLY_VALUES_IN_KWARGS, you can specify which value indexes to use for the grounding loss."},
     )
 
@@ -165,7 +164,7 @@ class ScriptArguments:
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=1,
+        default=50,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -263,8 +262,22 @@ extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.trai
 
 def main_fun() -> None:
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
-    model = AutoModelForSequenceClassification.from_pretrained(
-        script_args.model_name, num_labels=1, dtype=torch_dtype).base_model
+
+    model_kwargs = dict(torch_dtype=torch_dtype, trust_remote_code=True)
+    
+    if script_args.use_frozen_base_model:
+        # For models like ArmoRM that have built-in reward structure
+        
+        model = AutoModelForSequenceClassification.from_pretrained(
+                script_args.model_name, **model_kwargs)
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(
+            script_args.model_name, num_labels=1, **model_kwargs).base_model
+    
+    # For non-frozen models, get base model; for frozen models, use as-is
+    if not script_args.use_frozen_base_model and hasattr(model, 'base_model'):
+        model = model.base_model
+        
     #
     # send model to a gpu if available
     
@@ -277,7 +290,7 @@ def main_fun() -> None:
     pad_token_id = model.config.pad_token_id
 
     dc = MORewardDataCollatorWithPadding(
-                tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=True) # type: ignore
+                tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_embeddings) # type: ignore
 
     
     
@@ -293,12 +306,26 @@ def main_fun() -> None:
                                        )
     print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
     #exit(0)
-    original_columns = dataset.data.column_names
+
+    reward_heads_module_name = REWARD_HEADS_OUTPUT.get(script_args.model_name, None)
+    value_system_module_name = VALUE_SYSTEM_OUTPUT.get(script_args.model_name, None)
+    reward_head_indices = REWARD_HEADS_INDICES.get(script_args.model_name, None)
+    num_values_to_use = len(dataset.value_keys)
     
+    
+    if script_args.use_frozen_base_model:
+        # Parse reward head indices if provided
+        if reward_head_indices is not None:
+            print(f"Using reward head indices: {reward_head_indices}")
+            # Update num_values based on selected indices
+            assert num_values_to_use == len(reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
+            #num_values_to_use = len(reward_head_indices)
+    
+
 
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype,
-                                                    loss_function=script_args.loss_func_type,
+                                                    loss_func_type=script_args.loss_func_type,
                                                     loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs),
                                                     lambda_decay=script_args.lambda_decay,
                                             hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
@@ -313,8 +340,12 @@ def main_fun() -> None:
                             zero_constraint=script_args.zero_constraint,
                             use_ideal_grounding_model=script_args.use_ideal_grounding_model,
                             rew_center_coefficient=script_args.rew_center_coefficient,
+                            base_model_reward_heads_module_name=reward_heads_module_name if script_args.use_frozen_base_model else None,
+                            base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
+                            base_model_reward_head_indices=reward_head_indices,
                                             )
 
+    
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
     sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
 
@@ -326,7 +357,6 @@ def main_fun() -> None:
             model=mo_model,
             args=training_args,
             train_dataset=dataset.train_dataset,
-            
             eval_dataset=dataset.eval_dataset,
             compute_metrics=partial(MORewardTrainer.compute_metrics, config=mo_config, training_variables=mo_model.training_variables),
             compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
@@ -341,6 +371,7 @@ def main_fun() -> None:
                 'inner_optimization_iterations': script_args.inner_optimization_iterations,
                 'lr_lambda': script_args.lagrange_learning_rate,
                 'initial_lambda': 1.0,
+                'config': mo_config,
                 'sub_optimizer_class': sub_optimizer_cls,
                 'training_variables': mo_model.training_variables,
                 ** sub_optimizer_kwargs

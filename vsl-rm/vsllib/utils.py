@@ -204,19 +204,21 @@ class MORMTrainingVariables(th.nn.Module):
             result["minimum_grounding_loss_tendency"] = to_float(self.minimum_grounding_loss_tendency)
         return result
     
-    def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None) -> th.Tensor:
+    def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None, selected_indices: list = None) -> th.Tensor:
         
-        
-        if target_gr_loss is None or self.zero_constraint:
-                lag_gr_loss = th.dot(self.lagrange_multipliers, grounding_losses)
-        else:
-                lag_gr_loss = th.dot(self.lagrange_multipliers, th.maximum(grounding_losses - target_gr_loss, th.zeros_like(grounding_losses)))
-        
-        with th.no_grad():
-            weighting_factor = (1.0 / (1.0 + th.sum(self.lagrange_multipliers))).detach()
-        #last_loss_original_unscaled = lag_gr_loss + vs_loss
-        total_loss = weighting_factor * (lag_gr_loss +  vs_losses)
+        used_mults = self.lagrange_multipliers[selected_indices] if selected_indices is not None else self.lagrange_multipliers
+        used_grounding_losses = grounding_losses[selected_indices] if selected_indices is not None else grounding_losses
 
+        if target_gr_loss is None or self.zero_constraint:
+            lag_gr_loss = th.dot(used_mults, used_grounding_losses)
+
+        else:
+            lag_gr_loss = th.dot(used_mults, th.maximum(used_grounding_losses - target_gr_loss[selected_indices], th.zeros_like(used_grounding_losses)))
+                
+        with th.no_grad():
+             weighting_factor = (1.0 / ((1.0 if vs_losses is not None else 0.0)  + th.sum(used_mults))).detach()
+        #last_loss_original_unscaled = lag_gr_loss + vs_loss
+        total_loss = weighting_factor * (lag_gr_loss +  (vs_losses if vs_losses is not None else 0.0))
         return total_loss
     def to(self, *args, **kwargs) -> th.nn.Module:
         kwargs['dtype'] =  th.float32  
@@ -317,7 +319,7 @@ class MORMTrainingVariables(th.nn.Module):
 
             if self.grad_on_only_worst_value:
                 worst_vi = th.argmin(-coeff).item()
-                coeff = coeff * th.nn.functional.one_hot(th.tensor(worst_vi, device=coeff.device), num_classes=coeff.shape[0])*self.lagrange_multipliers.shape[0]
+                coeff = coeff * th.nn.functional.one_hot(th.tensor(worst_vi, device=coeff.device, requires_grad=False), num_classes=coeff.shape[0])*self.lagrange_multipliers.shape[0]
                 print("WORST VI", worst_vi)
 
             grad = th.clamp(-coeff, max=0.0, min=-1000.0)

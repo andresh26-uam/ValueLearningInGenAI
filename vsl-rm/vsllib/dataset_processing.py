@@ -1,143 +1,208 @@
 #!/usr/bin/env python3
 
+from concurrent.futures import ThreadPoolExecutor
 import itertools
 import json
 from pathlib import Path
 from re import split
-from typing import Any
+import shutil
+from typing import Any, Optional
+from uuid import uuid4
 
-from datasets import Dataset, load_dataset,load_from_disk
-
-from defines import LOCAL_DATASET_PATH
+import numpy as np
+import torch as th
+from vsllib.defines import NO_RATING_MASK
 
 # IMport HF_TOKEN from .env
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
+from datasets import DatasetDict, Dataset, concatenate_datasets, load_dataset, load_from_disk
 
-# Load HF tokens.
-def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
-	annotations = completion.get("annotations") or {}
-	value_block = annotations.get(value_name)
+from transformers.modeling_outputs import BaseModelOutputWithPast
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from vsllib.utils import MORewardDataCollatorWithPadding
 
-	if isinstance(value_block, list) and value_block:
-		first_entry = value_block[0]
-		if isinstance(first_entry, dict):
-			return first_entry.get("Rating")
+def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
+    keep_keys = ["option1", "option2", "input_ids_1", "attention_mask_1", "input_ids_2", "attention_mask_2", "labels"]
+    if extra_keep_keys:
+        keep_keys.extend(extra_keep_keys)
+    sample['option1'] = tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
+    sample['option2'] = tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
+    if use_context:
+        if sample.get("context", None) is not None:
+            ctx = sample['context']
+        else:
+            ctx = sample['prompt']
+        ctemplate = tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': ctx}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
+        tok_context = tokenizer(ctemplate, truncation=True)
+        sample['context_input_ids'] = tok_context["input_ids"]
+        sample['context_attention_mask'] = tok_context["attention_mask"]
+        keep_keys.extend(["context_input_ids", "context_attention_mask", "context"])
+    
+    tokenized_pos = tokenizer(sample['option1'], truncation=True)
+    tokenized_neg = tokenizer(sample['option2'], truncation=True)
+    sample["input_ids_1"] = tokenized_pos["input_ids"]
+    sample["attention_mask_1"] = tokenized_pos["attention_mask"]
+    sample["input_ids_2"] = tokenized_neg["input_ids"]
+    sample["attention_mask_2"] = tokenized_neg["attention_mask"]
+    value_ratings1 = []
+    value_ratings2 = []
+    for key in value_keys:
+        if sample.get(f"{key}_1", 'N/A') == 'N/A' or sample.get(f"{key}_2", 'N/A') == 'N/A':
+            value_ratings1.append(NO_RATING_MASK)
+            value_ratings2.append(NO_RATING_MASK)
+        else:
+            value_ratings1.append(float(sample.get(f"{key}_1", NO_RATING_MASK)))
+            value_ratings2.append(float(sample.get(f"{key}_2", NO_RATING_MASK)))
+            
+    sample["labels"] = th.tensor(np.array([[*value_ratings1, sample.get("score1", NO_RATING_MASK)] , [*value_ratings2, sample.get("score2", NO_RATING_MASK)]]), dtype=th.float16)
+    
+    if delete_other_keys:	
+        keys_to_delete = [key for key in sample.keys() if key not in keep_keys and not key.startswith("value_")]
+    for key in keys_to_delete:
+        del sample[key]	
+    return sample
 
-	if isinstance(value_block, dict):
-		return value_block.get("Rating")
+def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True) -> dict:
+    # THIS ASSUMES BATCHED MAPPING FUNCTION.
+    model_device = next(model.parameters()).device
+    for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", "context_embedding")]):
+        if ic == 2 and not use_context:
+            continue
+        merged_features = {
+            "input_ids": sample[case[0]],
+            "attention_mask": sample[case[1]],
+        }
+        
+        batch = tokenizer.pad(
+            merged_features,
+            padding=collator.padding,
+            max_length=collator.max_length,
+            pad_to_multiple_of=collator.pad_to_multiple_of,
+            return_tensors=collator.return_tensors,
+        )
+        inputs = batch["input_ids"].to(model_device)
+        atm = batch["attention_mask"].to(model_device)
+        output = model(
+            input_ids=inputs,
+            attention_mask=atm,
+            return_dict=True,
+        ).last_hidden_state
+        # Pick the last non-padding token embedding for each sequence.
+        last_token_idx = atm.sum(dim=1) - 1
 
-	return None
+        sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
+        del output
+        
+    return sample
 
+class PairwisePreferenceDataset():
+    
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True):
+        should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
 
-def _build_context(completion: dict[str, Any]) -> str:
-	custom_system_prompt = completion.get("custom_system_prompt") or None
-	return custom_system_prompt
+        if model_for_embeddings is not None and embedded_dataset_output_path is None:
+            embedded_dataset_output_path = f"{path.rstrip('/')}_embed_{model_for_embeddings.config._name_or_path.replace('/', '_')}"
 
+        if recalculate_embeddings:
+            shutil.rmtree(embedded_dataset_output_path, ignore_errors=True)
 
-def _build_pair_row(sample: dict[str, Any], completion_a: dict[str, Any], completion_b: dict[str, Any]) -> dict[str, Any]:
-	principle_a = completion_a.get("principle")
-	principle_b = completion_b.get("principle")
+        if from_disk:
 
-	return {
-		"source": sample.get("source"),
-		"prompt": sample.get("instruction"),
-		#"context1": _build_context(completion_a),
-		#"labelcontext1": principle_a,
-		#"context2": _build_context(completion_b),
-		#"labelcontext2": principle_b,
-		"response1": completion_a.get("response"),
-		"response2": completion_b.get("response"),
-		"model1": completion_a.get("model"),
-		"model2": completion_b.get("model"),
-		"score1": completion_a.get("overall_score"),
-		"score2": completion_b.get("overall_score"),
-		"value_uhelpfulness_1": _extract_rating(completion_a, "helpfulness"),
-		"value_uhelpfulness_2": _extract_rating(completion_b, "helpfulness"),
-		"value_uhonesty_1": _extract_rating(completion_a, "honesty"),
-		"value_uhonesty_2": _extract_rating(completion_b, "honesty"),
-		"value_utruthfulness_1": _extract_rating(completion_a, "truthfulness"),
-		"value_utruthfulness_2": _extract_rating(completion_b, "truthfulness"),
-		"value_uinstruction_following_1": _extract_rating(completion_a, "instruction_following"),
-		"value_uinstruction_following_2": _extract_rating(completion_b, "instruction_following"),
-	}
+            if model_for_embeddings is not None and not should_rewrite_embedded_dataset:
+                try:
+                    self.data = load_from_disk(embedded_dataset_output_path).shuffle(seed=split_seed)
+                except FileNotFoundError:
+                    print(f"Embedded dataset not found at {embedded_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
+                    self.data = load_from_disk(path).shuffle(seed=split_seed)
+            else:
+                
+                self.data = load_from_disk(path).shuffle(seed=split_seed)
+        else:
+            self.data = load_dataset(path, split="train").shuffle(seed=split_seed) 
+        
+        self.max_length = tokenizer.model_max_length
+        # Extract value keys from the first data item
+        if self.data:
+            self.value_keys = [key for key in self.data[0].keys() if key.startswith("value_") and key.endswith("_1")]
+            self.value_keys = [key.replace("_1", "") for key in self.value_keys]
+        else:
+            self.value_keys = []
+        
+        if self.data[0].get("labels") is None:
+            self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), num_proc=16, load_from_cache_file=not retokenize)
+        
+        if model_for_embeddings is not None and recalculate_embeddings:
+            batch_size = 4
+            #self.data = self.data.select(range(min(1000, len(self.data))))
+            with th.no_grad():
+                def _embed_shard(dataset_shard, device):
+                    local_model = deepcopy(model_for_embeddings).to(device)
+                    local_model.eval()
+                    return dataset_shard.map(
+                        lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context),
+                        load_from_cache_file=False,
+                        batched=True,
+                        batch_size=batch_size,
+                    )
 
+                if th.cuda.is_available() and th.cuda.device_count() > 1:
+                    n_gpus = th.cuda.device_count()
+                    print(f"Embedding map sharded across {n_gpus} GPUs")
 
-def ultrafeedback_processor(
-	output_path: str = "ultrafeedback_pairs",
-	dataset_name: str = "openbmb/UltraFeedback",
-) -> int:
-	dataset: Dataset = load_dataset(dataset_name, split="train")
-	
-	rows = []
-	for sample in dataset:
-		if isinstance(sample, dict):
-			completions: list[dict[str, str|None]] = sample.get("completions") or []
-		else:
-			continue
-			
-		if not isinstance(completions, list) or len(completions) < 2:
-			continue
+                    shards = [
+                        self.data.shard(num_shards=n_gpus, index=i, contiguous=True)
+                        for i in range(n_gpus)
+                    ]
 
-		for completion_a, completion_b in itertools.combinations(completions, 2):
-			assert completion_a.get("response") != completion_b.get("response") or completion_a.get("model") != completion_b.get("model") 
-			row = _build_pair_row(sample, completion_a, completion_b)
-			rows.append(row)
-	
-	# Create HuggingFace dataset
-	hf_dataset = Dataset.from_dict( {k: [row[k] for row in rows] for k in rows[0].keys()})
-	
-	# Save to LOCAL_PROCESSED_DATASETS folder
-	local_datasets_path = Path(LOCAL_DATASET_PATH)
-	local_datasets_path.mkdir(parents=True, exist_ok=True)
-	final_output = local_datasets_path / output_path
-	hf_dataset.save_to_disk(final_output)
-	
-	return len(rows)
+                    with ThreadPoolExecutor(max_workers=n_gpus) as executor:
+                        futures = [
+                            executor.submit(_embed_shard, shard, th.device(f"cuda:{i}"))
+                            for i, shard in enumerate(shards)
+                        ]
+                        mapped_shards = [f.result() for f in futures]
 
+                    self.data = concatenate_datasets(mapped_shards)
+                else:
+                        model_for_embeddings = model_for_embeddings.to(th.device("cpu"))
+                        model_for_embeddings.eval()
+                        self.data = self.data.map(
+                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context),
+                            load_from_cache_file=False,
+                            batched=True,
+                            batch_size=batch_size,
+                            num_proc=4
+                        )
 
-ultrafeedback_processor()
-# Show the rows with different principles for the same prompt upto 100 rows:
-processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
+        if model_for_embeddings is not None and should_rewrite_embedded_dataset:
+            output_path = Path(embedded_dataset_output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            temp_output_path = output_path.parent / f".{output_path.name}.tmp-{uuid4().hex}"
+            if temp_output_path.exists():
+                shutil.rmtree(temp_output_path)
+            self.data.save_to_disk(str(temp_output_path))
+            if output_path.exists():
+                shutil.rmtree(output_path)
+            temp_output_path.replace(output_path)
+            print(f"Saved embedded dataset to {output_path}")
 
-count = 0
-per_principle_count = {}
-per_principle_count_same_principle = {}
-for i, row in enumerate(processed_dataset):
-    if "labelcontext1" not in row or "labelcontext2" not in row:
-        continue
-    if row["labelcontext1"] == row["labelcontext2"] and row["labelcontext1"] is not None and row["labelcontext2"] is not None:
-        pair = (row["labelcontext1"], row["labelcontext2"])
-        # order pair alphabetically to avoid counting (A, B) and (B, A) separately
-        pair = tuple(sorted(pair))
+        if cleanup_cache_files:
+            removed_cache_files = self.data.cleanup_cache_files()
+            print(f"Removed {removed_cache_files} dataset cache files")
 
-    if pair not in per_principle_count_same_principle:
-        per_principle_count_same_principle[pair] = 0
+        assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
+        self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
+        self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
+        self.train_dataset = self.train_dataset.train_test_split(test_size=0.05, seed=split_seed)
+        self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
-        per_principle_count_same_principle[pair] += 1
-
-    if row["labelcontext1"] != row["labelcontext2"]:
-        pair = (row["labelcontext1"], row["labelcontext2"])
-        # order pair alphabetically to avoid counting (A, B) and (B, A) separately
-        pair = tuple(sorted(pair))
-
-    if pair not in per_principle_count:
-        per_principle_count[pair] = 0
-
-        per_principle_count[pair] += 1
-        assert row['prompt'] == row['prompt']
-        count +=1
-    if count < 100:
-        print("-----START--------------------")
-        print(row['context1'])
-        print("-------------------------")
-        print(row['context2'])
-        print("-----END--------------------")
-print("Total cases where responses have different principles for the same prompt:", count)
-print("Count of different principles across all pairs:", per_principle_count)
-print("Count of same principles across all pairs:", per_principle_count_same_principle)
-print("Total rows processed:", i + 1)
+    def __len__(self):
+        return len(self.data)
+    
 			           
 		
