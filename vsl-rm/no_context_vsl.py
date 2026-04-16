@@ -83,9 +83,9 @@ class ScriptArguments:
     )
     per_device_train_batch_size: Optional[int] = field(default=128)
     per_device_eval_batch_size: Optional[int] = field(default=128)
-    gradient_accumulation_steps: Optional[int] = field(default=1) # TODO 32?
-    metrics_accumulation_steps: Optional[int] = field(default=1) # TODO 32?
-    lambda_decay: Optional[float] = field(default=0.00001)
+    gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
+    metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
+    lambda_decay: Optional[float] = field(default=0.0005)
     rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
 
@@ -109,7 +109,7 @@ class ScriptArguments:
     )
 
     
-    weight_decay: Optional[float] = field(default=0.00)
+    weight_decay: Optional[float] = field(default=0.001)
     model_name: Optional[str] = field(
         #default="mistralai/Mistral-7B-Instruct-v0.2",
         #default="meta-llama/Llama-3.2-1B",
@@ -154,7 +154,7 @@ class ScriptArguments:
     max_length: Optional[int] = field(default=4096)
 
     run_name: Optional[str] = field(
-        default_factory=lambda: f"test_run_{datetime.now().strftime('%m%d_%H%M%S')}",
+        default_factory=lambda: f"run_{datetime.now().strftime('%m%d_%H%M%S')}",
         metadata={"help": "The name of the run for logging purposes."},
     )
 
