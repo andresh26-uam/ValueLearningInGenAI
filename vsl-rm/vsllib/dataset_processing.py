@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 
 from concurrent.futures import ThreadPoolExecutor
-import itertools
-import json
 from pathlib import Path
-from re import split
 import shutil
 from typing import Any, Optional
 from uuid import uuid4
@@ -14,11 +11,10 @@ import torch as th
 from vsllib.defines import NO_RATING_MASK
 
 # IMport HF_TOKEN from .env
-import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from datasets import DatasetDict, Dataset, concatenate_datasets, load_dataset, load_from_disk
+from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -103,7 +99,7 @@ def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTo
 
 class PairwisePreferenceDataset():
     
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True):
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion: float = 0.05, test_proportion: float = 0.1):
         should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
 
         if model_for_embeddings is not None and embedded_dataset_output_path is None:
@@ -196,9 +192,9 @@ class PairwisePreferenceDataset():
             print(f"Removed {removed_cache_files} dataset cache files")
 
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
-        self.data: DatasetDict = self.data.train_test_split(test_size=0.1, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
+        self.data: DatasetDict = self.data.train_test_split(test_size=test_proportion, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
         self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=0.05, seed=split_seed)
+        self.train_dataset = self.train_dataset.train_test_split(test_size=eval_proportion, seed=split_seed)
         self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
 
     def __len__(self):

@@ -3,6 +3,7 @@
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from functools import partial
 import json
 import os
@@ -10,7 +11,7 @@ from pathlib import Path
 import random
 import sys
 
-USE_CPU = False
+USE_CPU = True
 # Make local package imports robust when sbatch executes from a temporary path.
 for candidate in (
     Path(__file__).resolve().parent,
@@ -28,8 +29,6 @@ from transformers import Trainer
 # import evaluate
 import numpy as np
 import torch
-import torch.nn as nn
-from datasets import load_dataset
 # from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForSequenceClassification,
@@ -42,7 +41,7 @@ from transformers import (
 
 
 from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH, VALUE_SYSTEM_OUTPUT
-from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func, mo_loss_function
+from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
 from vsllib.dataset_processing import PairwisePreferenceDataset
@@ -82,33 +81,33 @@ class ScriptArguments:
     )
     per_device_train_batch_size: Optional[int] = field(default=128)
     per_device_eval_batch_size: Optional[int] = field(default=128)
-    gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    metrics_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
-    lambda_decay: Optional[float] = field(default=1e-6)
+    gradient_accumulation_steps: Optional[int] = field(default=1) # TODO 32?
+    metrics_accumulation_steps: Optional[int] = field(default=1) # TODO 32?
+    lambda_decay: Optional[float] = field(default=0.00001)
     rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
 
-    learning_rate: Optional[float] = field(default=0.002)
+    learning_rate: Optional[float] = field(default=0.001)
     grounding_learning_rate: Optional[float] = field(default=0.002) # TODO must be > 1e-4 to make any effect??
-    lagrange_learning_rate: Optional[float] = field(default=0.05) # TODO 0.01
+    lagrange_learning_rate: Optional[float] = field(default=0.1) # TODO 0.01
 
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
-    grad_on_only_worst_value: Optional[bool] = field(default=True)
+    grad_on_only_worst_value: Optional[bool] = field(default=False)
     zero_constraint: Optional[bool] = field(default=True)
     use_ideal_grounding_model : Optional[bool] = field(default=False)
 
     loss_func_type: Optional[str] = field(
-        default=MOLossFunctions.ONLY_VALUES_IN_KWARGS,
+        default=MOLossFunctions.DEFAULT,
         metadata={"help": "The name of the run for logging purposes."},
     )
     loss_func_type_kwargs: Optional[str] = field(
-        default=json.dumps({'value_indices': [2]}),
+        default=None,#json.dumps({'value_indices': [2]}),
         metadata={"help": "A json string of the kwargs to use for the loss function. E.g. for ONLY_VALUES_IN_KWARGS, you can specify which value indexes to use for the grounding loss."},
     )
 
     
-    weight_decay: Optional[float] = field(default=0.000)
+    weight_decay: Optional[float] = field(default=0.00)
     model_name: Optional[str] = field(
         #default="mistralai/Mistral-7B-Instruct-v0.2",
         #default="meta-llama/Llama-3.2-1B",
@@ -118,13 +117,13 @@ class ScriptArguments:
         },
     )
     bf16: Optional[bool] = field(
-        default=True,
+        default=not USE_CPU,
         metadata={
             "help": "This essentially cuts the training time in half if you want to sacrifice a little precision and have a supported GPU."
         },
     )
     num_train_epochs: Optional[int] = field(
-        default=50,
+        default=100,
         metadata={"help": "The number of training epochs for the reward model."},
     )
     train_set_path: Optional[str] = field(
@@ -133,7 +132,7 @@ class ScriptArguments:
     )
     
     output_path: Optional[str] = field(
-        default=f"./models/baselines/no_context_vsl-",
+        default=f"./models/no_context_vsl-",
         metadata={"help": "The dir for output model"},
     )
     gradient_checkpointing: Optional[bool] = field(
@@ -142,28 +141,28 @@ class ScriptArguments:
     )
     optim: Optional[str] = field(
         # default="adamw_hf",
-        default="paged_adamw_32bit" if not USE_CPU else "adamw_torch_fused", # TODO. adamw_torch_fused is much faster on CPU, but causes OOM on GPU for some reason. PagedAdamW_32bit is slower on CPU but works on GPU.
+        default="paged_adamw_32bit" if not USE_CPU else "adamw_torch_fused", # TODO. adamw_torch_fused is much faster on CPU. PagedAdamW_32bit is slower on CPU but works on GPU.
         # default="adamw_torch_fused",
         metadata={"help": "The optimizer to use."},
     )
     lr_scheduler_type: Optional[str] = field(
-        default="cosine", # TODO "cosine" or "linear" or "constant"
+        default="constant", # TODO "cosine" or "linear" or "constant"
         metadata={"help": "The lr scheduler"},
     )
     max_length: Optional[int] = field(default=4096)
 
     run_name: Optional[str] = field(
-        default=None,
+        default_factory=lambda: f"test_run_{datetime.now().strftime('%m%d_%H%M%S')}",
         metadata={"help": "The name of the run for logging purposes."},
     )
 
     save_every_steps: Optional[int] = field(
-        default=20000,
+        default=50000,
         metadata={"help": "Save the model every x steps"},
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=100,
+        default=20,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -300,6 +299,8 @@ def main_fun() -> None:
                                        model_for_embeddings=model,
                                        collator=dc,
                                        split_seed=int(42),
+                                       eval_proportion=0.05, # TODO 0.05
+                                       test_proportion=0.1, # TODO 0.1.
                                        cleanup_cache_files=bool(script_args.cleanup_dataset_cache_files),
                                        )
     print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
@@ -324,7 +325,7 @@ def main_fun() -> None:
     mo_config = MORMForSequenceClassificationConfig(pad_token_id=pad_token_id, num_values=len(dataset.value_keys),
                                                     dtype=torch_dtype,
                                                     loss_func_type=script_args.loss_func_type,
-                                                    loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs),
+                                                    loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs) if script_args.loss_func_type_kwargs is not None else {},
                                                     lambda_decay=script_args.lambda_decay,
                                             hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
                                             value_layer_intermediate_activation="SiLU", 
@@ -361,7 +362,7 @@ def main_fun() -> None:
             train_dataset=dataset.train_dataset,
             eval_dataset=dataset.eval_dataset,
             compute_metrics=partial(MORewardTrainer.compute_metrics, config=mo_config, training_variables=mo_model.training_variables),
-            compute_loss_func = partial(mo_compute_loss_func, config=mo_config),
+            compute_loss_func = partial(mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             optimizer_cls_and_kwargs =  (ConstrainedOptimizer, {
                 'params_gr': list(mo_model.grounding_parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
@@ -388,7 +389,7 @@ def main_fun() -> None:
     save_checkpoint_with_seed(
         trainer=trainer,
         tokenizer=tokenizer,
-        checkpoint_dir=output_name + "/last_checkpoint",
+        checkpoint_dir=output_name + "/" + script_args.run_name + "/last_checkpoint",
         seed=int(script_args.seed),
     )
 

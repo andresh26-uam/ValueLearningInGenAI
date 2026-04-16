@@ -4,8 +4,6 @@ from dataclasses import dataclass
 
 import enum
 from functools import partial
-import re
-import time
 from typing import Any, Callable, Dict, Literal, Optional, Unpack
 
 import numpy as np
@@ -21,7 +19,74 @@ logger = logging.get_logger(__name__)
 from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
 
 from vsllib.defines import NO_RATING_MASK
-from vsllib.utils import MORMTrainingVariables, print_tensor_and_grad_fn
+from vsllib.utils import MORMTrainingVariables
+import traceback
+import sys
+
+EPSILON = 1.0e-3
+SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
+
+def check_inf_vs_missing_mask(tensor: th.Tensor, missing_mask: th.Tensor = None, name: str = "tensor", assume_torch: bool = True) -> None:
+    """
+    Debug function to count float -inf values and compare with missing mask.
+    Prints indices and traceback without raising exceptions.
+    
+    Args:
+        tensor: Tensor to check for -inf values
+        missing_mask: Optional mask indicating missing values
+        name: Name of the tensor for logging purposes
+    """
+    if tensor is None or missing_mask is None:
+        return
+    
+    # Count -inf values
+    if assume_torch:
+        neg_inf_mask = th.isinf(tensor) & (tensor < 0)
+    else:
+        neg_inf_mask = np.isinf(tensor) & (tensor < 0)
+    
+    if assume_torch:
+        neg_inf_count = neg_inf_mask.sum().item()
+        
+        # Count missing mask true values
+        missing_count = missing_mask.sum().item()
+    else:
+        neg_inf_count = np.sum(neg_inf_mask)
+        missing_count = np.sum(missing_mask)
+    
+    if neg_inf_count > 0:
+        print(f"\n{'='*80}", file=sys.stderr)
+        print(f"DEBUG: Found {neg_inf_count} float -inf values in {name}", file=sys.stderr)
+        print(f"DEBUG: Missing mask has {missing_count} True values", file=sys.stderr)
+        
+        if neg_inf_count == missing_count:
+            raising=False
+            print(f"✓ Counts match perfectly!", file=sys.stderr)
+        else:
+            raising=True
+            print(f"✗ Counts DO NOT match! (Difference: {abs(neg_inf_count - missing_count)})", file=sys.stderr)
+        
+        # Get indices of -inf values
+        if assume_torch:
+            neg_inf_indices = th.where(neg_inf_mask)
+        else:
+            neg_inf_indices = np.where(neg_inf_mask)
+        print(f"\nIndices of -inf values:", file=sys.stderr)
+        for i, idx_tuple in enumerate(zip(*neg_inf_indices)):
+            if i < 10:  # Limit output to first 10 for readability
+                print(f"  Index {i}: {idx_tuple}", file=sys.stderr)
+            elif i == 10:
+                print(f"  ... and {neg_inf_count - 10} more", file=sys.stderr)
+                break
+        
+        # Print traceback
+        print(f"\nTraceback:", file=sys.stderr)
+        for line in traceback.format_stack()[:-1]:
+            print(line.rstrip(), file=sys.stderr)
+        print(f"{'='*80}\n", file=sys.stderr)
+        if raising:
+            raise ValueError(f"Found {neg_inf_count} float -inf values in {name}, which does not match missing mask count of {missing_count}. See debug output for details.")
+
 class LinearAlignmentLayer(th.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=None, data=None, n_values=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype)
@@ -37,28 +102,21 @@ class LinearAlignmentLayer(th.nn.Linear):
             self.load_state_dict(state_dict)
 
     
-
+    @th.compile
     def forward(self, input: th.Tensor) -> th.Tensor:
-        w_bounded, b_bounded = self.get_alignment_layer()
-        assert w_bounded.dtype == self.weight.dtype, f"Expected w_bounded dtype {self.weight.dtype}, but got {w_bounded.dtype}"
-        assert w_bounded.device == self.weight.device, f"Expected w_bounded device {self.weight.device}, but got {w_bounded.device}"
-        output = th.nn.functional.linear(input, w_bounded)
-        assert input.shape[-1] == self.n_values, f"Expected output shape to have last dimension {self.n_values}, but got {output.shape}"
-
-        return output
+        #assert w_bounded.dtype == self.weight.dtype, f"Expected w_bounded dtype {self.weight.dtype}, but got {w_bounded.dtype}"
+        #assert w_bounded.device == self.weight.device, f"Expected w_bounded device {self.weight.device}, but got {w_bounded.device}"
+        return th.nn.functional.linear(input, self.get_alignment_layer())
+        #assert input.shape[-1] == self.n_values, f"Expected output shape to have last dimension {self.n_values}, but got {output.shape}"
+        #return output
 
     def get_alignment_layer(self):
-        w_bounded = self.weight
+        return self.weight
         # assert th.allclose(w_bounded, th.nn.functional.softmax(self.weight))
-        b_bounded = 0.0
-        if self.linear_bias:
-            b_bounded = self.bias
-        return w_bounded, b_bounded
 
     def get_weights(self):
         with th.no_grad():
-            w_bounded, b_bounded = self.get_alignment_layer()
-            return w_bounded.detach().clone().view(-1).cpu().tolist()
+            return self.get_alignment_layer().detach().clone().view(-1).cpu().tolist()
     """def copy(self):
         with th.no_grad():
             new = self.__class__(in_features=self.in_features, out_features=self.out_features, bias=self.linear_bias, device=self.weight.device, dtype=self.weight.dtype)
@@ -86,16 +144,12 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
             
             assert th.allclose(pure_w, th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)), f"{new_weights} vs {th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)}"
 
+    @th.compile
     def get_alignment_layer(self):
-        w_bounded = th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)
-        # assert th.allclose(w_bounded, th.nn.functional.softmax(self.weight))
-        b_bounded = 0.0
+        return th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)
         
-        return w_bounded, b_bounded
-
 
 from transformers.configuration_utils import PretrainedConfig
-from typing import List
 
 class MOLossFunctions(enum.Enum):
     DEFAULT = "DEFAULT"
@@ -215,17 +269,50 @@ LossFuncType = Callable[[th.Tensor, th.Tensor, th.Tensor, th.Tensor, MORMForSequ
 def parse_loss_function(config: MORMForSequenceClassificationConfig) -> LossFuncType:
         return mo_loss_function
 
-def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, epsilon=1.0e-2, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
+def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
+    assert check_undefined_label
     logits, targets, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold=threshold, assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
-    return accuracy_logits(logits, targets, epsilon=epsilon, missing_mask=others.get("missing_mask", missing_mask), assume_torch=assume_torch)
-def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, epsilon=1.0e-2, missing_mask=None, assume_torch=True) -> th.Tensor:
+    return accuracy_logits(logits, targets, missing_mask=others.get("missing_mask", missing_mask), assume_torch=assume_torch)
+def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True) -> th.Tensor:
+    
     with th.no_grad():
-
-        rep_mask1 = (logits > 0) & (target_probs > 0.5)
-        rep_mask2 = (logits < 0) & (target_probs < 0.5)
-        rep_mask3 = (target_probs == 0.5) & ((logits <= epsilon) & (logits >= -epsilon))
-        all_defined_cases = ~get_missing_rating_mask(target_probs)  if missing_mask is None else ~missing_mask
+        missing_mask = get_missing_rating_mask(target_probs)  if missing_mask is None else missing_mask
+        
+        rep_mask1 = (logits > 0 + EPSILON) & (target_probs > 0.5 + SCORE_DIFF_EPSILON) #& (target_probs != NO_RATING_MASK)) 
+        rep_mask2 = (logits < 0 + EPSILON) & (target_probs < 0.5 - SCORE_DIFF_EPSILON) #& (target_probs != NO_RATING_MASK))
+        rep_mask3 = ((target_probs <= 0.5 + SCORE_DIFF_EPSILON) & (target_probs >= 0.5 - SCORE_DIFF_EPSILON)) & ((logits <= EPSILON) & (logits >= -EPSILON)) 
+        all_defined_cases = ~missing_mask
         mask = (rep_mask1 | rep_mask2 | rep_mask3 ) & all_defined_cases # IT SHOULD BE OR BECAUSE INDEFINITE IS OK!!!!
+
+        # Case-by-case consistency checks.
+        """rep_any = rep_mask1 | rep_mask2 | rep_mask3
+        if assume_torch:
+            assert th.all(~mask[rep_mask1 & missing_mask]).item(), "rep_mask1 & missing_mask must imply mask=False"
+            assert th.all(mask[rep_mask1 & all_defined_cases]).item(), "rep_mask1 & ~missing_mask must imply mask=True"
+
+            assert th.all(~mask[rep_mask2 & missing_mask]).item(), "rep_mask2 & missing_mask must imply mask=False"
+            assert th.all(mask[rep_mask2 & all_defined_cases]).item(), "rep_mask2 & ~missing_mask must imply mask=True"
+
+            assert th.all(~mask[rep_mask3 & missing_mask]).item(), "rep_mask3 & missing_mask must imply mask=False"
+            assert th.all(mask[rep_mask3 & all_defined_cases]).item(), "rep_mask3 & ~missing_mask must imply mask=True"
+
+            assert th.all(~mask[(~rep_any) & all_defined_cases]).item(), "~(rep_mask1|rep_mask2|rep_mask3) & ~missing_mask must imply mask=False"
+        else:
+            assert np.all(~mask[rep_mask1 & missing_mask]), "rep_mask1 & missing_mask must imply mask=False"
+            assert np.all(mask[rep_mask1 & all_defined_cases]), "rep_mask1 & ~missing_mask must imply mask=True"
+
+            assert np.all(~mask[rep_mask2 & missing_mask]), "rep_mask2 & missing_mask must imply mask=False"
+            assert np.all(mask[rep_mask2 & all_defined_cases]), "rep_mask2 & ~missing_mask must imply mask=True"
+
+            assert np.all(~mask[rep_mask3 & missing_mask]), "rep_mask3 & missing_mask must imply mask=False"
+            assert np.all(mask[rep_mask3 & all_defined_cases]), "rep_mask3 & ~missing_mask must imply mask=True"
+
+            assert np.all(~mask[(~rep_any) & all_defined_cases]), "~(rep_mask1|rep_mask2|rep_mask3) & ~missing_mask must imply mask=False"
+        """
+        # Consistency check: mask must be False exactly when values are -inf or logits/targets disagree.
+    
+        #check_inf_vs_missing_mask(logits, missing_mask, name="COMPUTE_METRICS:logits_p", assume_torch=assume_torch)
+        #check_inf_vs_missing_mask(target_probs, missing_mask, name="COMPUTE_METRICS:target_probs_p", assume_torch=assume_torch )
         
         
         if assume_torch:
@@ -233,6 +320,7 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, epsilon=1.0e-2, 
             accuracy = mask.float().sum(dim=0).div_((all_defined_cases).float().sum(dim=0))
         else:
             accuracy = mask.astype(float).sum(axis=0)/(all_defined_cases).astype(float).sum(axis=0)
+    
 
     if len(logits.shape) >= 2:
         assert accuracy.shape == (logits.shape[-1],), f"Expected loss shape {(logits.shape[-1],)}, got {accuracy.shape}"
@@ -244,10 +332,13 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, epsilon=1.0e-2, 
 def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=False, missing_mask=None, assume_torch=True) -> th.Tensor:
     # print("DIFF", th.max(x - y))
     returns_diff = x - y
+    assert check_undefined_label
     if check_undefined_label:
         if missing_mask is None:
             missing_mask = get_missing_rating_mask(x, y)
-            
+    else:
+        if missing_mask is not None:
+            raise ValueError("check_undefined_label should be True to use missing_mask or get_missing_rating_mask")        
         
 
         """if th.any(missing_mask).item():
@@ -272,12 +363,15 @@ def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=
         returns_diff = th.clip(returns_diff, -threshold, threshold)
     else:
         returns_diff = np.clip(returns_diff, -threshold, threshold)
-    if missing_mask is not None:
-        returns_diff[missing_mask] = NO_RATING_MASK
-    if assume_torch:
+    if missing_mask is not None and check_undefined_label:
+        if assume_torch:
+            returns_diff.masked_fill_(missing_mask, NO_RATING_MASK)
+        else:
+            returns_diff[missing_mask] = NO_RATING_MASK
+    """if assume_torch:
         assert th.max(returns_diff[~missing_mask]) <= threshold and th.min(returns_diff[~missing_mask]) >= - \
             threshold, f"Clipping failed: max {th.max(returns_diff[~missing_mask])}, min {th.min(returns_diff[~missing_mask])}, threshold {threshold}"
-    
+    """
     return returns_diff
 
 def get_missing_rating_mask(x_or_probs, y=None):
@@ -285,6 +379,7 @@ def get_missing_rating_mask(x_or_probs, y=None):
         missing_mask = (x_or_probs == NO_RATING_MASK) | (y == NO_RATING_MASK)
     else:
         missing_mask = (x_or_probs == NO_RATING_MASK)
+    
     return missing_mask
 
 
@@ -308,6 +403,7 @@ def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=T
     return logits_new, target_probs, others
 
 def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold: int=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
+    assert check_undefined_label
     with th.no_grad():
         
         if assume_qualitative_labels:
@@ -337,6 +433,10 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     # label = 0.5: no preference.
     missing_mask = get_missing_rating_mask(target_probs_p) if check_undefined_label and missing_mask is None else missing_mask
     
+    # Debug: check for -inf values vs missing mask
+    #check_inf_vs_missing_mask(logits_p, missing_mask, name="grounding_loss_logits:logits_p")
+    #check_inf_vs_missing_mask(target_probs_p, missing_mask, name="grounding_loss_logits:target_probs_p")
+    
     if check_undefined_label:
         logits = logits_p.masked_fill(missing_mask, 0.0)
         target_probs = target_probs_p.masked_fill(missing_mask, 0.5)
@@ -353,7 +453,7 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     if no_grad_on_indexes:
         loss = th.empty_like(logits)
         detached_idx = th.as_tensor(no_grad_on_indexes, device=logits.device, dtype=th.long)
-        not_detached_idx = th.tensor([i for i in range(logits.shape[-1]) if i not in no_grad_on_indexes], device=logits.device, dtype=th.long)
+        #not_detached_idx = th.tensor([i for i in range(logits.shape[-1]) if i not in no_grad_on_indexes], device=logits.device, dtype=th.long)
         assert detached_idx.numel() > 0, "no_grad_on_indexes should be non-empty when provided"
         assert th.all((detached_idx >= 0) & (detached_idx < logits.shape[-1])).item(), (
             f"no_grad_on_indexes contains invalid indices for last dimension size {logits.shape[-1]}: {no_grad_on_indexes}"
@@ -369,11 +469,10 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
                 # /sum(weights)
                 logits[..., not_detached_idx], target_probs[..., not_detached_idx], reduction='none') 
         pf2 = time.perf_counter()"""
-        pf = time.perf_counter()
         loss = th.nn.functional.binary_cross_entropy_with_logits(
                 # /sum(weights)
                 logits, target_probs, reduction='none') 
-        pf2 = time.perf_counter()
+        
 
         #print(f"Loss computation time with no_grad_on_indexes: {pf2 - pf:.4f} seconds")
         #input("...")
@@ -399,6 +498,10 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
 def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor=None, return_metrics: bool=False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor=None) -> th.Tensor:
     missing_mask = get_missing_rating_mask(target_probs_p) if check_undefined_label and missing_mask is None else missing_mask
     
+    # Debug: check for -inf values vs missing mask
+    #check_inf_vs_missing_mask(logits_p, missing_mask, name="value_system_loss_logits:logits_p")
+    #check_inf_vs_missing_mask(target_probs_p, missing_mask, name="value_system_loss_logits:target_probs_p")
+    
     if check_undefined_label:
         logits = logits_p.masked_fill(missing_mask, 0.0)
         target_probs = target_probs_p.masked_fill(missing_mask, 0.5)
@@ -421,9 +524,13 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
 
 
 def reward_pairs_and_scores_to_logits_and_targets(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, assume_torch=True) -> tuple[th.Tensor, th.Tensor, Dict[str, Any]]:
+    assert check_undefined_label
     missing_mask = get_missing_rating_mask(scores1, scores2) if check_undefined_label else None
-    logits_p = logits_BT(reward1, reward2, threshold=reward_diff_threshold, missing_mask=missing_mask, assume_torch=assume_torch)
-    target_probs_p = scores_to_target_probs(scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
+    logits_p = logits_BT(reward1, reward2, threshold=reward_diff_threshold, missing_mask=missing_mask, assume_torch=assume_torch, check_undefined_label=missing_mask is not None)
+    target_probs_p = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=missing_mask is not None, missing_mask=missing_mask, assume_torch=assume_torch)
+    #check_inf_vs_missing_mask(logits_p, missing_mask, name="reward_pairs_and_scores_to_logits_and_targets:logits_p", assume_torch=assume_torch)
+    #check_inf_vs_missing_mask(target_probs_p, missing_mask, name="reward_pairs_and_scores_to_logits_and_targets:target_probs_p", assume_torch=assume_torch)
+
     rew_sum = reward1 + reward2
     rew_sum = rew_sum.masked_fill(missing_mask, 0.0) if missing_mask is not None else rew_sum
 
@@ -437,6 +544,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor=No
     # label = 1: reward1 should be higher.
     # label = 0: reward2 should be higher.
     # label = 0.5: no preference.
+    assert check_undefined_label
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
     missing_mask = others['missing_mask']
@@ -456,7 +564,7 @@ def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor
     return value_system_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask)
 
 
-def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: MORMForSequenceClassificationConfig =None, training_variables: MORMTrainingVariables =None, accelerator=None, **kwargs):
+def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: MORMForSequenceClassificationConfig =None, training_variables: MORMTrainingVariables =None, **kwargs):
     
     assert logits is pooled_logits, "Expected logits and pooled_logits to be the same, but got different tensors. Please ensure that the model's forward function returns the same tensor for both logits and pooled_logits, or adjust the mo_loss_function accordingly."
     
@@ -529,9 +637,9 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
     gr_loss_ideal = gr_loss_ideal[0] if ideal_logits is not None else None
     if th.is_grad_enabled() and training_variables is not None:
         with th.no_grad():
-            grl = gr_loss.detach().clone().cpu()
-            vsl = vs_loss.detach().clone().cpu()
-            grli = gr_loss_ideal.detach().clone().cpu() if ideal_logits is not None else None
+            grl = gr_loss.detach()
+            vsl = vs_loss.detach()
+            grli = gr_loss_ideal.detach() if ideal_logits is not None else None
             training_variables.record_grounding_loss(gr_loss_detached=grl, vs_loss_detached=vsl, gr_loss_ideal_detached=grli)
     if use_metrics and training_variables is not None:
         assert "representativeness" in metrics.keys() and "coherences" in metrics.keys(), f"Expected metrics to contain 'representativeness' and 'coherences', but got {metrics.keys()}"
@@ -542,13 +650,13 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
     total_loss = training_variables.forward(gr_loss, vs_loss)
     
     if th.is_grad_enabled():
-        training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone())
+        training_variables.record_grounding_loss(gr_loss.detach(), vs_loss.detach())
         
     return total_loss"""
     """if training_variables is not None:
         if th.is_grad_enabled():
             with th.no_grad():
-                training_variables.record_grounding_loss(gr_loss.detach().clone(), vs_loss.detach().clone(), gr_loss_ideal.detach().clone() if ideal_logits is not None else None)
+                training_variables.record_grounding_loss(gr_loss.detach(), vs_loss.detach(), gr_loss_ideal.detach() if ideal_logits is not None else None)
             training_variables.requires_grad_(False)
         loss_final = training_variables.forward(gr_loss, vs_loss, gr_loss_ideal if ideal_logits is not None else None)
         return loss_final"""
@@ -560,12 +668,13 @@ def mo_loss_function(logits, labels, pooled_logits, ideal_logits=None, config: M
 
     
 
-def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, accelerator=None, **kwargs):
-    
+def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, **kwargs):
+    assert config is not None, "Config must be provided to mo_compute_loss_func"
+    assert training_variables is not None, "Training variables must be provided to mo_compute_loss_func"
     #print("OUTPUTS LOGITS SHAPE", outputs.logits.shape, "LABELS SHAPE", labels.shape)
     assert outputs.logits.device == labels.device, "Devices do not match"
     id_logits = getattr(outputs, "ideal_logits", None)
-    return parse_loss_function(config)(outputs.logits, labels, outputs.logits, ideal_logits = id_logits, config=config, training_variables=training_variables, accelerator=accelerator, **kwargs)
+    return parse_loss_function(config)(outputs.logits, labels, outputs.logits, ideal_logits = id_logits, config=config, training_variables=training_variables, **kwargs)
 
 @dataclass
 class SequenceClassifierOutputWithPastAndIdeal(SequenceClassifierOutputWithPast):
@@ -836,7 +945,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
 
         self.loss_function = partial(parse_loss_function(self.config), training_variables=self.training_variables, config=self.config)
         
-        self.zero_grad(set_to_none=True)
+        self.zero_grad(set_to_none=True) # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
 		#self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
     
     def _freeze_base_model_keep_heads_trainable(self) -> None:
@@ -928,6 +1037,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         return all_rewards
 
     def zero_grad(self, set_to_none: bool = True) -> None:
+        set_to_none = True # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
         super().zero_grad(set_to_none)
         if self.reward_heads is not None:
             self.reward_heads.zero_grad(set_to_none)

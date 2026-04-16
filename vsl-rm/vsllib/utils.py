@@ -1,13 +1,12 @@
 
 
-from copy import deepcopy
+from typing import Tuple
 from dataclasses import dataclass
-from heapq import merge
 import json
 import os
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Any, Dict, Iterable, List, Literal, Optional, Union
 
-from transformers import AutoModelForSequenceClassification, AutoTokenizer, DefaultDataCollator, PreTrainedModel, Trainer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, PreTrainedModel, Trainer
 
 
 from transformers.utils import PaddingStrategy
@@ -17,7 +16,15 @@ import numpy as np
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
+@th.compile
+def normalizing_params(used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
+        mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0))
+        return mults[:-1], mults[-1]
 
+@th.compile
+def norm_penalty( lags, vs_coeff, penalty_coeff) -> th.Tensor:
+        return penalty_coeff*th.norm(th.cat([lags, vs_coeff],dim=0), p=2)
+    
 def print_tensor_and_grad_fn(grad_fn, level=0):
     indent = "  " * level
     if grad_fn is None:
@@ -162,8 +169,8 @@ class MORewardDataCollatorWithPadding:
 def to_float(value: Any) -> float:
             if isinstance(value, th.Tensor):
                 if value.numel() == 1:
-                    return float(value.detach().cpu().item())
-                return float(value.detach().cpu().mean().item())
+                    return float(value.detach().item())
+                return float(value.detach().mean().item())
             if isinstance(value, np.ndarray):
                 if value.size == 1:
                     return float(value.item())
@@ -171,6 +178,7 @@ def to_float(value: Any) -> float:
             return float(value)
 class MORMTrainingVariables(th.nn.Module):
 
+    
     def _collect_train_metrics_for_logging(self) -> Dict[str, float]:
         self: MORMTrainingVariables = self
         result: Dict[str, float] = {}
@@ -190,8 +198,7 @@ class MORMTrainingVariables(th.nn.Module):
         if self.last_accumulated_grounding_loss is not None:
             result["grounding_loss"] = to_float(self.last_accumulated_grounding_loss)
             for v in range(len(self.lagrange_multipliers)):
-                if self.last_accumulated_grounding_loss is not None:
-                    result[f"grounding_loss_{v}"] = to_float(self.last_accumulated_grounding_loss[v])
+                result[f"grounding_loss_{v}"] = to_float(self.last_accumulated_grounding_loss[v])
             
         if self.last_accumulated_vs_loss is not None:
             result["value_system_loss"] = to_float(self.last_accumulated_vs_loss)
@@ -206,7 +213,14 @@ class MORMTrainingVariables(th.nn.Module):
     
     def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None, selected_indices: list = None) -> th.Tensor:
         
-        used_mults = self.lagrange_multipliers[selected_indices] if selected_indices is not None else self.lagrange_multipliers
+        used_mults, vs_coeff = self.normalize_coefficients(selected_indices=selected_indices)
+        if selected_indices is not None:
+            assert used_mults.shape == (len(selected_indices),), f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
+        else:
+            assert used_mults.shape == grounding_losses.shape, f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
+        
+        
+        
         used_grounding_losses = grounding_losses[selected_indices] if selected_indices is not None else grounding_losses
 
         if target_gr_loss is None or self.zero_constraint:
@@ -214,35 +228,51 @@ class MORMTrainingVariables(th.nn.Module):
 
         else:
             lag_gr_loss = th.dot(used_mults, th.maximum(used_grounding_losses - target_gr_loss[selected_indices], th.zeros_like(used_grounding_losses)))
-                
-        with th.no_grad():
-             weighting_factor = (1.0 / ((1.0 if vs_losses is not None else 0.0)  + th.sum(used_mults))).detach()
+        
         #last_loss_original_unscaled = lag_gr_loss + vs_loss
-        total_loss = weighting_factor * (lag_gr_loss +  (vs_losses if vs_losses is not None else 0.0))
+        total_loss = lag_gr_loss +  (vs_losses if vs_losses is not None else 0.0)*vs_coeff
+        self._last_selected_indices = selected_indices
         return total_loss
     def to(self, *args, **kwargs) -> th.nn.Module:
         kwargs['dtype'] =  th.float32  
         self.lagrange_multipliers = self.lagrange_multipliers.to(*args, **kwargs)
-         
-        if self.minimum_grounding_loss_tendency is not None:
-            self.minimum_grounding_loss_tendency = self.minimum_grounding_loss_tendency.to(*args, **kwargs) 
-        if self.last_accumulated_grounding_loss is not None:
-            self.last_accumulated_grounding_loss = self.last_accumulated_grounding_loss.to(*args, **kwargs)
-        if self.last_accumulated_grounding_loss_ideal is not None:
-            self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss_ideal.to(*args, **kwargs)
+        self.vs_coeff = self.vs_coeff.to(*args, **kwargs)
+
+        for k, argval in self.__dict__.items():
+            if isinstance(argval, th.Tensor) and argval.device != self.lagrange_multipliers.device:
+                getattr(self, k).data = getattr(self, k).data.to(*args, **kwargs)
+        
         for i in range(len(self._cached_groundings)):
             self._cached_groundings[i] = self._cached_groundings[i].to(*args, **kwargs) 
         for i in range(len(self._cached_groundings_ideal)):
             self._cached_groundings_ideal[i] = self._cached_groundings_ideal[i].to(*args, **kwargs) 
         for i in range(len(self._cached_vs_losses)):
             self._cached_vs_losses[i] = self._cached_vs_losses[i].to(*args, **kwargs)
+
+        for i in range(len(self._cached_coherences)):
+            self._cached_coherences[i] = self._cached_coherences[i].to(*args, **kwargs)
+        for i in range(len(self._cached_coherences_ideal)):
+            self._cached_coherences_ideal[i] = self._cached_coherences_ideal[i].to(*args, **kwargs)
+        for i in range(len(self._cached_representativeness)):
+            self._cached_representativeness[i] = self._cached_representativeness[i].to(*args, **kwargs)
         #print("MOVED Lagrange multipliers:", self.lagrange_multipliers, self.lagrange_multipliers.dtype)
         #exit(0)
         return super().to(*args, **kwargs)
-    def parameters(self, recurse: bool = True) -> Any:
-        return self.lagrange_multipliers
+    def parameters(self, recurse: bool = True) -> Iterable[th.nn.Parameter]:
+        yield self.lagrange_multipliers
+        yield self.vs_coeff
     
     
+    
+    def normalize_coefficients(self, selected_indices: list = None) -> th.Tensor:
+        used_mults = self.lagrange_multipliers[selected_indices] if selected_indices is not None else self.lagrange_multipliers
+        
+        return normalizing_params(used_mults, self.vs_coeff)
+
+    def get_multipliers(self, used_only=False) -> Tuple[th.Tensor, th.Tensor]:
+        return self.normalize_coefficients(selected_indices=self._last_selected_indices if used_only else None)
+        #union_mults_s = th.nn.functional.softmax(union_mults, dim=0)
+            
     def __init__(self, n_values: int, initial_lambda: int =1.0 , 
                  device: th.DeviceObjType|str ='cpu', dtype: th.Type = th.float32, 
                  grounding_loss_tendency_update_ratio: float = 0.01, 
@@ -250,11 +280,19 @@ class MORMTrainingVariables(th.nn.Module):
                  metric_buffer_size=3, use_metrics_or_losses='metrics', 
                  grad_on_only_worst_value=False, zero_constraint: bool = True,
                  lambda_decay: float = 1e-9):
+        
         super().__init__()
-        self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype)
+        self.lagrange_multipliers = th.nn.Parameter(th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype))
+        self.vs_coeff = th.nn.Parameter(th.tensor([initial_lambda], requires_grad=False, device=device, dtype=dtype))
+
+        self._last_selected_indices = None
+
         self.zero_constraint = zero_constraint
         self.minimum_grounding_loss_tendency: th.Tensor | None = None
         self.maximum_coherences_tendency: th.Tensor | None = None
+
+        self.minimum_vs_loss_tendency: th.Tensor | None = None
+        self.maximum_representativeness_tendency: th.Tensor | None = None
 
         self.last_accumulated_grounding_loss: th.Tensor | None = None
         self.last_accumulated_vs_loss: th.Tensor | None = None
@@ -283,75 +321,107 @@ class MORMTrainingVariables(th.nn.Module):
 
         self.historic_eval_metrics = {}
     
+    
     def prepare_for_optimizer_step(self) -> None:
+        coeff: th.Tensor
 
+        self.requires_grad_(True)
         with th.no_grad():
-            self.requires_grad_(True)
                 #assert self.lagrange_multipliers[vi].grad is not None, f"Lagrange multiplier {vi} gradient is None before optimizer step."
             self.update_loss_tendencies()
             self.update_metrics_tendencies()
 
-            lag_sum = 1.0+sum(self.lagrange_multipliers).detach()
             if self.use_metrics_or_losses == 'metrics':
                 # Use metrics for the optimizer step
                 gr_ideal_diff = -(self.last_accumulated_coherences - self.maximum_coherences_tendency).detach()
-                
-                coeff = gr_ideal_diff.to(device=lag_sum.device) / lag_sum
+                vs_ideal_diff = -(self.last_accumulated_representativeness - self.maximum_representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
+                #coeff = gr_ideal_diff #/ lag_sum
                 
                 
             elif self.use_metrics_or_losses == 'losses':
                 gr_ideal_diff = (self.last_accumulated_grounding_loss - self.minimum_grounding_loss_tendency).detach()
-                
+                vs_ideal_diff = (self.last_accumulated_vs_loss - self.minimum_vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
                 # This is the derivative w.r.t. lambda of "1/(1+lambda) * (lambda(gr_loss - gr_ideal) + vs_loss)".
+                 
                 #should be...? 1) forward = self.forward(grounding_losses=gr_ideal_diff, vs_losses=self.last_accumulated_vs_loss)
                 #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
-                coeff = gr_ideal_diff.to(device=lag_sum.device)  / lag_sum
-                # Use losses for the optimizer step
                 
-            
-            
-            print("COEFF OF CHANGE, ", coeff)
-            print("DIFF", gr_ideal_diff)
-            print("LOSS GR", self.last_accumulated_grounding_loss )
-            print("LOSS TENDENCY", self.minimum_grounding_loss_tendency)
-            print("CHR GR", self.last_accumulated_coherences )
-            print("COHERENCE TENDENCY", self.maximum_coherences_tendency)
-
-            if self.grad_on_only_worst_value:
-                worst_vi = th.argmin(-coeff).item()
-                coeff = coeff * th.nn.functional.one_hot(th.tensor(worst_vi, device=coeff.device, requires_grad=False), num_classes=coeff.shape[0])*self.lagrange_multipliers.shape[0]
-                print("WORST VI", worst_vi)
-
-            grad = th.clamp(-coeff, max=0.0, min=-1000.0)
-            
-            assert th.all(grad <= 0.0), f"Expected all gradients to be non-positive, but got {grad}"
-        if self.lagrange_multipliers.grad is None:
-            self.lagrange_multipliers.grad = grad
+                # Use losses for the optimizer step
+            #coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) #should be...? 2)
+        
+        was_grad_none = self.lagrange_multipliers.grad is None
+        assert was_grad_none
+        if self._last_selected_indices is not None:
+            norm_penalty_ =  norm_penalty(self.lagrange_multipliers[self._last_selected_indices], self.vs_coeff, self.lambda_decay)
         else:
-            self.lagrange_multipliers.grad += grad 
+            norm_penalty_ =  norm_penalty(self.lagrange_multipliers, self.vs_coeff, self.lambda_decay)
+        with th.no_grad():
+            if th.all(gr_ideal_diff < 0.0):
+                # This means all groundings are below their ideal grounding losses (or above their ideal metrics, depending on the mode), so we don't need to apply gradients to push them down further, and can just focus on the value system loss if present.
+                pass
+            else:
+                vs_ideal_diff = None
+
+        forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices) + norm_penalty_
+        forward.backward()
+        coeff = self.lagrange_multipliers.grad.detach()
+        #coeff = gr_ideal_diff  / lag_sum
+        
+        print("DIFF", gr_ideal_diff)
+        print("COEFF OF CHANGE, ", coeff)
+        print("LOSS TENDENCY", self.minimum_grounding_loss_tendency)
+        print("LOSS GR", self.last_accumulated_grounding_loss )
+        print("CHR GR", self.last_accumulated_coherences )
+        print("COHERENCE TENDENCY", self.maximum_coherences_tendency)
+
+        if self.grad_on_only_worst_value:
+            worst_idx = th.argmax(gr_ideal_diff).detach(), 
+            worst_val = coeff[worst_idx].detach().item()
+            coeff.zero_()
+            coeff[worst_idx] = worst_val
+            print("WORST VI", worst_idx, "WITH COEFF", worst_val)
+            if was_grad_none:
+                self.lagrange_multipliers.grad = coeff
+            else:
+                self.lagrange_multipliers.grad += coeff 
+                #self.lagrange_multipliers.grad = coeff
+
+        #grad = th.clamp(coeff, max=0.0, min=-1000.0)
+        
+        #assert th.all(grad <= 0.0), f"Expected all gradients to be non-positive, but got {grad}"
+        
+            
     def zero_grad(self, set_to_none: bool = True) -> None:
+        set_to_none = True # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
         self.lagrange_multipliers.grad = None
-        return super().zero_grad(set_to_none)
+        self.vs_coeff.grad = None
+        #return super().zero_grad(set_to_none)
     def requires_grad_(self, requires_grad: bool = True):
-        with th.no_grad():
-            self.lagrange_multipliers.requires_grad_(requires_grad)
+        self.lagrange_multipliers.requires_grad_(requires_grad)
+        self.vs_coeff.requires_grad_(requires_grad)
     def post_optimizer_step(self) -> None:
-        with th.no_grad():
-            if self.lambda_decay > 0.0:
-                update = self.lagrange_multipliers.data * (1.0 - self.lambda_decay)
-                self.lagrange_multipliers.data = th.clamp(update, min=self.initial_lambda, max=1000.0)
-        #self.zero_grad()
+        """with th.no_grad():
+            
+            #self.normalize_coefficients()
+
+            if self.lambda_decay > 0.0: # UNUSED.
+                self.vs_coeff.data += self.lambda_decay.data * self.vs_coeff"""
+                #self.lagrange_multipliers.data = th.clamp(update, min=self.initial_lambda, max=1000.0)
+                #self.normalize_coefficients()
+        self.zero_grad(set_to_none=True)
+        
         
 
     def reset_lagrange_gradients(self) -> None:
         with th.no_grad():
             self.requires_grad_(False)
-            self.zero_grad()
+            self.zero_grad(set_to_none=True)
             self.last_accumulated_grounding_loss = None
             self.last_accumulated_grounding_loss_ideal = None
             self.last_accumulated_coherences_ideal = None
             self.last_accumulated_coherences = None
             self.last_accumulated_representativeness = None
+
             self._cached_groundings_ideal = []
             self._cached_groundings = []
             self._cached_vs_losses = []
@@ -363,40 +433,48 @@ class MORMTrainingVariables(th.nn.Module):
 
     def update_metrics_tendencies(self) -> None:
         with th.no_grad():
-            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
+            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             
-            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach().clone().cpu().item()
+            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach()
 
             coherence_target =  self.last_accumulated_coherences
             if len(self._cached_coherences_ideal) > 0:
-                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
+                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
 
                 coherence_target = th.maximum(self.last_accumulated_coherences, self.last_accumulated_coherences_ideal)
             if self.maximum_coherences_tendency is None:
                 self.maximum_coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
+                self.maximum_representativeness_tendency = th.full_like(self.last_accumulated_representativeness, fill_value=0.5).detach()
             else:
                 maximum = th.maximum(coherence_target, self.maximum_coherences_tendency)
-                self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone().cpu()
+                self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                
+                maximum_repr = th.maximum(self.last_accumulated_representativeness, self.maximum_representativeness_tendency)
+                self.maximum_representativeness_tendency = (th.multiply(maximum_repr, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
         
         with th.no_grad():
-            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
+            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             if len(self._cached_groundings_ideal) > 0:
-                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach().clone().cpu()
+                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             else:
-                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach().clone().cpu()
-            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach().clone().cpu().item()
+                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach()
+            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach()
 
-            minimum_actual = th.minimum(self.last_accumulated_grounding_loss, self.last_accumulated_grounding_loss_ideal).detach().clone()
-            assert self.last_accumulated_grounding_loss.shape == self.lagrange_multipliers.shape, f"Last accumulated grounding loss shape: {self.last_accumulated_grounding_loss.shape}, Lagrange multipliers shape: {self.lagrange_multipliers.shape}"
+            minimum_actual = th.minimum(self.last_accumulated_grounding_loss, self.last_accumulated_grounding_loss_ideal).detach()
+            
             if self.minimum_grounding_loss_tendency is None:
                 self.minimum_grounding_loss_tendency = th.full_like(minimum_actual, fill_value=th.max(minimum_actual).float()).detach()
+                assert self.minimum_vs_loss_tendency is None, "Expected minimum_vs_loss_tendency to be None when minimum_grounding_loss_tendency is None."
+                self.minimum_vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
             else:
                 minimum = th.minimum(minimum_actual, self.minimum_grounding_loss_tendency)
+                minimum_vs = th.minimum(self.last_accumulated_vs_loss, self.minimum_vs_loss_tendency)
 
-                self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach().clone().cpu()
-                assert self.minimum_grounding_loss_tendency.shape == self.last_accumulated_grounding_loss.shape, f"Grounding loss tendency shape: {self.minimum_grounding_loss_tendency.shape}, Last grounding loss shape: {self.last_accumulated_grounding_loss.shape}"
-            
+                self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.minimum_vs_loss_tendency = (th.multiply(minimum_vs, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+
     def record_metrics(self, metrics: Dict[str, float|list], metric_type: Literal["train", "validation"] = "train") -> None:
         # This is called at the end of each evaluation phase, and records the grounding loss and vs loss for the last evaluation phase, which will be used to update the Lagrange multipliers before the next optimizer step.
         

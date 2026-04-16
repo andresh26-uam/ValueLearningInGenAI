@@ -1,15 +1,9 @@
 from abc import abstractmethod
-from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from pathlib import Path
-import shutil
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
-from datasets.arrow_dataset import Dataset
-from matplotlib.pylab import dtype
+from typing import Any, Dict, Optional
 import numpy as np
 import torch as th
-from torch.optim.lr_scheduler import LambdaLR, ReduceLROnPlateau
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer as Optimizer
 
 from transformers.trainer import *
@@ -18,11 +12,9 @@ from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
-from vsllib.defines import NO_RATING_MASK
-from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_rewards_labels, get_missing_rating_mask, logits_BT, parse_loss_function, rewards_and_labels_to_logits_and_targets, scores_to_target_probs
-from vsllib.utils import MORMTrainingVariables, MORewardDataCollatorWithPadding, print_tensor_and_grad_fn, to_float
+from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, rewards_and_labels_to_logits_and_targets
+from vsllib.utils import MORMTrainingVariables, to_float
 
-from accelerate.utils import recursively_apply
 
     
 
@@ -42,7 +34,7 @@ class VSLOptimizer(th.optim.Optimizer):
         self.lr_grounding = lr_grounding
         self.lr_value_system = lr_value_system
         defaults = dict(lr_grounding=lr_grounding,
-                        lr_value_system=lr_value_system, lr_vt=lr_value_system)
+                        lr_value_system=lr_value_system)
 
         self.optimizer_kwargs = optimizer_kwargs
         self.n_values = n_values
@@ -83,6 +75,7 @@ class VSLOptimizer(th.optim.Optimizer):
     
     @abstractmethod
     def zero_grad(self, set_to_none=True)-> None:
+        set_to_none = True # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
         super().zero_grad(set_to_none)
         if self.optimx is not None:
             self.optimx.zero_grad(set_to_none)
@@ -119,7 +112,7 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
 
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
-        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_LAGRANGE_MULTIPLIERS or (len(config.loss_func_type_kwargs.get('value_indices')) == 1 and config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS):
+        if (config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_LAGRANGE_MULTIPLIERS) or (len(config.loss_func_type_kwargs.get('value_indices', [])) == 1 and config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS):
             self.lr_lambda = 0.0
 
         self.loss_func_type = config.loss_func_type
@@ -136,10 +129,11 @@ class ConstrainedOptimizer(VSLOptimizer):
         
         if self.lr_lambda > 0:
             self.optim_lambdas = th.optim.SGD(
-                (self.training_variables.lagrange_multipliers,), lr=self.lr_lambda, weight_decay=0.0)
+                self.training_variables.parameters(), lr=self.lr_lambda, weight_decay=0.0)
         self.time = 0
         self.training_variables.reset_lagrange_gradients()
     def zero_grad(self, set_to_none=True)-> None:
+        set_to_none=True
         super().zero_grad(set_to_none)
         if self.lr_lambda > 0:
             self.training_variables.requires_grad_(False)
@@ -171,18 +165,19 @@ class ConstrainedOptimizer(VSLOptimizer):
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
 
         if loss_gr_ideal is not None:
-            self.optimx_ideal.zero_grad()
+            
+            self.optimx_ideal.zero_grad(set_to_none=True)
             loss_sum = th.sum(loss_gr_ideal).detach()
             for i in range(len(loss_gr_ideal)):
                     (loss_gr_ideal[i]/loss_sum).backward(retain_graph=True)
                     self.optimx_ideal.step()
-                    self.optimx_ideal.zero_grad()
+                    self.optimx_ideal.zero_grad(set_to_none=True)
         self.training_variables.requires_grad_(False)
-        if self.lr_lambda > 0:
-            assert self.optim_lambdas.param_groups[0]['params'][0] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"    
+        #if self.lr_lambda > 0:
+            #assert self.optim_lambdas.param_groups[0]['params'][0:len(self.training_variables.lagrange_multipliers)] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
         
         target_gr_loss = loss_gr_ideal.detach() if loss_gr_ideal is not None else None
-
+        selected_indices = None
         if self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_EVERYTHING:
             loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss)
         elif (self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_ALL_GROUNDING) and (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
@@ -194,10 +189,11 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
             loss = loss_vs
         elif self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_GROUNDING:
-            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss, selected_indices=self.loss_func_kwargs['value_indices'])
-            unselected_indices = [i for i in range(len(loss_gr)) if i not in self.loss_func_kwargs['value_indices']]
+            selected_indices = self.loss_func_kwargs['value_indices']
+            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss, selected_indices=selected_indices)
+            unselected_indices = [i for i in range(len(loss_gr)) if i not in selected_indices]
             loss_gr[unselected_indices] = loss_gr[unselected_indices].detach()
-            if len(self.loss_func_kwargs['value_indices']) > 1:
+            if len(selected_indices) > 1:
                 self.training_variables.lagrange_multipliers[unselected_indices] = self.training_variables.lagrange_multipliers[unselected_indices].detach()
             else: 
                 self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
@@ -225,7 +221,8 @@ class ConstrainedOptimizer(VSLOptimizer):
     def step(self, closure=None)->None:
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         
-        print("LAGRANGE MULTIPLIERS BEFORE STEP:", self.training_variables.lagrange_multipliers)
+        
+        print("LAGRANGE MULTIPLIERS BEFORE STEP (VS right):", self.training_variables.get_multipliers())
         #print("TRAINING VARS", vars(self.training_variables))
         self.time += 1
         #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
@@ -247,7 +244,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.training_variables.prepare_for_optimizer_step()
         if self.lr_lambda > 0:
             self.optim_lambdas.step()
-        print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
+        #print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
         self.training_variables.post_optimizer_step()
 
             
@@ -255,7 +252,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         #print("GRADIENTS AFTER STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
         #print("GRADIENTS AFTER STEP - GR PARAMS:", [p.grad for p in self.params_gr])
         
-        print("LAGRANGE MULTIPLIERS AFTER STEP:", self.training_variables.lagrange_multipliers)
+        print("LAGRANGE MULTIPLIERS AFTER STEP (VS right):", self.training_variables.get_multipliers())
         
         #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
         return None
@@ -333,7 +330,7 @@ class MORewardTrainer(Trainer):
             args.include_for_metrics.append("loss")
         kwargs["args"] = args
         super().__init__(**kwargs)
-        self.compute_loss_func = partial(self.compute_loss_func, accelerator=self.accelerator, training_variables=self.model.training_variables)
+        #self.compute_loss_func = partial(self.compute_loss_func, training_variables=self.model.training_variables, config=self.model.config)
         self.model.loss_function = self.compute_loss_func
 
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
@@ -429,6 +426,7 @@ class MORewardTrainer(Trainer):
             #print("EVAL PREDICTIONS", logits_shortened)
             #print("EVAL LABELS:", labels_shortened)
             
+            
             loss_all = eval_pred.losses
             losses = np.mean(loss_all, axis=0)
             loss_vs = losses[-1]
@@ -448,7 +446,7 @@ class MORewardTrainer(Trainer):
                 result[f'coherence_{i}'] = float(ch)
             result['avg_coherence'] = np.mean(chr)
             assert chr.shape == (logits_shortened.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
-            print("EVAL METRICS:", result)
+            #print("EVAL METRICS:", result)
 
             training_variables.record_metrics(result, metric_type='validation')
             #input("...")
