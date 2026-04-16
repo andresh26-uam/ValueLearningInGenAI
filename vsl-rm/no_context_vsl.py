@@ -11,7 +11,7 @@ from pathlib import Path
 import random
 import sys
 
-USE_CPU = True
+USE_CPU = False
 # Make local package imports robust when sbatch executes from a temporary path.
 for candidate in (
     Path(__file__).resolve().parent,
@@ -23,7 +23,7 @@ for candidate in (
         break
 
 
-from typing import Optional
+from typing import Any, Optional
 
 from transformers import Trainer
 # import evaluate
@@ -67,6 +67,8 @@ class ScriptArguments:
         default=False, metadata={"help": "Whether to recalculate embeddings for the dataset."})
     use_embeddings: Optional[bool] = field(
         default=True, metadata={"help": "Whether to use embeddings for the dataset."})
+    use_cpu: Optional[bool] = field(
+        default=USE_CPU, metadata={"help": "Whether to use CPU for training. If False, will use GPU if available."})
     
     save_embedded_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
@@ -117,7 +119,7 @@ class ScriptArguments:
         },
     )
     bf16: Optional[bool] = field(
-        default=not USE_CPU,
+        default=True,
         metadata={
             "help": "This essentially cuts the training time in half if you want to sacrifice a little precision and have a supported GPU."
         },
@@ -141,7 +143,7 @@ class ScriptArguments:
     )
     optim: Optional[str] = field(
         # default="adamw_hf",
-        default="paged_adamw_32bit" if not USE_CPU else "adamw_torch_fused", # TODO. adamw_torch_fused is much faster on CPU. PagedAdamW_32bit is slower on CPU but works on GPU.
+        default="paged_adamw_32bit", # TODO. adamw_torch_fused is much faster on CPU. PagedAdamW_32bit is slower on CPU but works on GPU.
         # default="adamw_torch_fused",
         metadata={"help": "The optimizer to use."},
     )
@@ -162,7 +164,7 @@ class ScriptArguments:
     )
     eval_every_steps: Optional[int] = field(
         #default=999999,
-        default=20,
+        default=100,
         metadata={"help": "Eval the model every x steps"},
     )
     inner_optimization_iterations: Optional[int] = field(
@@ -173,10 +175,15 @@ class ScriptArguments:
         default=42,
         metadata={"help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
     )
+        
 
 parser = HfArgumentParser(ScriptArguments) # type: ignore
 script_args = parser.parse_args_into_dataclasses()[0]
-
+if script_args.use_cpu:
+            script_args.bf16 = False  # bf16 is not supported on CPU, so we disable it if use_cpu is True.
+            script_args.deepspeed = None  # Deepspeed is not compatible with CPU training, so we disable it if use_cpu is True.
+            script_args.optim = "adamw_torch_fused"  # Use a more CPU-friendly optimizer if use_cpu is True.
+            
 
 def seed_everything(seed: int, deterministic: bool = True):
     os.environ["PYTHONHASHSEED"] = str(seed)
@@ -248,7 +255,7 @@ training_args = TrainingArguments(
     max_grad_norm=0.01,
     run_name = run_name ,
     #report_to=None, # 'wandb'
-    use_cpu=USE_CPU,
+    use_cpu=script_args.use_cpu,
 )
 
 #with tempfile.TemporaryDirectory() as tmp:

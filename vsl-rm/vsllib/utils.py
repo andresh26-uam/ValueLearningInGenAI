@@ -18,7 +18,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 @th.compile
 def normalizing_params(used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
-        mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0))
+        mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0)
         return mults[:-1], mults[-1]
 
 @th.compile
@@ -282,8 +282,8 @@ class MORMTrainingVariables(th.nn.Module):
                  lambda_decay: float = 1e-9):
         
         super().__init__()
-        self.lagrange_multipliers = th.nn.Parameter(th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype))
-        self.vs_coeff = th.nn.Parameter(th.tensor([initial_lambda], requires_grad=False, device=device, dtype=dtype))
+        self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype)
+        self.vs_coeff = th.tensor([initial_lambda], requires_grad=False, device=device, dtype=dtype)
 
         self._last_selected_indices = None
 
