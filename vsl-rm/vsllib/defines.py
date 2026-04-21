@@ -53,12 +53,16 @@ ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer
    'ultrafeedback-honesty','ultrafeedback-helpfulness','beavertails-is_safe',
    'prometheus-score','argilla-overall_quality','argilla-judge_lm','code-complexity',
    'code-style','code-explanation','code-instruction-following','code-readability']
-ATTRIBUTES_ARMO_RM_INDEX = [9,8,7,6]
+ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
+ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
 REWARD_HEADS_OUTPUT = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': 'rewards',
 }
 REWARD_HEADS_INDICES = {
-    'RLHFlow/ArmoRM-Llama3-8B-v0.1': ATTRIBUTES_ARMO_RM_INDEX,
+    'RLHFlow/ArmoRM-Llama3-8B-v0.1': {
+        SupportedDatasets.ULTRAFEEDBACK: ATTRIBUTES_ARMO_RM_INDEX_ULTRA,
+        SupportedDatasets.PKUALIGNMENT: None,
+    }
 }
 NUM_OBJECTIVES = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': 19,

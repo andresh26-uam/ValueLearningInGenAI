@@ -54,6 +54,25 @@ from vsllib.dataset_processing import PairwisePreferenceDataset
 from dotenv import load_dotenv
 load_dotenv()
 
+
+def seed_everything(seed: int, deterministic: bool = True):
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    set_seed(seed)
+
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except Exception:
+            pass
+
 @dataclass
 class ScriptArguments:
     """
@@ -90,6 +109,7 @@ class ScriptArguments:
     lambda_decay: Optional[float] = field(default=0.0005)
     rew_center_coefficient: Optional[float] = field(default=0.01) # TODO Recommended by TRL library (RewardTrainer): 0.01
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
+    max_grad_norm: Optional[float] = field(default=0.01) # TODO 0.01?
 
     learning_rate: Optional[float] = field(default=0.001)
     grounding_learning_rate: Optional[float] = field(default=0.001) # TODO must be > 1e-4 to make any effect??
@@ -177,37 +197,58 @@ class ScriptArguments:
         default=42,
         metadata={"help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
     )
+    config_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a JSON file containing ScriptArguments values."},
+    )
         
+def argument_parser(parser):
+    script_args = parser.parse_args_into_dataclasses()[0]
+    if script_args.config_file:
+        config_path = os.path.abspath(script_args.config_file)
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_data = json.load(f)
 
-parser = HfArgumentParser(ScriptArguments) # type: ignore
-script_args = parser.parse_args_into_dataclasses()[0]
-if script_args.use_cpu:
+        if not isinstance(config_data, dict):
+            raise ValueError(f"Expected JSON object in config file, got {type(config_data).__name__}")
+
+        valid_fields = set(ScriptArguments.__dataclass_fields__.keys())
+        unknown_keys = set(config_data.keys()) - valid_fields
+        if unknown_keys:
+            raise ValueError(f"Unknown keys in config file: {sorted(unknown_keys)}")
+
+    # Start from parsed CLI/default values.
+        merged_args = vars(script_args).copy()
+    # Apply JSON values.
+        merged_args.update(config_data)
+
+    # Re-apply explicit CLI overrides so precedence is: CLI > JSON > defaults.
+        cli_override_keys = set()
+        for arg in sys.argv[1:]:
+            if not arg.startswith("--"):
+                continue
+            key = arg[2:].split("=", 1)[0]
+            if key != "config_file" and key in valid_fields:
+                cli_override_keys.add(key)
+        for key in cli_override_keys:
+            merged_args[key] = getattr(script_args, key)
+
+        script_args = ScriptArguments(**merged_args)
+    
+    # Parsing enum values
+    script_args.dataset = SupportedDatasets(script_args.dataset)
+    script_args.loss_func_type = MOLossFunctions(script_args.loss_func_type)
+    if script_args.use_cpu:
             script_args.bf16 = False  # bf16 is not supported on CPU, so we disable it if use_cpu is True.
             script_args.deepspeed = None  # Deepspeed is not compatible with CPU training, so we disable it if use_cpu is True.
             script_args.optim = "adamw_torch_fused"  # Use a more CPU-friendly optimizer if use_cpu is True.
             
-
-def seed_everything(seed: int, deterministic: bool = True):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    set_seed(seed)
-
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-        try:
-            torch.use_deterministic_algorithms(True, warn_only=True)
-        except Exception:
-            pass
+    return script_args
 
 
+parser = HfArgumentParser(ScriptArguments) # type: ignore
 
-
+script_args = argument_parser(parser)
 
 seed_everything(int(script_args.seed))
 
@@ -220,10 +261,8 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_auth_token=True)
 tokenizer.truncation_side = "left"
 tokenizer.model_max_length = script_args.max_length
 
-
 # Get the dataset
-script_args.dataset = SupportedDatasets(script_args.dataset)
-script_args.loss_func_type = MOLossFunctions(script_args.loss_func_type)
+
 train_path = TRAIN_PATHS[script_args.dataset]
 extra_keep_keys = EXTRA_KEYS[script_args.dataset]
 test_proportion_or_indices = get_test_indices(script_args.dataset)
@@ -232,6 +271,7 @@ eval_proportion_or_indices = get_validation_indices(script_args.dataset)
 output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
 run_name = f"{script_args.dataset.value}_" + script_args.run_name + f"_{datetime.now().strftime('%m%d_%H%M%S')}_epo{script_args.num_train_epochs}_s{script_args.seed}" if script_args.run_name is not None else None
+
 training_args = TrainingArguments(
     output_dir=output_name,
     seed=int(script_args.seed),
@@ -261,7 +301,7 @@ training_args = TrainingArguments(
     warmup_steps=0, # TODO. 50?
     label_names=["labels"],
     report_to="wandb", # 'wandb'
-    max_grad_norm=0.01,
+    max_grad_norm=script_args.max_length, # TODO 0.01?
     run_name = run_name ,
     #report_to=None, # 'wandb'
     use_cpu=script_args.use_cpu,
@@ -308,6 +348,7 @@ def main_fun() -> None:
                                        extra_keep_keys=extra_keep_keys, 
                                        retokenize=script_args.retokenize,
                                        recalculate_embeddings=script_args.recalculate_embeddings,
+                                       use_embeddings=script_args.use_embeddings,
                                        model_for_embeddings=model,
                                        collator=dc,
                                        split_seed=int(42),
@@ -320,7 +361,7 @@ def main_fun() -> None:
 
     reward_heads_module_name = REWARD_HEADS_OUTPUT.get(script_args.model_name, None)
     value_system_module_name = VALUE_SYSTEM_OUTPUT.get(script_args.model_name, None)
-    reward_head_indices = REWARD_HEADS_INDICES.get(script_args.model_name, None)
+    reward_head_indices = REWARD_HEADS_INDICES.get(script_args.model_name, {}).get(script_args.dataset, None)
     num_values_to_use = len(dataset.value_keys)
     
     

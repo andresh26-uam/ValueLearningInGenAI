@@ -99,7 +99,7 @@ def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTo
 
 class PairwisePreferenceDataset():
     
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
         should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
         self.data: Dataset 
 
@@ -125,7 +125,8 @@ class PairwisePreferenceDataset():
         
         self.data = self.data.shuffle(seed=split_seed)
         
-        if self.data[0].get("embedding_1", None) is None or retokenize:
+        
+        if (self.data[0].get("embedding_1", None) is None or retokenize) and use_embeddings:
             recalculate_embeddings = True
 
         self.max_length = tokenizer.model_max_length
@@ -138,6 +139,7 @@ class PairwisePreferenceDataset():
         
         if self.data[0].get("labels") is None:
             self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), num_proc=16, load_from_cache_file=not retokenize)
+        
         
         if model_for_embeddings is not None and recalculate_embeddings:
             batch_size = 4
@@ -180,7 +182,8 @@ class PairwisePreferenceDataset():
                             batch_size=batch_size,
                             num_proc=4
                         )
-
+        print("AFTER EMBED?", len(self.data))
+        
         if model_for_embeddings is not None and should_rewrite_embedded_dataset:
             output_path = Path(embedded_dataset_output_path)
             output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -192,11 +195,13 @@ class PairwisePreferenceDataset():
                 shutil.rmtree(output_path)
             temp_output_path.replace(output_path)
             print(f"Saved embedded dataset to {output_path}")
-
+        print("AFTER SAVE", len(self.data))
+        
         if cleanup_cache_files:
             removed_cache_files = self.data.cleanup_cache_files()
             print(f"Removed {removed_cache_files} dataset cache files")
-
+        print("AFTER REMOVE CACHE", len(self.data))
+        
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
 
         if isinstance(test_proportion_or_indices, float):
@@ -209,12 +214,16 @@ class PairwisePreferenceDataset():
             print("Using custom test and eval indices for dataset splitting.")
             print(f"Test indices: {test_proportion_or_indices}")
             print(f"Eval indices: {eval_proportion_or_indices}")
+            print("LEN DATA GETTING SPLITS", len(self.data))
             assert isinstance(test_proportion_or_indices, list) and isinstance(eval_proportion_or_indices, list), "If test_proportion_or_indices is not a float, it must be a list of indices. Same for eval_proportion_or_indices."
             assert np.intersect1d(test_proportion_or_indices, eval_proportion_or_indices).size == 0, "Test and eval indices should not overlap."
-            self.test_dataset = self.data[test_proportion_or_indices]
-            self.eval_dataset = self.data[eval_proportion_or_indices]
+            self.test_dataset = self.data.select(test_proportion_or_indices)
+            self.eval_dataset = self.data.select(eval_proportion_or_indices)
             remaining_indices = [i for i in range(len(self.data)) if (i not in test_proportion_or_indices) and (i not in eval_proportion_or_indices)]
-            self.train_dataset = self.data[remaining_indices]
+            self.train_dataset = self.data.select(remaining_indices)
+            print(f"Train dataset size: {len(self.train_dataset)}")
+            print(f"Eval dataset size: {len(self.eval_dataset)}")
+            print(f"Test dataset size: {len(self.test_dataset)}")
 
     def __len__(self):
         return len(self.data)

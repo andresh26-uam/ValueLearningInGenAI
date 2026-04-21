@@ -1,0 +1,1 @@
+bash sbatch_from_json.sh eval_armo.json --dataset=pku --run_name=ARMOEVAL

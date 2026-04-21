@@ -200,7 +200,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.base_model_value_system_module_name = base_model_value_system_module_name
         self.loss_func_type = MOLossFunctions(loss_func_type)
         self.loss_func_type_kwargs = loss_func_kwargs if loss_func_kwargs is not None else {}
-        self.base_model_reward_head_indices = base_model_reward_head_indices if base_model_reward_head_indices is not None else list(range(num_values))
+        self.base_model_reward_head_indices = base_model_reward_head_indices if base_model_reward_head_indices is not None else "use_base_model_value_system_module_name"
 
 LossFuncType = Callable[[th.Tensor, th.Tensor, th.Tensor, th.Tensor, MORMForSequenceClassificationConfig, MORMTrainingVariables, Any], th.Tensor]
 def parse_loss_function(config: MORMForSequenceClassificationConfig) -> LossFuncType:
@@ -748,29 +748,32 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         score_attr = self.base_model_score_attr_name
 
         rewards = getattr(output, rewards_attr, None)
-        if rewards is None:
-            raise ValueError(f"Base model output does not have reward attribute '{rewards_attr}'.")
-
         score = getattr(output, score_attr, None)
         if score is None:
             raise ValueError(f"Base model output does not have score attribute '{score_attr}'.")
-
-        rewards = self._select_reward_indices(rewards)
-
-        
-
-        if rewards.ndim == 1:
-            rewards = rewards.unsqueeze(0)
-
+    
         if score.ndim == 0:
             score = score.unsqueeze(0).unsqueeze(-1)
         elif score.ndim == 1:
             score = score.unsqueeze(-1)
         elif score.ndim > 2:
             score = score.reshape(score.shape[0], -1)
-        
+
+        if rewards is None or self.base_model_reward_head_indices == "use_base_model_value_system_module_name":
+            
+
+            rewards = score.repeat(1, self.num_values)
+        else:
+            rewards = self._select_reward_indices(rewards)
+
         
 
+        
+
+        
+        
+        assert rewards.shape[0] == score.shape[0], f"Batch size of rewards and score must match, but got {rewards.shape[0]} and {score.shape[0]}"   
+        assert rewards.shape[-1] == self.num_values, f"Expected rewards to have last dimension {self.num_values}, but got shape {rewards.shape}"
         assert score.shape[-1] == 1, f"Expected score to have last dimension 1 after processing, but got shape {score.shape}"
         """if not isinstance(rewards, th.Tensor):
             rewards = th.as_tensor(rewards)

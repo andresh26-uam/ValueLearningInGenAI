@@ -555,7 +555,6 @@ class MORewardTrainer(Trainer):
         
         l=loss.shape[0]
         assert l > 1
-        assert l % 2 == 1, f"Expected odd number of rewards in loss tensor (num_values, num_values, 1), got {l}. Make sure your data collator is correctly collating pairs of samples with their labels."
         if l == self.model.num_values*2 +1: 
             loss_gr = loss[0:l//2]
             loss_gr_ideal = loss[l//2:l-1]
@@ -672,7 +671,7 @@ class MORewardTrainer(Trainer):
                         loss = loss.detach().mean(dim=0) #CHANGED FOR MULTILABEL LOSS!
                     else:
                         loss = loss.detach()
-                    assert loss.shape == (5,),  f"Expected loss to be a scalar tensor, got {loss.shape}. Make sure your model is returning a scalar loss value for evaluation."
+                    assert len(loss.shape) == 1,  f"Expected loss to be a 1d vector, got {loss.shape}"
 
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
