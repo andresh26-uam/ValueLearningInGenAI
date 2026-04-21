@@ -10,6 +10,8 @@ import os
 from pathlib import Path
 import random
 import sys
+from pprint import pprint
+
 
 USE_CPU = False
 # Make local package imports robust when sbatch executes from a temporary path.
@@ -90,10 +92,10 @@ class ScriptArguments:
     layer_normalization: Optional[str] = field(default="none") # TODO "BatchNorm" or "LayerNorm" or "none". 
 
     learning_rate: Optional[float] = field(default=0.001)
-    grounding_learning_rate: Optional[float] = field(default=0.002) # TODO must be > 1e-4 to make any effect??
+    grounding_learning_rate: Optional[float] = field(default=0.001) # TODO must be > 1e-4 to make any effect??
     lagrange_learning_rate: Optional[float] = field(default=0.1) # TODO 0.01
 
-    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.05)
+    grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.01)
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
     grad_on_only_worst_value: Optional[bool] = field(default=False)
     zero_constraint: Optional[bool] = field(default=True)
@@ -364,7 +366,7 @@ def main_fun() -> None:
             , " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
     print("Script arguments: ")
-    from pprint import pprint
+    
     pprint(vars(script_args))
     #exit(0)
     trainer : Trainer = MORewardTrainer(
