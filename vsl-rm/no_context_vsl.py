@@ -43,7 +43,7 @@ from transformers import (
 
 
 from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, SupportedDatasets, EXTRA_KEYS, TRAIN_PATHS, get_test_indices, get_validation_indices
-from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
+from vsllib.reward_models import VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
 from vsllib.dataset_processing import PairwisePreferenceDataset
@@ -102,6 +102,14 @@ class ScriptArguments:
             "help": "Path to deepspeed config if using deepspeed. You may need this if the model that you want to train doesn't fit on a single GPU."
         },
     )
+
+    hidden_size: Optional[int] = field(default=1024, metadata={"help": "The hidden size of the grounding MLP."})
+    num_hidden_layers: Optional[int] = field(default=0, metadata={"help": "The number of hidden layers in the grounding MLP. If 0, there will be no hidden layers and the value head will be a simple linear layer from the prompt-respose final embedding into the number of values."})
+    value_layer_dropout: Optional[float] = field(default=0.0)
+    layer_activation: Optional[str] = field(default="ReLU", metadata={"help": f"The activation function to use for the hidden layers. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"}) # TODO "ReLU" see 
+    final_layer_activation: Optional[str] = field(default="none", metadata={"help": f"The activation function to use for the final layer. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"}) # TODO "ReLU" or "GELU" or "none"
+
+
     per_device_train_batch_size: Optional[int] = field(default=128)
     per_device_eval_batch_size: Optional[int] = field(default=128)
     gradient_accumulation_steps: Optional[int] = field(default=5) # TODO 32?
@@ -380,9 +388,9 @@ def main_fun() -> None:
                                                     loss_func_type=script_args.loss_func_type,
                                                     loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs) if script_args.loss_func_type_kwargs is not None else {},
                                                     lambda_decay=script_args.lambda_decay,
-                                            hidden_sizes=[], value_layer_dropout=0.0,
-                                            value_layer_intermediate_activation="ReLU", 
-                                            value_layer_final_activation="none",
+                                            hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, value_layer_dropout=script_args.value_layer_dropout,
+                                            value_layer_intermediate_activation=script_args.layer_activation, 
+                                            value_layer_final_activation=script_args.final_layer_activation,
                                             layer_normalization=script_args.layer_normalization,
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
                                             gradient_accumulation_steps=script_args.gradient_accumulation_steps,

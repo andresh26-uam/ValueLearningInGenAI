@@ -27,6 +27,14 @@ EPSILON = 4.0e-2
 SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
 # 0.00999.
 
+VALUE_LAYER_ACTIVATIONS = {
+    "ReLU": nn.ReLU,
+    "Tanh": nn.Tanh,
+    "Softplus": nn.Softplus,
+    "SiLU": nn.SiLU,
+    "none": None,
+}
+
 class LinearAlignmentLayer(th.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=None, data=None, n_values=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype)
@@ -157,10 +165,10 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         assert num_values > 0, "num_values must be greater than 0"
         #assert len(hidden_sizes) > 0, "hidden_sizes must be a non-empty list"
 
-        if value_layer_intermediate_activation not in ['ReLU', 'SiLU', 'Tanh', 'Softplus']:
-             raise ValueError(f"value_layer_intermediate_activation must be one of 'ReLU', 'SiLU', 'Tanh', 'Softplus', but got {value_layer_intermediate_activation}")
-        if value_layer_final_activation not in ['ReLU', 'SiLU', 'Tanh', 'Softplus', 'none']:
-             raise ValueError(f"value_layer_final_activation must be one of 'ReLU', 'SiLU', 'Tanh', 'Softplus', 'none', but got {value_layer_final_activation}")
+        if value_layer_intermediate_activation not in VALUE_LAYER_ACTIVATIONS.keys():
+             raise ValueError(f"value_layer_intermediate_activation must be one of {list(VALUE_LAYER_ACTIVATIONS.keys())}, but got {value_layer_intermediate_activation}")
+        if value_layer_final_activation not in VALUE_LAYER_ACTIVATIONS.keys():
+             raise ValueError(f"value_layer_final_activation must be one of {list(VALUE_LAYER_ACTIVATIONS.keys())}, but got {value_layer_final_activation}")
 
         if layer_normalization not in ['LayerNorm', 'BatchNorm', 'none']:
             raise ValueError(f"layer_normalization must be one of 'LayerNorm', 'BatchNorm', 'none', but got {layer_normalization}")
@@ -832,32 +840,23 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
         input_size = self._infer_base_hidden_size(base_model)
         for hidden_size in config.hidden_sizes: 
             layers.append(nn.Linear(input_size, hidden_size, dtype=config.dtype, device=base_model.device))
-            if config.value_layer_intermediate_activation == "ReLU":
-                layers.append(nn.ReLU())
-            elif config.value_layer_intermediate_activation == "Tanh":
-                layers.append(nn.Tanh())
-            elif config.value_layer_intermediate_activation == "Softplus":
-                layers.append(nn.Softplus())
-            elif config.value_layer_intermediate_activation == "SiLU":
-                layers.append(nn.SiLU())
-            else:
+            try:
+                intermediate_activation = VALUE_LAYER_ACTIVATIONS[config.value_layer_intermediate_activation]
+            except KeyError:
                 raise ValueError(f"Unsupported intermediate activation: {config.value_layer_intermediate_activation}")
+            if intermediate_activation is None:
+                raise ValueError(f"Unsupported intermediate activation: {config.value_layer_intermediate_activation}")
+            layers.append(intermediate_activation())
             #layers.append(nn.Dropout(config.value_layer_dropout))
             input_size = hidden_size
         layers.append(nn.Linear(input_size, n_outputs, dtype=config.dtype, device=base_model.device))
         
-        if config.value_layer_final_activation == "ReLU":
-            layers.append(nn.ReLU())
-        elif config.value_layer_final_activation == "Tanh":
-            layers.append(nn.Tanh())
-        elif config.value_layer_final_activation == "Softplus": 
-            layers.append(nn.Softplus())
-        elif config.value_layer_final_activation == "SiLU":
-            layers.append(nn.SiLU())
-        elif config.value_layer_final_activation == "none":
-            pass
-        else:
+        try:
+            final_activation = VALUE_LAYER_ACTIVATIONS[config.value_layer_final_activation]
+        except KeyError:
             raise ValueError(f"Unsupported final activation: {config.value_layer_final_activation}")
+        if final_activation is not None:
+            layers.append(final_activation())
 
         return nn.Sequential(*layers)
 
