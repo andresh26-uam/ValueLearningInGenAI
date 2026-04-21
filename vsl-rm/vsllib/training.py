@@ -12,7 +12,7 @@ from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
-from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, rewards_and_labels_to_logits_and_targets
+from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
 from vsllib.utils import MORMTrainingVariables, to_float
 
 
@@ -145,22 +145,19 @@ class ConstrainedOptimizer(VSLOptimizer):
     
     def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
         
-        x = self.params_gr # Possibly need flatten into single tensor.
-        
-        w = self.params_vs
-        #self.zero_grad()    
-
-        
-
-        
-        # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
-        
-        #print("BEFORE", x[0].data[0:10])
-        if len(w) > 0:
-            assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
-            assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
-        if len(x) > 0:
-            assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
+        if __debug__:
+            x = self.params_gr # Possibly need flatten into single tensor.
+            
+            w = self.params_vs
+            #self.zero_grad()    
+            # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
+            
+            #print("BEFORE", x[0].data[0:10])
+            if len(w) > 0:
+                assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
+                assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
+            if len(x) > 0:
+                assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
             #assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
         # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
 
@@ -227,11 +224,12 @@ class ConstrainedOptimizer(VSLOptimizer):
         self.time += 1
         #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
         #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
-        if self.lr_grounding > 0.0: 
-            assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
-        
-        if self.lr_value_system > 0.0:
-            assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
+        if __debug__:
+            if self.lr_grounding > 0.0: 
+                assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
+            
+            if self.lr_value_system > 0.0:
+                assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
             #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
         #print("GRADIENTS BEFORE STEP - GR PARAMS:", [p.grad for p in self.params_gr])
             
@@ -440,11 +438,20 @@ class MORewardTrainer(Trainer):
             represent = accuracy_logits(logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
             result['representativeness'] = represent
 
+            represent_smooth = accuracy_logits_smooth(logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
+            result['representativeness_smooth'] = represent_smooth
+
             chr = accuracy_logits(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
             result['coherences'] = chr.tolist()
+            chr_smooth = accuracy_logits_smooth(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
+            result['coherences_smooth'] = chr_smooth.tolist()
             for i, ch in enumerate(result['coherences']):
                 result[f'coherence_{i}'] = float(ch)
+            
+            for i, ch in enumerate(result['coherences_smooth']):
+                result[f'coherence_smooth_{i}'] = float(ch)
             result['avg_coherence'] = np.mean(chr)
+            result['avg_coherence_smooth'] = np.mean(chr_smooth)
             assert chr.shape == (logits_shortened.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
             #print("EVAL METRICS:", result)
 
@@ -804,7 +811,7 @@ class MORewardTrainer(Trainer):
                     losses = self.gather_function(losses.repeat(batch_size))
                 elif len(losses.shape) == 1:
                     losses = self.gather_function(losses.unsqueeze_(0).repeat(batch_size, 1))
-                    if not self.accelerator.gradient_state.end_of_dataloader:
+                    if __debug__ and not self.accelerator.gradient_state.end_of_dataloader:
                         assert losses.shape[0] == batch_size, f"Expected losses to have shape ({batch_size},) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
                     assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size} (or smaller), {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
                 

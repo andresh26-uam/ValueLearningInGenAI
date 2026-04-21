@@ -40,7 +40,7 @@ from transformers import (
 )
 
 
-from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, ULTRAFEEDBACK_EXTRA_KEYS, ULTRAFEEDBACK_PROCESSED_PATH, VALUE_SYSTEM_OUTPUT
+from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, SupportedDatasets, EXTRA_KEYS, TRAIN_PATHS, get_test_indices, get_validation_indices
 from vsllib.reward_models import MOLossFunctions, MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.utils import MORewardDataCollatorWithPadding, save_checkpoint_with_seed
@@ -100,7 +100,7 @@ class ScriptArguments:
     use_ideal_grounding_model : Optional[bool] = field(default=False)
 
     loss_func_type: Optional[str] = field(
-        default=MOLossFunctions.DEFAULT,
+        default=MOLossFunctions.DEFAULT.value,
         metadata={"help": "The name of the run for logging purposes."},
     )
     loss_func_type_kwargs: Optional[str] = field(
@@ -128,8 +128,8 @@ class ScriptArguments:
         default=100,
         metadata={"help": "The number of training epochs for the reward model."},
     )
-    train_set_path: Optional[str] = field(
-        default=ULTRAFEEDBACK_PROCESSED_PATH,
+    dataset: Optional[SupportedDatasets] = field(
+        default=SupportedDatasets.PKUALIGNMENT.value, 
         metadata={"help": "The dir of the subset of the training data to use"},
     )
     
@@ -154,7 +154,7 @@ class ScriptArguments:
     max_length: Optional[int] = field(default=4096)
 
     run_name: Optional[str] = field(
-        default_factory=lambda: f"run_{datetime.now().strftime('%m%d_%H%M%S')}",
+        default_factory=lambda: f"run_",
         metadata={"help": "The name of the run for logging purposes."},
     )
 
@@ -218,11 +218,18 @@ tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, use_auth_token=True)
 tokenizer.truncation_side = "left"
 tokenizer.model_max_length = script_args.max_length
 
+
 # Get the dataset
-train_path = script_args.train_set_path
+script_args.dataset = SupportedDatasets(script_args.dataset)
+script_args.loss_func_type = MOLossFunctions(script_args.loss_func_type)
+train_path = TRAIN_PATHS[script_args.dataset]
+extra_keep_keys = EXTRA_KEYS[script_args.dataset]
+test_proportion_or_indices = get_test_indices(script_args.dataset)
+eval_proportion_or_indices = get_validation_indices(script_args.dataset)
+
 output_name = script_args.output_path + script_args.model_name.split("/")[-1]
 
-run_name = script_args.run_name + f"_epo{script_args.num_train_epochs}_s{script_args.seed}" if script_args.run_name is not None else None
+run_name = f"{script_args.dataset.value}_" + script_args.run_name + f"_{datetime.now().strftime('%m%d_%H%M%S')}_epo{script_args.num_train_epochs}_s{script_args.seed}" if script_args.run_name is not None else None
 training_args = TrainingArguments(
     output_dir=output_name,
     seed=int(script_args.seed),
@@ -260,10 +267,6 @@ training_args = TrainingArguments(
 
 #with tempfile.TemporaryDirectory() as tmp:
 # Do not force FP16 weights here: AMP/Accelerate expects master grads handling.
-
-
-extra_keep_keys = ULTRAFEEDBACK_EXTRA_KEYS if 'ltrafeedback' in script_args.train_set_path else []
-
 
 def main_fun() -> None:
     torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
@@ -306,8 +309,8 @@ def main_fun() -> None:
                                        model_for_embeddings=model,
                                        collator=dc,
                                        split_seed=int(42),
-                                       eval_proportion=0.05, # TODO 0.05
-                                       test_proportion=0.1, # TODO 0.1.
+                                       eval_proportion_or_indices=eval_proportion_or_indices, 
+                                       test_proportion_or_indices=test_proportion_or_indices,
                                        cleanup_cache_files=bool(script_args.cleanup_dataset_cache_files),
                                        )
     print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
@@ -334,8 +337,8 @@ def main_fun() -> None:
                                                     loss_func_type=script_args.loss_func_type,
                                                     loss_func_kwargs=json.loads(script_args.loss_func_type_kwargs) if script_args.loss_func_type_kwargs is not None else {},
                                                     lambda_decay=script_args.lambda_decay,
-                                            hidden_sizes=[1024, 1024, 1024], value_layer_dropout=0.0,
-                                            value_layer_intermediate_activation="SiLU", 
+                                            hidden_sizes=[], value_layer_dropout=0.0,
+                                            value_layer_intermediate_activation="ReLU", 
                                             value_layer_final_activation="none",
                                             layer_normalization=script_args.layer_normalization,
                                             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio, 
@@ -354,6 +357,7 @@ def main_fun() -> None:
 
     
     mo_model = MORMForSequenceClassification(config=mo_config, base_model=model)
+    
     sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(training_args, mo_model)
 
     print("Sub optimizer class: ", sub_optimizer_cls

@@ -3,7 +3,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import shutil
-from typing import Any, Optional
+from typing import Any, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
@@ -14,7 +14,7 @@ from vsllib.defines import NO_RATING_MASK
 from dotenv import load_dotenv
 load_dotenv()
 
-from datasets import DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -99,8 +99,9 @@ def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTo
 
 class PairwisePreferenceDataset():
     
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion: float = 0.05, test_proportion: float = 0.1):
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
         should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
+        self.data: Dataset 
 
         if model_for_embeddings is not None and embedded_dataset_output_path is None:
             embedded_dataset_output_path = f"{path.rstrip('/')}_embed_{model_for_embeddings.config._name_or_path.replace('/', '_')}"
@@ -112,16 +113,21 @@ class PairwisePreferenceDataset():
 
             if model_for_embeddings is not None and not should_rewrite_embedded_dataset:
                 try:
-                    self.data = load_from_disk(embedded_dataset_output_path).shuffle(seed=split_seed)
+                    self.data = load_from_disk(embedded_dataset_output_path)
                 except FileNotFoundError:
                     print(f"Embedded dataset not found at {embedded_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
-                    self.data = load_from_disk(path).shuffle(seed=split_seed)
+                    self.data = load_from_disk(path)
             else:
                 
-                self.data = load_from_disk(path).shuffle(seed=split_seed)
+                self.data: Dataset = load_from_disk(path)
         else:
-            self.data = load_dataset(path, split="train").shuffle(seed=split_seed) 
+            self.data = load_dataset(path, split="train")
         
+        self.data = self.data.shuffle(seed=split_seed)
+        
+        if self.data[0].get("embedding_1", None) is None or retokenize:
+            recalculate_embeddings = True
+
         self.max_length = tokenizer.model_max_length
         # Extract value keys from the first data item
         if self.data:
@@ -192,10 +198,23 @@ class PairwisePreferenceDataset():
             print(f"Removed {removed_cache_files} dataset cache files")
 
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
-        self.data: DatasetDict = self.data.train_test_split(test_size=test_proportion, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
-        self.train_dataset, self.test_dataset = self.data['train'], self.data['test']	
-        self.train_dataset = self.train_dataset.train_test_split(test_size=eval_proportion, seed=split_seed)
-        self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
+
+        if isinstance(test_proportion_or_indices, float):
+            assert isinstance(eval_proportion_or_indices, float), "If test_proportion_or_indices is a float, eval_proportion_or_indices must also be a float."
+            self.data: DatasetDict = self.data.train_test_split(test_size=test_proportion_or_indices, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
+            self.train_dataset, self.test_dataset = self.data['train'], self.data['test']
+            self.train_dataset = self.train_dataset.train_test_split(test_size=eval_proportion_or_indices, seed=split_seed)
+            self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']	
+        else:
+            print("Using custom test and eval indices for dataset splitting.")
+            print(f"Test indices: {test_proportion_or_indices}")
+            print(f"Eval indices: {eval_proportion_or_indices}")
+            assert isinstance(test_proportion_or_indices, list) and isinstance(eval_proportion_or_indices, list), "If test_proportion_or_indices is not a float, it must be a list of indices. Same for eval_proportion_or_indices."
+            assert np.intersect1d(test_proportion_or_indices, eval_proportion_or_indices).size == 0, "Test and eval indices should not overlap."
+            self.test_dataset = self.data[test_proportion_or_indices]
+            self.eval_dataset = self.data[eval_proportion_or_indices]
+            remaining_indices = [i for i in range(len(self.data)) if (i not in test_proportion_or_indices) and (i not in eval_proportion_or_indices)]
+            self.train_dataset = self.data[remaining_indices]
 
     def __len__(self):
         return len(self.data)

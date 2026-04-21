@@ -130,9 +130,6 @@ class MORewardDataCollatorWithPadding:
             merged_features.append(
                 dic2
             )
-        """if __debug__:
-            embed_before = th.tensor(merged_features[0].get("embedding", None))"""
-
         batch = self.tokenizer.pad(
             merged_features,
             padding=self.padding,
@@ -141,29 +138,14 @@ class MORewardDataCollatorWithPadding:
             return_tensors=self.return_tensors,
             
         )
-        """if __debug__:
-            embed_after = batch.get("embedding", None)[0]
-            th.testing.assert_close(embed_before, embed_after, atol=1e-6, rtol=1e-6)
-        """
-        #print(batch.keys())
-        #assert "embedding" in batch, "Expected 'embedding' key in the batch after padding."
-        #assert "context_embedding" in batch, "Expected 'context_embedding' key in the batch after padding."
-
         
-        assert batch["input_ids"].shape[:-1] == batch["labels"].shape[:-1], f"Input IDs shape: {batch['input_ids'].shape}, Labels shape: {batch['labels'].shape}"
-        """batch = {
-            "input_ids": batch["input_ids"],
-            "attention_mask": batch["attention_mask"],
-            "labels": batch["labels"],
-            "return_loss": True, 
-        }"""
         batch["return_loss"] = True
         batch["embedding"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch.keys() else None
         batch["context_embedding"] = batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch.keys() else None
-        if self.use_embeddings:
+        """if self.use_embeddings:
             assert batch["embedding"] is not None, "Expected 'embedding' key in the batch when use_embeddings is True."
             assert batch["context_embedding"] is not None, "Expected 'context_embedding' key in the batch when use_embeddings is True."
-        
+        """
         return batch
 
 def to_float(value: Any) -> float:
@@ -197,14 +179,16 @@ class MORMTrainingVariables(th.nn.Module):
         
         if self.last_accumulated_grounding_loss is not None:
             result["grounding_loss"] = to_float(self.last_accumulated_grounding_loss)
-            for v in range(len(self.lagrange_multipliers)):
+            for v in range(len(self.last_accumulated_grounding_loss)):
                 result[f"grounding_loss_{v}"] = to_float(self.last_accumulated_grounding_loss[v])
             
         if self.last_accumulated_vs_loss is not None:
             result["value_system_loss"] = to_float(self.last_accumulated_vs_loss)
-        for i in range(len(self.lagrange_multipliers)):
-            if self.lagrange_multipliers[i] is not None:
-                result[f"lagrange_multiplier_{i}"] = to_float(self.lagrange_multipliers[i])
+        multipliers = self.get_multipliers(used_only=False)[0]
+
+        for i in range(len(multipliers)):
+            if multipliers[i] is not None:
+                result[f"lagrange_multiplier_{i}"] = to_float(multipliers[i])
         if self.maximum_coherences_tendency is not None:
             result["maximum_coherences_tendency"] = to_float(self.maximum_coherences_tendency)
         if self.minimum_grounding_loss_tendency is not None:
@@ -214,10 +198,11 @@ class MORMTrainingVariables(th.nn.Module):
     def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None, selected_indices: list = None) -> th.Tensor:
         
         used_mults, vs_coeff = self.normalize_coefficients(selected_indices=selected_indices)
-        if selected_indices is not None:
-            assert used_mults.shape == (len(selected_indices),), f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
-        else:
-            assert used_mults.shape == grounding_losses.shape, f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
+        if __debug__:
+            if selected_indices is not None:
+                assert used_mults.shape == (len(selected_indices),), f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
+            else:
+                assert used_mults.shape == grounding_losses.shape, f"Expected used_mults shape to match grounding_losses shape, but got {used_mults.shape} and {grounding_losses.shape}"
         
         
         
@@ -350,7 +335,7 @@ class MORMTrainingVariables(th.nn.Module):
             #coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) #should be...? 2)
         
         was_grad_none = self.lagrange_multipliers.grad is None
-        assert was_grad_none
+        
         if self._last_selected_indices is not None:
             norm_penalty_ =  norm_penalty(self.lagrange_multipliers[self._last_selected_indices], self.vs_coeff, self.lambda_decay)
         else:
@@ -466,7 +451,6 @@ class MORMTrainingVariables(th.nn.Module):
             
             if self.minimum_grounding_loss_tendency is None:
                 self.minimum_grounding_loss_tendency = th.full_like(minimum_actual, fill_value=th.max(minimum_actual).float()).detach()
-                assert self.minimum_vs_loss_tendency is None, "Expected minimum_vs_loss_tendency to be None when minimum_grounding_loss_tendency is None."
                 self.minimum_vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
             else:
                 minimum = th.minimum(minimum_actual, self.minimum_grounding_loss_tendency)
@@ -498,7 +482,6 @@ class MORMTrainingVariables(th.nn.Module):
                     self._cached_coherences.append(coherences)
                     
                     avg_c = metrics.get("avg_coherence", None)
-                    assert avg_c is not None, "Expected 'avg_coherence' in metrics when 'coherences' is present."
                     if avg_c is not None:
                         self._cached_avg_coherence.append(avg_c)
                 represent = metrics.get("representativeness", None)     
