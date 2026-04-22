@@ -17,11 +17,6 @@ import numpy as np
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 @th.compile
-def normalizing_params(used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
-        mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0)
-        return mults[:-1], mults[-1]
-
-@th.compile
 def norm_penalty( lags, vs_coeff, penalty_coeff) -> th.Tensor:
         return penalty_coeff*th.norm(th.cat([lags, vs_coeff],dim=0), p=2)
     
@@ -248,11 +243,16 @@ class MORMTrainingVariables(th.nn.Module):
         yield self.vs_coeff
     
     
+    @th.compile
+    def normalizing_params(self, used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
+            mults = self.softmax(th.cat([used_mults, vs_coeff], dim=0))
+            return mults[:-1], mults[-1]
+
     
     def normalize_coefficients(self, selected_indices: list = None) -> th.Tensor:
         used_mults = self.lagrange_multipliers[selected_indices] if selected_indices is not None else self.lagrange_multipliers
         
-        return normalizing_params(used_mults, self.vs_coeff)
+        return self.normalizing_params(used_mults, self.vs_coeff)
 
     def get_multipliers(self, used_only=False) -> Tuple[th.Tensor, th.Tensor]:
         return self.normalize_coefficients(selected_indices=self._last_selected_indices if used_only else None)
@@ -267,6 +267,7 @@ class MORMTrainingVariables(th.nn.Module):
                  lambda_decay: float = 1e-9):
         
         super().__init__()
+        self.softmax = th.nn.Softmax(dim=0)
         self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype)
         self.vs_coeff = th.tensor([initial_lambda], requires_grad=False, device=device, dtype=dtype)
 

@@ -40,7 +40,7 @@ class LinearAlignmentLayer(th.nn.Linear):
         super().__init__(in_features, out_features, bias, device, dtype)
         self.linear_bias = bias
         self.n_values = in_features if n_values is None else n_values # TODO: This might not be the case in future works...
-
+        
         with th.no_grad():
             state_dict = self.state_dict()
             random_vector = th.rand_like(state_dict['weight'])
@@ -73,7 +73,7 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=th.float32, data=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype, data)
         self.set_weights([1/self.weight.shape[1] for _ in range(self.weight.shape[1])])
-
+        self.softmax = th.nn.Softmax(dim=1)
     
     def set_weights(self, weights: tuple):
         with th.no_grad():
@@ -87,11 +87,11 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
             # Update state dict in place
             self.load_state_dict({'weight': new_weights}, strict=False)
             
-            assert th.allclose(pure_w, th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)), f"{new_weights} vs {th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)}"
+            assert th.allclose(pure_w, self.softmax(self.weight)), f"{new_weights} vs {self.softmax(self.weight)}"
 
     @th.compile
     def get_alignment_layer(self):
-        return th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)
+        return self.softmax(self.weight)
         
 
 from transformers.configuration_utils import PretrainedConfig
