@@ -2,9 +2,9 @@
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
 
-#SBATCH --gpus=L40S:1
+#SBATCH --gpus=L40S:4
 #SBATCH --mem-per-gpu=24G
-#SBATCH --time=5:00:00
+#SBATCH --time=24:00:00
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then

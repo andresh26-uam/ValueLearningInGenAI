@@ -2,6 +2,7 @@
 
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from pyexpat import model
 import shutil
 from typing import Any, List, Optional, Union
 from uuid import uuid4
@@ -14,6 +15,7 @@ from vsllib.defines import NO_RATING_MASK
 from dotenv import load_dotenv
 load_dotenv()
 
+from copy import deepcopy
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers.modeling_outputs import BaseModelOutputWithPast
@@ -64,45 +66,46 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
         del sample[key]	
     return sample
 
-def embed_sample(sample: dict, model: BaseModelOutputWithPast, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True) -> dict:
+def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu")) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
-    model_device = next(model.parameters()).device
-    for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", "context_embedding")]):
-        if ic == 2 and not use_context:
-            continue
-        merged_features = {
-            "input_ids": sample[case[0]],
-            "attention_mask": sample[case[1]],
-        }
-        
-        batch = tokenizer.pad(
-            merged_features,
-            padding=collator.padding,
-            max_length=collator.max_length,
-            pad_to_multiple_of=collator.pad_to_multiple_of,
-            return_tensors=collator.return_tensors,
-        )
-        inputs = batch["input_ids"].to(model_device)
-        atm = batch["attention_mask"].to(model_device)
-        output = model(
-            input_ids=inputs,
-            attention_mask=atm,
-            return_dict=True,
-        ).last_hidden_state
-        # Pick the last non-padding token embedding for each sequence.
-        last_token_idx = atm.sum(dim=1) - 1
+    with th.no_grad():
+        model_device = device
+        for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", "context_embedding")]):
+            if ic == 2 and not use_context:
+                continue
+            merged_features = {
+                "input_ids": sample[case[0]],
+                "attention_mask": sample[case[1]],
+            }
+            
+            batch = tokenizer.pad(
+                merged_features,
+                padding=collator.padding,
+                max_length=collator.max_length,
+                pad_to_multiple_of=collator.pad_to_multiple_of,
+                return_tensors=collator.return_tensors,
+            )
+            inputs = batch["input_ids"].to(model_device)
+            atm = batch["attention_mask"].to(model_device)
+            output = model(
+                input_ids=inputs,
+                attention_mask=atm,
+                return_dict=True,
+            ).last_hidden_state
+            # Pick the last non-padding token embedding for each sequence.
+            last_token_idx = atm.sum(dim=1) - 1
 
-        sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
-        del output
-        
-    return sample
+            sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
+            del output
+            
+        return sample
 
 class PairwisePreferenceDataset():
     
     def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
         should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
         self.data: Dataset 
-
+        print(f"Loading dataset from {path} with from_disk={from_disk}")
         if model_for_embeddings is not None and embedded_dataset_output_path is None:
             embedded_dataset_output_path = f"{path.rstrip('/')}_embed_{model_for_embeddings.config._name_or_path.replace('/', '_')}"
 
@@ -118,7 +121,7 @@ class PairwisePreferenceDataset():
                     print(f"Embedded dataset not found at {embedded_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
                     self.data = load_from_disk(path)
             else:
-                
+                print(f"Loading dataset from {path} with from_disk={from_disk}")
                 self.data: Dataset = load_from_disk(path)
         else:
             self.data = load_dataset(path, split="train")
@@ -127,6 +130,9 @@ class PairwisePreferenceDataset():
         
         
         if (self.data[0].get("embedding_1", None) is None or retokenize) and use_embeddings:
+            print("RECALCULATING EMBEDDINGS WITH MODEL")
+            print(model_for_embeddings)
+
             recalculate_embeddings = True
 
         self.max_length = tokenizer.model_max_length
@@ -142,18 +148,19 @@ class PairwisePreferenceDataset():
         
         
         if model_for_embeddings is not None and recalculate_embeddings:
-            batch_size = 4
+            batch_size = 8
             #self.data = self.data.select(range(min(1000, len(self.data))))
             with th.no_grad():
                 def _embed_shard(dataset_shard, device):
-                    local_model = deepcopy(model_for_embeddings).to(device)
-                    local_model.eval()
-                    return dataset_shard.map(
-                        lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context),
-                        load_from_cache_file=False,
-                        batched=True,
-                        batch_size=batch_size,
-                    )
+                    with th.no_grad():
+                        local_model = deepcopy(model_for_embeddings).to(device)
+                        local_model.eval()
+                        return dataset_shard.map(
+                            lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context, device=device),
+                            load_from_cache_file=False,
+                            batched=True,
+                            batch_size=batch_size,
+                        )
 
                 if th.cuda.is_available() and th.cuda.device_count() > 1:
                     n_gpus = th.cuda.device_count()
@@ -172,11 +179,22 @@ class PairwisePreferenceDataset():
                         mapped_shards = [f.result() for f in futures]
 
                     self.data = concatenate_datasets(mapped_shards)
+                elif th.cuda.is_available():
+                    print("Embedding dataset on single GPU")
+                    model_for_embeddings = model_for_embeddings.to(th.device("cuda"))
+                    model_for_embeddings.eval()
+                    self.data = self.data.map(
+                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context, device=th.device("cuda")),
+                            load_from_cache_file=True,
+                            batched=True,
+                            batch_size=batch_size,
+                        )
+
                 else:
                         model_for_embeddings = model_for_embeddings.to(th.device("cpu"))
                         model_for_embeddings.eval()
                         self.data = self.data.map(
-                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context),
+                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context, device=th.device("cpu")),
                             load_from_cache_file=False,
                             batched=True,
                             batch_size=batch_size,
