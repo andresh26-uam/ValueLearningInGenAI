@@ -6,6 +6,7 @@ import enum
 from functools import partial
 from typing import Any, Callable, Dict, Literal, Optional, Unpack
 
+from matplotlib.pylab import dtype
 import numpy as np
 import torch as th
 import torch.nn as nn
@@ -73,7 +74,7 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=th.float32, data=None) -> None:
         super().__init__(in_features, out_features, bias, device, dtype, data)
         self.set_weights([1/self.weight.shape[1] for _ in range(self.weight.shape[1])])
-        self.softmax = th.nn.Softmax(dim=1)
+        
     
     def set_weights(self, weights: tuple):
         with th.no_grad():
@@ -87,11 +88,11 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
             # Update state dict in place
             self.load_state_dict({'weight': new_weights}, strict=False)
             
-            assert th.allclose(pure_w, self.softmax(self.weight)), f"{new_weights} vs {self.softmax(self.weight)}"
+            assert th.allclose(pure_w, th.nn.functional.softmax(self.weight, dim=1)), f"{new_weights} vs {th.nn.functional.softmax(self.weight, dim=1)}"
 
     @th.compile
     def get_alignment_layer(self):
-        return self.softmax(self.weight)
+        return th.nn.functional.softmax(self.weight, dim=1, dtype = self.weight.dtype)
         
 
 from transformers.configuration_utils import PretrainedConfig
@@ -149,6 +150,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         gradient_accumulation_steps: int = 2,
         metrics_accumulation_steps: int = 2,
         use_metrics_or_losses_for_lagrange_updates: str = "metrics",
+        use_exponential_moving_average_or_optimum_targets:str = "optimum",
         grad_on_only_worst_value: bool = False,
         zero_constraint: bool = True,
         lambda_decay: float = 0.0,
@@ -196,6 +198,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.gradient_accumulation_steps=gradient_accumulation_steps
         self.metrics_accumulation_steps = metrics_accumulation_steps
         self.use_metrics_or_losses_for_lagrange_updates = use_metrics_or_losses_for_lagrange_updates
+        self.use_exponential_moving_average_or_optimum_targets = use_exponential_moving_average_or_optimum_targets
         self.grad_on_only_worst_value = grad_on_only_worst_value
         self.zero_constraint = zero_constraint
         self.rew_center_coefficient = rew_center_coefficient
@@ -933,6 +936,7 @@ class MORMForSequenceClassification(PreTrainedModel, AutoModelForSequenceClassif
             gradient_accumulation_steps=config.gradient_accumulation_steps,
             metric_buffer_size=config.metrics_accumulation_steps,
             use_metrics_or_losses=config.use_metrics_or_losses_for_lagrange_updates,
+            use_exponential_moving_average_or_optimum_targets=config.use_exponential_moving_average_or_optimum_targets,
             grad_on_only_worst_value=config.grad_on_only_worst_value,
             zero_constraint=config.zero_constraint,
             lambda_decay=config.lambda_decay if hasattr(config, "lambda_decay") else 0.0

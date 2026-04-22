@@ -2,7 +2,7 @@
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
 
-#SBATCH --gpus=L40S:4
+#SBATCH --gpus=L40S:1
 #SBATCH --mem-per-gpu=24G
 #SBATCH --time=24:00:00
 set -euo pipefail
@@ -38,7 +38,6 @@ echo "Number of machines: $num_machines"
 
 python -m accelerate.commands.launch \
 	--config_file="$config_file" \
-	--debug \
 	--num_processes="$num_processes" \
 	--num_machines="$num_machines" \
 	--gpu_ids="$gpu_ids" \

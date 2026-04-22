@@ -17,6 +17,11 @@ import numpy as np
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 @th.compile
+def normalizing_params(used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
+        mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0)
+        return mults[:-1], mults[-1]
+
+@th.compile
 def norm_penalty( lags, vs_coeff, penalty_coeff) -> th.Tensor:
         return penalty_coeff*th.norm(th.cat([lags, vs_coeff],dim=0), p=2)
     
@@ -243,16 +248,11 @@ class MORMTrainingVariables(th.nn.Module):
         yield self.vs_coeff
     
     
-    @th.compile
-    def normalizing_params(self, used_mults, vs_coeff) -> Tuple[th.Tensor, th.Tensor]:
-            mults = self.softmax(th.cat([used_mults, vs_coeff], dim=0))
-            return mults[:-1], mults[-1]
-
     
     def normalize_coefficients(self, selected_indices: list = None) -> th.Tensor:
         used_mults = self.lagrange_multipliers[selected_indices] if selected_indices is not None else self.lagrange_multipliers
         
-        return self.normalizing_params(used_mults, self.vs_coeff)
+        return normalizing_params(used_mults, self.vs_coeff)
 
     def get_multipliers(self, used_only=False) -> Tuple[th.Tensor, th.Tensor]:
         return self.normalize_coefficients(selected_indices=self._last_selected_indices if used_only else None)
@@ -263,11 +263,11 @@ class MORMTrainingVariables(th.nn.Module):
                  grounding_loss_tendency_update_ratio: float = 0.01, 
                  gradient_accumulation_steps=10, 
                  metric_buffer_size=3, use_metrics_or_losses='metrics', 
+                 use_exponential_moving_average_or_optimum_targets="optimum",
                  grad_on_only_worst_value=False, zero_constraint: bool = True,
                  lambda_decay: float = 1e-9):
         
         super().__init__()
-        self.softmax = th.nn.Softmax(dim=0)
         self.lagrange_multipliers = th.tensor([initial_lambda]*n_values, requires_grad=False, device=device, dtype=dtype)
         self.vs_coeff = th.tensor([initial_lambda], requires_grad=False, device=device, dtype=dtype)
 
@@ -303,6 +303,7 @@ class MORMTrainingVariables(th.nn.Module):
         self._cached_avg_coherence = [] 
 
         self.use_metrics_or_losses = use_metrics_or_losses 
+        self.use_exponential_moving_average_or_optimum_targets = use_exponential_moving_average_or_optimum_targets
         self.grad_on_only_worst_value = grad_on_only_worst_value
 
         self.historic_eval_metrics = {}
@@ -317,18 +318,31 @@ class MORMTrainingVariables(th.nn.Module):
             self.update_loss_tendencies()
             self.update_metrics_tendencies()
 
+            if self.use_exponential_moving_average_or_optimum_targets == "optimum":
+                coherences_tendency = self.maximum_coherences_tendency
+                grounding_loss_tendency = self.minimum_grounding_loss_tendency
+                representativeness_tendency = self.maximum_representativeness_tendency
+                vs_loss_tendency = self.minimum_vs_loss_tendency
+            elif self.use_exponential_moving_average_or_optimum_targets == "average":
+                coherences_tendency = self.coherences_tendency
+                grounding_loss_tendency = self.grounding_loss_tendency
+                representativeness_tendency = self.representativeness_tendency
+                vs_loss_tendency = self.vs_loss_tendency
+            else:
+                raise ValueError(f"Invalid value for use_exponential_moving_average_or_minimum_targets: {self.use_exponential_moving_average_or_optimum_targets}. Expected 'minimum' or 'average'.")
             if self.use_metrics_or_losses == 'metrics':
                 # Use metrics for the optimizer step
-                gr_ideal_diff = -(self.last_accumulated_coherences - self.maximum_coherences_tendency).detach()
-                vs_ideal_diff = -(self.last_accumulated_representativeness - self.maximum_representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
+                gr_ideal_diff = -(self.last_accumulated_coherences - coherences_tendency).detach()
+                vs_ideal_diff = -(self.last_accumulated_representativeness - representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
                 #coeff = gr_ideal_diff #/ lag_sum
                 
                 
             elif self.use_metrics_or_losses == 'losses':
-                gr_ideal_diff = (self.last_accumulated_grounding_loss - self.minimum_grounding_loss_tendency).detach()
-                vs_ideal_diff = (self.last_accumulated_vs_loss - self.minimum_vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
+                gr_ideal_diff = (self.last_accumulated_grounding_loss - grounding_loss_tendency).detach()
+                vs_ideal_diff = (self.last_accumulated_vs_loss - vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
                 # This is the derivative w.r.t. lambda of "1/(1+lambda) * (lambda(gr_loss - gr_ideal) + vs_loss)".
-                 
+            else:
+                raise ValueError(f"Invalid value for use_metrics_or_losses: {self.use_metrics_or_losses}. Expected 'metrics' or 'losses'.")    
                 #should be...? 1) forward = self.forward(grounding_losses=gr_ideal_diff, vs_losses=self.last_accumulated_vs_loss)
                 #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
                 
@@ -353,19 +367,13 @@ class MORMTrainingVariables(th.nn.Module):
         coeff = self.lagrange_multipliers.grad.detach()
         #coeff = gr_ideal_diff  / lag_sum
         
-        print("DIFF", gr_ideal_diff)
-        print("COEFF OF CHANGE, ", coeff)
-        print("LOSS TENDENCY", self.minimum_grounding_loss_tendency)
-        print("LOSS GR", self.last_accumulated_grounding_loss )
-        print("CHR GR", self.last_accumulated_coherences )
-        print("COHERENCE TENDENCY", self.maximum_coherences_tendency)
-
+        
         if self.grad_on_only_worst_value:
             worst_idx = th.argmax(gr_ideal_diff).detach(), 
             worst_val = coeff[worst_idx].detach().item()
             coeff.zero_()
             coeff[worst_idx] = worst_val
-            print("WORST VI", worst_idx, "WITH COEFF", worst_val)
+            #print("WORST VI", worst_idx, "WITH COEFF", worst_val)
             if was_grad_none:
                 self.lagrange_multipliers.grad = coeff
             else:
@@ -431,12 +439,17 @@ class MORMTrainingVariables(th.nn.Module):
             if self.maximum_coherences_tendency is None:
                 self.maximum_coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
                 self.maximum_representativeness_tendency = th.full_like(self.last_accumulated_representativeness, fill_value=0.5).detach()
+                self.coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
+                self.representativeness_tendency = th.full_like(self.last_accumulated_representativeness, fill_value=0.5).detach()
             else:
                 maximum = th.maximum(coherence_target, self.maximum_coherences_tendency)
+                
                 self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.coherences_tendency = (th.multiply(coherence_target, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 
                 maximum_repr = th.maximum(self.last_accumulated_representativeness, self.maximum_representativeness_tendency)
                 self.maximum_representativeness_tendency = (th.multiply(maximum_repr, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.representativeness_tendency = (th.multiply(self.last_accumulated_representativeness, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
 
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
         
@@ -453,12 +466,16 @@ class MORMTrainingVariables(th.nn.Module):
             if self.minimum_grounding_loss_tendency is None:
                 self.minimum_grounding_loss_tendency = th.full_like(minimum_actual, fill_value=th.max(minimum_actual).float()).detach()
                 self.minimum_vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
+                self.grounding_loss_tendency = th.full_like(minimum_actual, fill_value=th.max(minimum_actual).float()).detach()
+                self.vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
             else:
                 minimum = th.minimum(minimum_actual, self.minimum_grounding_loss_tendency)
                 minimum_vs = th.minimum(self.last_accumulated_vs_loss, self.minimum_vs_loss_tendency)
 
                 self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 self.minimum_vs_loss_tendency = (th.multiply(minimum_vs, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.grounding_loss_tendency = (th.multiply(minimum_actual, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.vs_loss_tendency = (th.multiply(self.last_accumulated_vs_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
 
     def record_metrics(self, metrics: Dict[str, float|list], metric_type: Literal["train", "validation"] = "train") -> None:
         # This is called at the end of each evaluation phase, and records the grounding loss and vs loss for the last evaluation phase, which will be used to update the Lagrange multipliers before the next optimizer step.

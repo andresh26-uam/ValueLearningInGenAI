@@ -124,6 +124,7 @@ class ScriptArguments:
     lagrange_learning_rate: Optional[float] = field(default=0.1) # TODO 0.01
 
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.01)
+    use_exponential_moving_average_or_optimum_targets: Optional[str] = field(default="optimum")
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(default="metrics")
     grad_on_only_worst_value: Optional[bool] = field(default=False)
     zero_constraint: Optional[bool] = field(default=True)
@@ -396,6 +397,7 @@ def main_fun() -> None:
                                             gradient_accumulation_steps=script_args.gradient_accumulation_steps,
                                             metrics_accumulation_steps=script_args.metrics_accumulation_steps,
                             use_metrics_or_losses_for_lagrange_updates=script_args.use_metrics_or_losses_for_lagrange_updates,
+                            use_exponential_moving_average_or_optimum_targets=script_args.use_exponential_moving_average_or_optimum_targets,
                             grad_on_only_worst_value=script_args.grad_on_only_worst_value,
                             zero_constraint=script_args.zero_constraint,
                             use_ideal_grounding_model=script_args.use_ideal_grounding_model,
