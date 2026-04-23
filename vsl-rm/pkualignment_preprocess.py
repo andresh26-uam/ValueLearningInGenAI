@@ -11,7 +11,7 @@ load_dotenv()
 
 from datasets import load_dataset, Dataset, concatenate_datasets
 
-from vsllib.defines import LOCAL_DATASET_PATH, DatasetNames
+from vsllib.defines import LOCAL_DATASET_PATH, PKUALIGNMENT_PROCESSED_PATH, DatasetNames
 
 
 def _build_pair_row(index_, completion_pair: dict[str, Any], val_indices, test_indices) -> dict[str, Any]:
@@ -52,9 +52,7 @@ def _build_pair_row(index_, completion_pair: dict[str, Any], val_indices, test_i
         "value_pkusafety_1": completion_pair.get("safety_rate_1"),
         "value_pkusafety_2": completion_pair.get("safety_rate_2"), 
     }
-def pkuAlignment_processor(
-    output_path: str = "pkuAlignment_pairs",
-    ) -> tuple[int, list[int]]:
+def pkuAlignment_processor() -> tuple[int, list[int]]:
 
     train_dataset = load_dataset(DatasetNames.PKUALIGNMENT.value,name='text-to-text')['train']
     val_dataset = load_dataset(DatasetNames.PKUALIGNMENT.value,name='text-to-text')['val']
@@ -82,9 +80,8 @@ def pkuAlignment_processor(
     test_indices = list(range(len(ds_new)))[0:len(validation_indices)]  # Assuming test set is the same as validation set for now
     
     # Save to LOCAL_PROCESSED_DATASETS folder
-    local_datasets_path = Path(LOCAL_DATASET_PATH)
-    local_datasets_path.mkdir(parents=True, exist_ok=True)
-    final_output = local_datasets_path / output_path
+    final_output = Path(PKUALIGNMENT_PROCESSED_PATH)
+    final_output.mkdir(parents=True, exist_ok=True)
     ds_new.save_to_disk(final_output)
 
     validation_indices_path = final_output / f"validation_indices.json"

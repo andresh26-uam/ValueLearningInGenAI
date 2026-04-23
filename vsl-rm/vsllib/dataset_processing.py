@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from concurrent.futures import ThreadPoolExecutor
+import os
 from pathlib import Path
 from pyexpat import model
 import shutil
@@ -18,25 +19,29 @@ load_dotenv()
 from copy import deepcopy
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
-from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from vsllib.utils import MORewardDataCollatorWithPadding
+from vsllib.training_utils import MORewardDataCollatorWithPadding
+
+def maybe_strip_bos_token(text: str, bos_token: Optional[str]) -> str:
+    if bos_token:
+        return text.replace(bos_token, "")
+    return text
 
 def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
     keep_keys = ["option1", "option2", "input_ids_1", "attention_mask_1", "input_ids_2", "attention_mask_2", "labels"]
     if extra_keep_keys:
         keep_keys.extend(extra_keep_keys)
-    sample['option1'] = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
-    sample['option2'] = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
+    sample['option1'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
+    sample['option2'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
     if use_context:
         if sample.get("context", None) is not None:
             ctx = sample['context']
         else:
             ctx = sample['prompt']
-        ctemplate = tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': ctx}], tokenize=False, add_generation_prompt=False).replace(tokenizer.bos_token, "")
+        ctemplate = maybe_strip_bos_token(tokenizer.apply_chat_template(
+        [{'role': 'user', 'content': ctx}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
         tok_context = tokenizer(ctemplate, truncation=True)
         sample['context_input_ids'] = tok_context["input_ids"]
         sample['context_attention_mask'] = tok_context["attention_mask"]
@@ -100,39 +105,64 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
             
         return sample
 
+def check_format(dataset: DatasetDict) -> None:
+    required_keys = {"prompt", "response1", "response2", "score1", "score2"}
+    for split_name, split_dataset in dataset.items():
+        for key in required_keys:
+            if key not in split_dataset.column_names:
+                raise ValueError(f"Dataset split '{split_name}' is missing required key '{key}'. Found keys: {split_dataset.column_names}")
+
+def save_dataset(dataset: Dataset, path: str) -> None:
+    save_path = Path(path) 
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    tmp_path = save_path.parent / f".{save_path.name}.tmp-{uuid4().hex}"
+    if tmp_path.exists():
+        shutil.rmtree(tmp_path)
+
+    dataset.save_to_disk(str(tmp_path))
+    if save_path.exists():
+        shutil.rmtree(save_path)
+    tmp_path.replace(save_path)
+
+    return dataset
+    
 class PairwisePreferenceDataset():
     
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_for_embeddings: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, embedded_dataset_output_path: Optional[str] = None, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
-        should_rewrite_embedded_dataset = bool(retokenize or recalculate_embeddings)
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+        
         self.data: Dataset 
         print(f"Loading dataset from {path} with from_disk={from_disk}")
-        if model_for_embeddings is not None and embedded_dataset_output_path is None:
-            embedded_dataset_output_path = f"{path.rstrip('/')}_embed_{model_for_embeddings.config._name_or_path.replace('/', '_')}"
 
-        if recalculate_embeddings:
-            shutil.rmtree(embedded_dataset_output_path, ignore_errors=True)
+        processed_dataset_path = os.path.join(path, f"preprocessed")
+        os.makedirs(processed_dataset_path, exist_ok=True)
+        
+        if model_reference is not None:
+            embedded_or_tokenized_dataset_output_path = os.path.join(path, f"{model_reference.config._name_or_path.replace('/', '_')}")
+            os.makedirs(embedded_or_tokenized_dataset_output_path, exist_ok=True)
+
+        """if recalculate_embeddings :
+            shutil.rmtree(embedded_or_tokenized_dataset_output_path, ignore_errors=True)"""
 
         if from_disk:
 
-            if model_for_embeddings is not None and not should_rewrite_embedded_dataset:
-                try:
-                    self.data = load_from_disk(embedded_dataset_output_path)
-                except FileNotFoundError:
-                    print(f"Embedded dataset not found at {embedded_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
-                    self.data = load_from_disk(path)
-            else:
-                print(f"Loading dataset from {path} with from_disk={from_disk}")
-                self.data: Dataset = load_from_disk(path)
+            try:
+                self.data = load_from_disk(embedded_or_tokenized_dataset_output_path)
+                print(f"Loaded embedded/tokenized dataset from {embedded_or_tokenized_dataset_output_path}")
+            except FileNotFoundError:
+                print(f"Embedded/Tonkenized dataset not found at {embedded_or_tokenized_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
+                self.data = load_from_disk(processed_dataset_path)
+                print(f"Copying dataset to {embedded_or_tokenized_dataset_output_path} for processing.")
+                output_path = Path(embedded_or_tokenized_dataset_output_path)
+                self.data = save_dataset(self.data, output_path)
+                print(f"Saved embedded dataset to {output_path}")
         else:
-            self.data = load_dataset(path, split="train")
+            self.data = load_dataset(path)
+            check_format(self.data) # This might be tricky. Might need code to join the splits, then get the indices.
         
-        self.data = self.data.shuffle(seed=split_seed)
         
-        
-        if (self.data[0].get("embedding_1", None) is None or retokenize) and use_embeddings:
+        if ((self.data[0].get("embedding_1", None) is None) or retokenize) and use_embeddings:
             print("RECALCULATING EMBEDDINGS WITH MODEL")
-            print(model_for_embeddings)
-
             recalculate_embeddings = True
 
         self.max_length = tokenizer.model_max_length
@@ -144,20 +174,27 @@ class PairwisePreferenceDataset():
             self.value_keys = []
         
         if self.data[0].get("labels") is None:
-            self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), num_proc=16, load_from_cache_file=not retokenize)
+            print("Adding labels and tokens to dataset")
+            self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), 
+                                                   num_proc=16, 
+                                                   load_from_cache_file=not retokenize)
+            
+            self.data = save_dataset(self.data, embedded_or_tokenized_dataset_output_path)
+            
+        assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
+        assert self.data[0].get("labels", None) is not None, "Labels   are missing after tokenization step."
+    
         
-        
-        if model_for_embeddings is not None and recalculate_embeddings:
-            batch_size = 8
+        if recalculate_embeddings:
+            batch_size = 32
             #self.data = self.data.select(range(min(1000, len(self.data))))
             with th.no_grad():
-                def _embed_shard(dataset_shard, device):
+                model_reference = model_reference.cpu()
+                def _embed_shard(dataset_shard, local_model, device):
                     with th.no_grad():
-                        local_model = deepcopy(model_for_embeddings).to(device)
-                        local_model.eval()
                         return dataset_shard.map(
                             lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context, device=device),
-                            load_from_cache_file=False,
+                            load_from_cache_file=not recalculate_embeddings,
                             batched=True,
                             batch_size=batch_size,
                         )
@@ -171,49 +208,45 @@ class PairwisePreferenceDataset():
                         for i in range(n_gpus)
                     ]
 
+                    model_copies = [deepcopy(model_reference).to(th.device(f"cuda:{i}")).eval() for i in range(n_gpus)]
+
                     with ThreadPoolExecutor(max_workers=n_gpus) as executor:
                         futures = [
-                            executor.submit(_embed_shard, shard, th.device(f"cuda:{i}"))
+                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"))
                             for i, shard in enumerate(shards)
                         ]
                         mapped_shards = [f.result() for f in futures]
-
+                    for m in model_copies:
+                        del m
                     self.data = concatenate_datasets(mapped_shards)
                 elif th.cuda.is_available():
                     print("Embedding dataset on single GPU")
-                    model_for_embeddings = model_for_embeddings.to(th.device("cuda"))
-                    model_for_embeddings.eval()
+                    model_reference = model_reference.to(th.device("cuda"))
+                    model_reference.eval()
                     self.data = self.data.map(
-                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context, device=th.device("cuda")),
-                            load_from_cache_file=True,
+                            lambda x: embed_sample(x, model_reference, tokenizer, collator, use_context=use_context, device=th.device("cuda")),
+                            load_from_cache_file=not recalculate_embeddings,
                             batched=True,
                             batch_size=batch_size,
                         )
 
                 else:
-                        model_for_embeddings = model_for_embeddings.to(th.device("cpu"))
-                        model_for_embeddings.eval()
+                        print("WARNING: No GPU available, embedding dataset on CPU. This may be very slow.")
+                        model_reference = model_reference.to(th.device("cpu"))
+                        model_reference.eval()
                         self.data = self.data.map(
-                            lambda x: embed_sample(x, model_for_embeddings, tokenizer, collator, use_context=use_context, device=th.device("cpu")),
-                            load_from_cache_file=False,
+                            lambda x: embed_sample(x, model_reference, tokenizer, collator, use_context=use_context, device=th.device("cpu")),
+                            load_from_cache_file=not recalculate_embeddings,
                             batched=True,
                             batch_size=batch_size,
                             num_proc=4
                         )
-        print("AFTER EMBED?", len(self.data))
+                self.data = save_dataset(self.data, embedded_or_tokenized_dataset_output_path)
+            
         
-        if model_for_embeddings is not None and should_rewrite_embedded_dataset:
-            output_path = Path(embedded_dataset_output_path)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            temp_output_path = output_path.parent / f".{output_path.name}.tmp-{uuid4().hex}"
-            if temp_output_path.exists():
-                shutil.rmtree(temp_output_path)
-            self.data.save_to_disk(str(temp_output_path))
-            if output_path.exists():
-                shutil.rmtree(output_path)
-            temp_output_path.replace(output_path)
-            print(f"Saved embedded dataset to {output_path}")
         print("AFTER SAVE", len(self.data))
+        if use_embeddings:
+            assert self.data[0].get("embedding_1", None) is not None, "Embedding 1 is missing after embedding step."
         
         if cleanup_cache_files:
             removed_cache_files = self.data.cleanup_cache_files()
@@ -222,7 +255,10 @@ class PairwisePreferenceDataset():
         
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
 
+        
         if isinstance(test_proportion_or_indices, float):
+            self.data = self.data.shuffle(seed=split_seed)
+        
             assert isinstance(eval_proportion_or_indices, float), "If test_proportion_or_indices is a float, eval_proportion_or_indices must also be a float."
             self.data: DatasetDict = self.data.train_test_split(test_size=test_proportion_or_indices, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
             self.train_dataset, self.test_dataset = self.data['train'], self.data['test']
@@ -230,9 +266,9 @@ class PairwisePreferenceDataset():
             self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']	
         else:
             print("Using custom test and eval indices for dataset splitting.")
-            print(f"Test indices: {test_proportion_or_indices}")
-            print(f"Eval indices: {eval_proportion_or_indices}")
-            print("LEN DATA GETTING SPLITS", len(self.data))
+            #print(f"Test indices: {test_proportion_or_indices}")
+            #print(f"Eval indices: {eval_proportion_or_indices}")
+            #print("LEN DATA GETTING SPLITS", len(self.data))
             assert isinstance(test_proportion_or_indices, list) and isinstance(eval_proportion_or_indices, list), "If test_proportion_or_indices is not a float, it must be a list of indices. Same for eval_proportion_or_indices."
             assert np.intersect1d(test_proportion_or_indices, eval_proportion_or_indices).size == 0, "Test and eval indices should not overlap."
             self.test_dataset = self.data.select(test_proportion_or_indices)

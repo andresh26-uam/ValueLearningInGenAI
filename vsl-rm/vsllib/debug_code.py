@@ -111,3 +111,17 @@ def __slowed_debug_forward(self, *args, **kwargs):
         th.testing.assert_close(all_rewards_3.logits, all_rewards_2.logits, atol=1e-1, rtol=1e-1)
         #th.testing.assert_close(ar.logits, all_rewards_2.logits, atol=1e-4, rtol=1e-4)
         return all_rewards_2
+
+def print_tensor_and_grad_fn(grad_fn, level=0) -> None:
+    indent = "  " * level
+    if grad_fn is None:
+        return
+    if getattr(grad_fn, 'variable', None) is not None:
+        if grad_fn.variable.requires_grad:
+            print(f"{indent}AccumulateGrad for tensor: {grad_fn.variable.shape}")
+    else:
+        print(f"{indent}Grad function: {grad_fn}")
+        if hasattr(grad_fn, 'next_functions'):
+            for next_fn in grad_fn.next_functions:
+                if next_fn[0] is not None:
+                    print_tensor_and_grad_fn(next_fn[0], level + 1)

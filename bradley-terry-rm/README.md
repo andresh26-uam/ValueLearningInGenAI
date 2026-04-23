@@ -66,6 +66,19 @@ For the RLHFLow, the first dataset is used. In the second dataset, we also add t
 
 ## Running the Code
 
+Recommended: use the unified script that auto-detects model family (Gemma/Llama3/Mistral) from `--model_name` and applies model-specific settings.
+
+```shell
+cd ..
+accelerate launch ./bradley-terry-rm/unified_bt_rm.py --model_name mistralai/Mistral-7B-Instruct-v0.2 --max_length 4096 --train_set_path hendrydong/preference_700K
+```
+
+You can force the variant selection if needed:
+
+```shell
+accelerate launch ./bradley-terry-rm/unified_bt_rm.py --model_name meta-llama/Meta-Llama-3-8B-Instruct --model_variant llama3
+```
+
 Running the code with Gemma-2b-it.
 
 ```shell

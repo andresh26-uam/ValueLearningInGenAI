@@ -3,9 +3,11 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 import numpy as np
 import torch as th
+from torch.nn.modules import Module
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.optim.optimizer import Optimizer as Optimizer
 
+from transformers import AutoTokenizer
 from transformers.trainer import *
 
 from transformers.optimization import get_scheduler
@@ -13,308 +15,12 @@ from transformers.optimization import get_scheduler
 from transformers.trainer_utils import SchedulerType
 from ordered_set import OrderedSet
 from vsllib.reward_models import MOLossFunctions, MOLossFunctionsCategories, MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
-from vsllib.utils import MORMTrainingVariables, to_float
+from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
-
-    
-
-
-
-def _create_sub_optimizer(params: OrderedSet, lr: float, sub_optimizer_class: type[th.optim.Optimizer], optimizer_kwargs: dict) -> th.optim.Optimizer:
-        copyargs= deepcopy(optimizer_kwargs)
-        copyargs['lr'] = lr
-        #copyargs['learning_rate'] = lr_grounding
-        
-        return sub_optimizer_class(
-            params, **copyargs)
-
-class VSLOptimizer(th.optim.Optimizer):
-    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam,  **optimizer_kwargs):
-        
-        self.lr_grounding = lr_grounding
-        self.lr_value_system = lr_value_system
-        defaults = dict(lr_grounding=lr_grounding,
-                        lr_value_system=lr_value_system)
-
-        self.optimizer_kwargs = optimizer_kwargs
-        self.n_values = n_values
-
-        params_gr = OrderedSet(params_gr)
-        params_vs = OrderedSet(params_vs)
-
-        self.params_gr = params_gr
-        self.params_vs = params_vs
-
-        print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
-        self.sub_optimizer_class = sub_optimizer_class
-
-        if params_vs and len(params_gr) > 0:
-            self.optimx = _create_sub_optimizer(params_gr, lr_grounding, self.sub_optimizer_class, self.optimizer_kwargs)
-        else:
-            self.optimx = None
-        if params_vs and len(params_vs) > 0:
-            self.optimy = _create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class, self.optimizer_kwargs)
-        else:
-            self.optimy = None
-        # TODO: SCHEDULER COSINE...? ALSO HANDLE SUBOPTIMIZER self.optimx_scheduler.step()
-        # self.optimy_scheduler.step()
-        all_params = [*params_gr, *params_vs]
-        if len(all_params) == 0:
-            all_params = [th.nn.Parameter(th.empty(0), requires_grad=True)] # Dummy parameter for initialization.
-            print("WARNING: No parameters provided to VSLOptimizer. Initializing with dummy parameter.")
-        super(VSLOptimizer, self).__init__(all_params, defaults)
-
-    
-
-    def get_state(self, copy=False)-> Dict[str, Any]:
-        return {}
-
-    def set_state(self, state)-> None:
-        return
-
-    
-    @abstractmethod
-    def zero_grad(self, set_to_none=True)-> None:
-        set_to_none = True # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
-        super().zero_grad(set_to_none)
-        if self.optimx is not None:
-            self.optimx.zero_grad(set_to_none)
-        if self.optimy is not None:
-            self.optimy.zero_grad(set_to_none)
-        return None
-
-    @abstractmethod
-    def step(self, closure=None)-> None:
-        if self.optimx is not None:
-            self.optimx.step()
-        if self.optimy is not None:
-            self.optimy.step()
-        return None
-
-class ConstrainedOptimizer(VSLOptimizer):
-    def __init__(self, params, params_gr, params_vs, n_values, max_grad_norm, params_gr_ideal=None, lr_grounding=None,
-                 lr_value_system=None, lr_lambda=None, initial_lambda=1.0, inner_optimization_iterations=3,
-                 training_variables: MORMTrainingVariables = None,
-                 config: MORMForSequenceClassificationConfig = None,
-                 sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
-        
-        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
-            lr_value_system = 0.0
-        if config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_ALL_GROUNDINGS:
-            lr_grounding = 0.0
-
-        super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
-                                                   lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
-        if params_gr_ideal is not None:
-            assert len(params_gr) == len(params_gr_ideal), "Grounding parameters and ideal grounding parameters must have the same length."
-            
-            self.params_gr_ideal = params_gr_ideal
-            self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
-
-        self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system * 10.0
-        if (config.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_ON_LAGRANGE_MULTIPLIERS) or (len(config.loss_func_type_kwargs.get('value_indices', [])) == 1 and config.loss_func_type == MOLossFunctions.ONLY_VALUES_IN_KWARGS):
-            self.lr_lambda = 0.0
-
-        self.loss_func_type = config.loss_func_type
-        self.loss_func_kwargs=config.loss_func_type_kwargs
-
-        self.initial_lambda = initial_lambda
-        self.max_grad_norm = max_grad_norm
-        self.training_variables: MORMTrainingVariables = training_variables
-
-        self.current_iteration = 0
-        self.inner_optimization_iterations = inner_optimization_iterations # Number of inner optimization steps for the value system per outer step.
-
-
-        
-        if self.lr_lambda > 0:
-            self.optim_lambdas = th.optim.SGD(
-                self.training_variables.parameters(), lr=self.lr_lambda, weight_decay=0.0)
-        self.time = 0
-        self.training_variables.reset_lagrange_gradients()
-    def zero_grad(self, set_to_none=True)-> None:
-        set_to_none=True
-        super().zero_grad(set_to_none)
-        if self.lr_lambda > 0:
-            self.training_variables.requires_grad_(False)
-            self.training_variables.zero_grad(set_to_none)
-            self.optim_lambdas.zero_grad(set_to_none)
-        if hasattr(self, 'optimx_ideal'):
-            self.optimx_ideal.zero_grad(set_to_none)
-        return None
-    
-    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
-        
-        if __debug__:
-            x = self.params_gr # Possibly need flatten into single tensor.
-            
-            w = self.params_vs
-            #self.zero_grad()    
-            # Just optimize the value system for a number of iterations before doing the full constrained optimization step.
-            
-            #print("BEFORE", x[0].data[0:10])
-            if len(w) > 0:
-                assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
-                assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
-            if len(x) > 0:
-                assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
-            #assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
-        # PARAMS", self.optimx.param_groups[0]['params'][0].data[0:10])
-
-        if loss_gr_ideal is not None:
-            
-            self.optimx_ideal.zero_grad(set_to_none=True)
-            loss_sum = th.sum(loss_gr_ideal).detach()
-            for i in range(len(loss_gr_ideal)):
-                    (loss_gr_ideal[i]/loss_sum).backward(retain_graph=True)
-                    self.optimx_ideal.step()
-                    self.optimx_ideal.zero_grad(set_to_none=True)
-        self.training_variables.requires_grad_(False)
-        #if self.lr_lambda > 0:
-            #assert self.optim_lambdas.param_groups[0]['params'][0:len(self.training_variables.lagrange_multipliers)] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
-        
-        target_gr_loss = loss_gr_ideal.detach() if loss_gr_ideal is not None else None
-        selected_indices = None
-        if self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_EVERYTHING:
-            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss)
-        elif (self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_ALL_GROUNDING) and (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
-            loss_vs = loss_vs.detach() if loss_vs is not None else None
-            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss)
-        elif self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_VALUE_SYSTEM_WEIGHTS_ALONE:
-            loss_gr = loss_gr.detach() if loss_gr is not None else None
-            loss_gr.requires_grad_(False)
-            self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
-            loss = loss_vs
-        elif self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_SOME_GROUNDING:
-            selected_indices = self.loss_func_kwargs['value_indices']
-            loss = self.training_variables.forward(loss_gr, None, target_gr_loss=target_gr_loss, selected_indices=selected_indices)
-            unselected_indices = [i for i in range(len(loss_gr)) if i not in selected_indices]
-            loss_gr[unselected_indices] = loss_gr[unselected_indices].detach()
-            if len(selected_indices) > 1:
-                self.training_variables.lagrange_multipliers[unselected_indices] = self.training_variables.lagrange_multipliers[unselected_indices].detach()
-            else: 
-                self.training_variables.lagrange_multipliers = self.training_variables.lagrange_multipliers.detach()
-            #print("YEs", loss_func_kwargs['value_indices'])
-            #input("?")
-        elif self.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_EVER:
-            loss_gr = loss_gr.detach() if loss_gr is not None else None
-            loss_vs = loss_vs.detach() if loss_vs is not None else None
-            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss) + th.tensor(0.0, requires_grad=True) # Add dummy loss to allow backward to be called without error, even though no gradients will be computed.
-            
-        else:
-            raise ValueError(f"Unsupported loss function {self.loss_func_type}")
-        #print("GRADIENTS BEFORE BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
-        #print("GRADIENTS BEFORE BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
-        #loss_gr = loss_gr.detach()
-        #loss = loss_vs
-
-        loss.backward(**kwargs)
-        
-        
-        #print("GRADIENTS AFTER BACKWARD - VALUE SYSTEM PARAMS:", [p.grad for p in w])
-        #print("GRADIENTS AFTER BACKWARD - GR PARAMS:", [p.grad for p in x][0:5][0:5])
-        
-        return loss
-    def step(self, closure=None)->None:
-        #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
-        
-        
-        print("LAGRANGE MULTIPLIERS BEFORE STEP (VS right):", self.training_variables.get_multipliers())
-        #print("TRAINING VARS", vars(self.training_variables))
-        self.time += 1
-        #th.nn.utils.clip_grad_norm_(self.params_gr, self.max_grad_norm)
-        #th.nn.utils.clip_grad_norm_(self.params_vs, self.max_grad_norm)
-        if __debug__:
-            if self.lr_grounding > 0.0: 
-                assert self.params_gr[0].grad is not None, "Grounding gradients have not been computed. Make sure to call the backward pass on the grounding loss before stepping the optimizer."
-            
-            if self.lr_value_system > 0.0:
-                assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
-            #print("GRADIENTS BEFORE STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
-        #print("GRADIENTS BEFORE STEP - GR PARAMS:", [p.grad for p in self.params_gr])
-            
-        if self.optimx is not None and self.lr_grounding > 0.0:
-            self.optimx.step()
-        if self.optimy is not None and self.lr_value_system > 0.0:
-                self.optimy.step()
-        
-
-        self.training_variables.prepare_for_optimizer_step()
-        if self.lr_lambda > 0:
-            self.optim_lambdas.step()
-        #print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
-        self.training_variables.post_optimizer_step()
-
-            
-        #self.zero_grad()
-        #print("GRADIENTS AFTER STEP - VALUE SYSTEM PARAMS:", [p.grad for p in self.params_vs])
-        #print("GRADIENTS AFTER STEP - GR PARAMS:", [p.grad for p in self.params_gr])
-        
-        print("LAGRANGE MULTIPLIERS AFTER STEP (VS right):", self.training_variables.get_multipliers())
-        
-        #self.set_state({'time': 0, 'lambdas': training_variables.lagrange_multipliers})
-        return None
-    
-
-class ConstrainedLRScheduler:
-    """Composite scheduler that advances all internal schedulers together."""
-
-    def __init__(self, optimizer: ConstrainedOptimizer, sched_x, sched_y=None, sched_lambda=None):
-        self.optimizer = optimizer
-        self.sched_x = sched_x
-        self.sched_y = sched_y
-        self.sched_lambda = sched_lambda
-
-    @property
-    def _all_schedulers(self):
-        return [
-            s for s in (self.sched_x, self.sched_y, self.sched_lambda) if s is not None
-        ]
-
-    def step(self, metric=None):
-        for scheduler in self._all_schedulers:
-            if isinstance(scheduler, ReduceLROnPlateau):
-                    scheduler.step(metric)
-            else:
-                    scheduler.step()
-
-    def state_dict(self):
-        return {
-            "sched_x": self.sched_x.state_dict() if self.sched_x is not None else None,
-            "sched_y": self.sched_y.state_dict() if self.sched_y is not None else None,
-            "sched_lambda": self.sched_lambda.state_dict() if self.sched_lambda is not None else None,
-        }
-
-    def load_state_dict(self, state_dict):
-        if self.sched_x is not None and state_dict.get("sched_x") is not None:
-            self.sched_x.load_state_dict(state_dict["sched_x"])
-        if self.sched_y is not None and state_dict.get("sched_y") is not None:
-            self.sched_y.load_state_dict(state_dict["sched_y"])
-        if self.sched_lambda is not None and state_dict.get("sched_lambda") is not None:
-            self.sched_lambda.load_state_dict(state_dict["sched_lambda"])
-
-    def get_last_lr(self):
-        lrs = []
-        if self.sched_x is not None:
-            lrs.extend(self.sched_x.get_last_lr())
-        if self.sched_y is not None:
-            lrs.extend(self.sched_y.get_last_lr())
-        if self.sched_lambda is not None:
-            lrs.extend(self.sched_lambda.get_last_lr())
-        if len(lrs) == 0:
-            return [0.0]
-        return lrs
-
-    """@override
-    def set_parameters(self, params_gr, params_vs, optim_state={}):
-        self.params_gr = params_gr
-        self.params_vs = params_vs
-        self.optimx = self.sub_optimizer_class(params_gr, lr=self.lr_grounding, **self.optimizer_kwargs)
-        self.optimy = self.sub_optimizer_class(params_vs, lr=self.lr_value_system, **self.optimizer_kwargs)"""
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-
+from vsllib.utils import to_float
 class MORewardTrainer(Trainer):
 
     
@@ -322,8 +28,8 @@ class MORewardTrainer(Trainer):
     model: MORMForSequenceClassification
     accelerator: Accelerator
 
-    def __init__(self, **kwargs):
-        args=kwargs.get("args")
+    def __init__(self, **kwargs: Any) -> None:
+        args = kwargs.get("args")
         if "loss" not in args.include_for_metrics:
             args.include_for_metrics.append("loss")
         kwargs["args"] = args
@@ -334,6 +40,7 @@ class MORewardTrainer(Trainer):
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
+            
             train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
             
             if self.model.value_system_layer is not None:
@@ -441,18 +148,28 @@ class MORewardTrainer(Trainer):
             represent_smooth = accuracy_logits_smooth(logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
             result['representativeness_smooth'] = represent_smooth
 
+            represent = accuracy_logits(logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, correction=False)
+            result['representativeness_usual'] = represent
+
             chr = accuracy_logits(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
-            result['coherences'] = chr.tolist()
+            coherences = chr.tolist()
+            chr_usual = accuracy_logits(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, correction=False)
+            coherences_usual= chr_usual.tolist()
+
             chr_smooth = accuracy_logits_smooth(logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
-            result['coherences_smooth'] = chr_smooth.tolist()
-            for i, ch in enumerate(result['coherences']):
+            coherences_smooth = chr_smooth.tolist()
+            for i, ch in enumerate(coherences):
                 result[f'coherence_{i}'] = float(ch)
             
-            for i, ch in enumerate(result['coherences_smooth']):
+            for i, ch in enumerate(coherences_smooth):
                 result[f'coherence_smooth_{i}'] = float(ch)
-            result['avg_coherence'] = np.mean(chr)
-            result['avg_coherence_smooth'] = np.mean(chr_smooth)
-            assert chr.shape == (logits_shortened.shape[-1]-1,), f"Coherence shape: {result['coherence'].shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
+            for i, ch in enumerate(coherences_usual):
+                result[f'coherence_usual_{i}'] = float(ch)
+                
+            result['avg_coherence'] = np.mean(coherences)
+            result['avg_coherence_smooth'] = np.mean(coherences_smooth)
+            result['avg_coherence_usual'] = np.mean(coherences_usual)
+            assert chr.shape == (logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
             #print("EVAL METRICS:", result)
 
             training_variables.record_metrics(result, metric_type='validation')
@@ -811,8 +528,8 @@ class MORewardTrainer(Trainer):
                 elif len(losses.shape) == 1:
                     losses = self.gather_function(losses.unsqueeze_(0).repeat(batch_size, 1))
                     if __debug__ and not self.accelerator.gradient_state.end_of_dataloader:
-                        assert losses.shape[0] == batch_size, f"Expected losses to have shape ({batch_size},) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
-                    assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size} (or smaller), {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
+                        assert losses.shape[0] % batch_size == 0, f"Expected losses to have shape ({batch_size} times number of GPUs (or smaller),) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size,) for evaluation."
+                    assert losses.shape[1] == self.model.num_values + 1, f"Expected losses to have shape ({batch_size} times number of GPUs (or smaller), {self.model.num_values + 1}) after gather, got {losses.shape}. Make sure your model is returning a loss tensor of shape (batch_size, {self.model.num_values + 1}) for evaluation where the first num_values entries correspond to the grounding loss and the last entry corresponds to the value system loss."
                 
                 all_losses.add(losses)
             if inputs_decode is not None:
@@ -917,3 +634,22 @@ class MORewardTrainer(Trainer):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
         return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
+
+    def _save_checkpoint(self, model: Module, trial: Any | Dict[str, Any] | None) -> None:
+        return super()._save_checkpoint(model, trial)
+    def save_with_seed(self, checkpoint_name: str = "last_checkpoint"):
+        checkpoint_dir = os.path.join(self.args.output_dir, checkpoint_name)
+        self.save_state() # saved in the self.args.output_dir.
+        self.save_model(checkpoint_dir) # save inside the checkpoint_name directory inside the output_dir.
+        
+        #tokenizer.save_pretrained(checkpoint_dir)
+
+        seed_info = {
+            "seed": self.args.seed,
+            "dataseed": self.args.data_seed,
+            "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+            "torch_initial_seed": int(th.initial_seed()),
+        }
+        with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
+            json.dump(seed_info, fp, indent=2, sort_keys=True)
+        return checkpoint_dir
