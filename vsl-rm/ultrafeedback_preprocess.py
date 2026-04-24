@@ -10,7 +10,7 @@ load_dotenv()
 
 from datasets import load_dataset, load_from_disk, Dataset
 
-from vsllib.defines import LOCAL_DATASET_PATH
+from vsllib.defines import LOCAL_DATASET_PATH, ULTRAFEEDBACK_PROCESSED_PATH
 
 # Load HF tokens.
 def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
@@ -86,7 +86,7 @@ def ultrafeedback_processor(
 	hf_dataset = Dataset.from_dict( {k: [row[k] for row in rows] for k in rows[0].keys()})
 	
 	# Save to LOCAL_PROCESSED_DATASETS folder
-	local_datasets_path = Path(LOCAL_DATASET_PATH)
+	local_datasets_path = Path(ULTRAFEEDBACK_PROCESSED_PATH).joinpath("preprocessed")
 	local_datasets_path.mkdir(parents=True, exist_ok=True)
 	final_output = local_datasets_path / output_path
 	hf_dataset.save_to_disk(final_output)

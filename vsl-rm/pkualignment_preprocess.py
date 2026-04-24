@@ -79,9 +79,10 @@ def pkuAlignment_processor() -> tuple[int, list[int]]:
     print(f"Total pairs after processing: {len(ds_new)}")
     test_indices = list(range(len(ds_new)))[0:len(validation_indices)]  # Assuming test set is the same as validation set for now
     
-    # Save to LOCAL_PROCESSED_DATASETS folder
-    final_output = Path(PKUALIGNMENT_PROCESSED_PATH)
+    # Save to PKUALIGNMENT_PROCESSED_PATH folder
+    final_output = Path(PKUALIGNMENT_PROCESSED_PATH).joinpath("preprocessed/")
     final_output.mkdir(parents=True, exist_ok=True)
+    print(f"Saving processed dataset to disk... {final_output}")
     ds_new.save_to_disk(final_output)
 
     validation_indices_path = final_output / f"validation_indices.json"
