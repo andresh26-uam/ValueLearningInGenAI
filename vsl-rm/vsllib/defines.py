@@ -97,7 +97,7 @@ MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
     "llama3": {
         "tokenizer_use_fast": False,
         "tokenizer_add_pad_token": True,
-        "use_flash_attention_2": True,
+        "use_flash_attention_2": False,
         "tokenizer_use_auth_token": False,
     },
     "mistral": {
