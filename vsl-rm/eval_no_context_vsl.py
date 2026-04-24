@@ -45,6 +45,7 @@ from vsllib.defines import (
 )
 from vsllib.reward_models import (
     MORMForSequenceClassification,
+    MORMForSequenceClassificationConfig,
     mo_compute_loss_func,
 )
 from vsllib.utils import  ScriptArguments, argument_parser, obtain_tokenizer, seed_everything
@@ -59,6 +60,10 @@ class EvalArguments(ScriptArguments):
     results_dir: str = field(
         default=None,
         metadata={"help": "Path to output CSV file. (Normally saved under .results/script_args.output_dir/script_args.run_name/metrics.csv)"},
+    )
+    push_to_hub: bool = field(
+        default=False,
+        metadata={"help": "Whether to push the results to Hugging Face Hub. Requires HF_CLI_TOKEN env variable to be set."},
     )
 
 def parse_eval_args() -> EvalArguments:
@@ -168,6 +173,20 @@ def main() -> None:
     print("MODEL DETAILS:", model)
     print("FIRST PARAMETER:", next(model.parameters()))
     print("TRAINING VARIABLES:", model.training_variables.state_dict())
+    if script_args.push_to_hub:
+        from transformers import AutoConfig, AutoModelForSequenceClassification
+        print("Pushing model to Hugging Face Hub...?")
+        input("")
+        AutoConfig.register("morm_for_sequence_classification", MORMForSequenceClassificationConfig)
+        AutoModelForSequenceClassification.register(MORMForSequenceClassificationConfig, MORMForSequenceClassification)
+        
+        mo_1 = AutoModelForSequenceClassification.from_pretrained(
+                str(script_args.checkpoint_path),
+            )
+        print("MODEL DETAILS:", model)
+        print("FIRST PARAMETER:", next(model.parameters()))
+        print("TRAINING VARIABLES:", model.training_variables.state_dict())
+        
 
     model.eval()
 

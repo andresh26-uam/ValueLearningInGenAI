@@ -244,15 +244,13 @@ class PairwisePreferenceDataset():
                 self.data = save_dataset(self.data, embedded_or_tokenized_dataset_output_path)
             
         
-        print("AFTER SAVE", len(self.data))
         if use_embeddings:
             assert self.data[0].get("embedding_1", None) is not None, "Embedding 1 is missing after embedding step."
         
         if cleanup_cache_files:
             removed_cache_files = self.data.cleanup_cache_files()
             print(f"Removed {removed_cache_files} dataset cache files")
-        print("AFTER REMOVE CACHE", len(self.data))
-        
+            
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
 
         

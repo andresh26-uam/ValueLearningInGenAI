@@ -13,10 +13,12 @@
   "eval_every_steps": 1,
   "per_device_train_batch_size": 16,
   "per_device_eval_batch_size": 16,
-  "gradient_accumulation_steps": 16,
-  "metrics_accumulation_steps": 16,
+  "gradient_accumulation_steps": 1,
+  "metrics_accumulation_steps": 1,
   "lambda_decay": 0.0,
   "rew_center_coefficient": 0.0,
   "layer_normalization": "none",
-  "use_cpu": false
+  "use_cpu": false,
+
+  "run_name": "eval_armo"
 }
