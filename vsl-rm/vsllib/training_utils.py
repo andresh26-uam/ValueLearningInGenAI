@@ -431,11 +431,11 @@ class MORMTrainingVariables(th.nn.Module):
                 maximum = th.maximum(coherence_target, self.maximum_coherences_tendency)
                 
                 self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.coherences_tendency = (th.multiply(coherence_target, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.coherences_tendency = (th.multiply(coherence_target, self.loss_metric_tendency_update_ratio) + th.multiply(self.coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 
                 maximum_repr = th.maximum(self.last_accumulated_representativeness, self.maximum_representativeness_tendency)
                 self.maximum_representativeness_tendency = (th.multiply(maximum_repr, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.representativeness_tendency = (th.multiply(self.last_accumulated_representativeness, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.representativeness_tendency = (th.multiply(self.last_accumulated_representativeness, self.loss_metric_tendency_update_ratio) + th.multiply(self.representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
 
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
         
@@ -460,8 +460,8 @@ class MORMTrainingVariables(th.nn.Module):
 
                 self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 self.minimum_vs_loss_tendency = (th.multiply(minimum_vs, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.grounding_loss_tendency = (th.multiply(minimum_actual, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.vs_loss_tendency = (th.multiply(self.last_accumulated_vs_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.grounding_loss_tendency = (th.multiply(minimum_actual, self.loss_metric_tendency_update_ratio) + th.multiply(self.grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.vs_loss_tendency = (th.multiply(self.last_accumulated_vs_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
 
     def record_metrics(self, metrics: Dict[str, float|list], metric_type: Literal["train", "validation"] = "train") -> None:
         # This is called at the end of each evaluation phase, and records the grounding loss and vs loss for the last evaluation phase, which will be used to update the Lagrange multipliers before the next optimizer step.
