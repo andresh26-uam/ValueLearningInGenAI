@@ -1,0 +1,107 @@
+program: sweep.py
+method: bayes
+metric:
+  goal: minimize
+  name: eval/loss
+
+parameters:
+  use_exponential_moving_average_or_optimum_targets:
+    values:
+      - optimum
+      - average
+    distribution: categorical
+  use_metrics_or_losses_for_lagrange_updates:
+    values:
+      - metrics
+      - losses
+    distribution: categorical
+  grounding_loss_tendency_update_ratio:
+    values:
+      - 0.1
+      - 0.01
+      - 0.05
+    distribution: categorical
+  layer_activation:
+    values:
+      - ReLU
+    distribution: categorical
+  final_layer_activation:
+    values:
+      - none
+      - Tanh
+    distribution: categorical
+  per_device_train_batch_size:
+    values:
+      - 64
+      - 128
+      - 256
+    distribution: categorical
+  gradient_accumulation_steps:
+    max: 10
+    min: 1
+    distribution: int_uniform
+  grad_on_only_worst_value:
+    values:
+      - "false"
+      - "true"
+    distribution: categorical
+  train_sampling_strategy:
+    values:
+      - random
+    distribution: categorical
+  rew_center_coefficient:
+    values:
+      - 0.0
+      - 0.01
+    distribution: categorical
+  layer_normalization:
+    values:
+      - none
+      - LayerNorm
+    distribution: categorical
+  zero_constraint:
+    values:
+      - "true"
+    distribution: categorical
+  loss_func_type:
+    values:
+      - "DEFAULT"
+    distribution: categorical
+  max_grad_norm:
+    max: 1.0
+    min: 0.01
+    distribution: uniform
+  learning_rate:
+    max: 0.001
+    min: 0.00001
+    distribution: log_uniform_values
+  "lagrange_learning_rate":
+    max: 0.1
+    min: 0.001
+    distribution: log_uniform_values
+  num_train_epochs: 
+    values:
+      - 2
+    distribution: categorical
+  weight_decay:
+    max: 0.01
+    min: 0.0001
+    distribution: log_uniform_values
+  lambda_decay:
+    values:
+      - 0.0
+      - 0.0001
+      - 0.001
+    distribution: categorical
+  save_every_steps:
+    values: 
+    - 100000
+    distribution: categorical
+  eval_every_steps: 
+    values:
+      - 100000
+    distribution: categorical
+  run_name:
+    values:
+      - sweep
+    distribution: categorical

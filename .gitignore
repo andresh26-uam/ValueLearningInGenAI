@@ -213,3 +213,6 @@ ___*
 slurm*.out
 wandb/
 models/
+
+
+sweeps/

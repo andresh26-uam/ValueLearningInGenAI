@@ -567,8 +567,6 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
     grounding_mask = missing_mask[..., 0:-1] if missing_mask is not None else None
     vs_mask = missing_mask[..., -1] if missing_mask is not None else None
 
-    print("GR", grounding_mask)
-
     rew_sum = others.get('rew_sum', None)
     if rew_sum is not None:
         grounding_rew_sum = rew_sum[..., 0:-1]
@@ -712,6 +710,17 @@ class MultiValueRewardHead(nn.Module):
                 return layer.weight
         raise ValueError("Expected at least one Linear layer in value head")
 
+    def extra_repr(self) -> str:
+        return_str = ""
+        return_str += f"Normalization: {self.normalization}\n Heads:\n"
+        for head_i, head in enumerate(self.value_heads):
+            if head_i in self.optimized_head_indices:
+                optimized_str = "optimized"
+            else:
+                optimized_str = "frozen"
+            head_str = f"head_{head_i} ({optimized_str}): {head}"
+            return_str += head_str + "\n"
+        return return_str
 
 class MORMForSequenceClassification(PreTrainedModel):
     config_class = MORMForSequenceClassificationConfig
@@ -856,7 +865,7 @@ class MORMForSequenceClassification(PreTrainedModel):
             "score.in_features, config.hidden_size/d_model/n_embd/dim, or input embedding width."
         )
 
-    def construct_value_layer(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None, n_outputs: int = 1) -> nn.Sequential:
+    def construct_value_layer(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None, n_outputs: int = 1, add_normalization: bool = False) -> nn.Sequential:
         layers = []
         model_device = self._module_device(base_model)
         model_dtype = self._resolve_torch_dtype(config.dtype)
@@ -877,7 +886,8 @@ class MORMForSequenceClassification(PreTrainedModel):
                           dtype=model_dtype, device=model_device))
 
             layers.append(intermediate_activation())
-            # layers.append(nn.Dropout(config.value_layer_dropout))
+            if config.value_layer_dropout > 0.0:
+                layers.append(nn.Dropout(config.value_layer_dropout))
             input_size = hidden_size
         layers.append(nn.Linear(input_size, n_outputs,
                       dtype=model_dtype, device=model_device))
@@ -889,7 +899,8 @@ class MORMForSequenceClassification(PreTrainedModel):
                 f"Unsupported final activation: {config.value_layer_final_activation}")
         if final_activation is not None:
             layers.append(final_activation())
-
+        if add_normalization:
+            layers.append(self.construct_value_normalization(config, base_model))
         return nn.Sequential(*layers)
 
     def construct_value_normalization(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None):
@@ -955,7 +966,8 @@ class MORMForSequenceClassification(PreTrainedModel):
             else:
                 # In this case, the parameters of different value dimensions do not conflict.
                 constructor = partial(
-                    self.construct_value_layer, n_outputs=self.num_values)
+                    self.construct_value_layer, n_outputs=self.num_values, add_normalization=config.layer_normalization != 'none')
+            
             self.reward_heads = constructor(config, base_model)
             if config.use_ideal_grounding_model:
                 self.reward_heads_ideal = constructor(config, base_model)

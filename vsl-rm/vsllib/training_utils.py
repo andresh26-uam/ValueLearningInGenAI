@@ -338,13 +338,15 @@ class MORMTrainingVariables(th.nn.Module):
                 norm_penalty_ =  th.norm(self.vs_coeff)
             else:
                 norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=True)
-            with th.no_grad():
+            """with th.no_grad():
+                add_vs_loss = self._last_add_vs_loss
                 if th.all(gr_ideal_diff < 0.0):
-                    # This means all groundings are below their ideal grounding losses (or above their ideal metrics, depending on the mode), so we don't need to apply gradients to push them down further, and can just focus on the value system loss if present.
+                    # This means all groundings are below their ideal grounding losses (or above their ideal metrics, depending on the mode), so we don't need to apply gradients to push them down further, and can focus on the value system loss if present.
                     pass
                 else:
+                    add_vs_loss = False
                     vs_ideal_diff = None # In this case we set the vs_ideal_diff to None because we want to only optimize the grounding lagrange multipliers.
-
+"""
             forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices, add_vs_loss=self._last_add_vs_loss, add_gr_loss=self._last_add_gr_loss) + norm_penalty_ # It is negated, as it is a maximization problem
             forward.backward()
             
@@ -369,7 +371,7 @@ class MORMTrainingVariables(th.nn.Module):
             if self._last_add_vs_loss and need_backward:
                 assert self.vs_coeff.grad is not None, "VS Coefficient gradient is None before optimizer step, but it should not be when add_vs_loss is True."
             else:
-                assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, 0.0), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
+                assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, th.zeros_like(self.vs_coeff.grad)), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
             if self._last_add_gr_loss  and need_backward:
                 if self._last_selected_indices is not None:
                     assert not th.allclose(coeff[self._last_selected_indices], th.zeros_like(coeff[self._last_selected_indices])), "Selected grounding multipliers have zero gradients, but they should not be zero."

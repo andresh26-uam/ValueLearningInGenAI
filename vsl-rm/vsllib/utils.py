@@ -111,7 +111,7 @@ class ScriptArguments:
     per_device_train_batch_size: Optional[int] = field(default=128)
     per_device_eval_batch_size: Optional[int] = field(default=128)
     gradient_accumulation_steps: Optional[int] = field(default=5)  # TODO 32?
-    metrics_accumulation_steps: Optional[int] = field(default=5)  # TODO 32?
+    
     lambda_decay: Optional[float] = field(default=0.0005)
     rew_center_coefficient: Optional[float] = field(default=0.01)
     layer_normalization: Optional[str] = field(default="LayerNorm")

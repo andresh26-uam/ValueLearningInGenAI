@@ -39,6 +39,10 @@ from vsllib.defines import HAS_UNDEFINED_LABELS, REWARD_HEADS_INDICES, REWARD_HE
 
 load_dotenv()
 
+# W&B init can be slow on sweep/CPU runs; use safer defaults.
+os.environ.setdefault("WANDB_INIT_TIMEOUT", "600")
+os.environ.setdefault("WANDB__SERVICE_WAIT", "600")
+
 parser = HfArgumentParser(ScriptArguments)  # type: ignore
 script_args = parser.parse_args_into_dataclasses()[0]
 script_args, preset = argument_parser(script_args)
@@ -73,13 +77,13 @@ training_args = TrainingArguments(
     remove_unused_columns=False,
     bf16=script_args.bf16,
     logging_strategy="steps",
-    logging_steps=10,
+    logging_steps=1,
     optim_args={},
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
     warmup_steps=0,  # TODO. 50?
     label_names=["labels"],
-    report_to="wandb",  # 'wandb'
+    report_to="wandb",
     max_grad_norm=script_args.max_grad_norm,  # TODO 0.01?
     run_name=script_args.run_name,
     # report_to=None, # 'wandb'
@@ -220,11 +224,14 @@ def main_fun() -> None:
     # trainer.train()
     print("Saving last checkpoint of the model")
     print(mo_model.training_variables.lagrange_multipliers)
-
+    print("Starting trainer.train()", flush=True)
+    trainer.evaluate()
     trainer.train()
+    trainer.evaluate()
     save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
 
     mo_model = MORMForSequenceClassification.from_pretrained(save_location)
+    
     print("TRAINED MODEL", mo_model)
     print(mo_model.training_variables.lagrange_multipliers)
 
