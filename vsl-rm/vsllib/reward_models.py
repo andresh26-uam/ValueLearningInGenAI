@@ -532,7 +532,7 @@ def reward_pairs_and_scores_to_logits_and_targets(reward1: th.Tensor, reward2: t
         'missing_mask': missing_mask,
         'rew_sum': rew_sum
     }
-    return logits_p, target_probs_p, others
+    return logits_p, target_probs_p.detach(), others
 
 
 def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = None, scores2: th.Tensor = None, reward_diff_threshold: float = 50.0, return_metrics: bool = False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0) -> th.Tensor:
@@ -564,9 +564,10 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
     logits, labels, others = rewards_and_labels_to_logits_and_targets(
         logits, labels, assume_torch=True, config=config)
     missing_mask = others.get('missing_mask', None)
-    grounding_mask = missing_mask[..., 0:-
-                                  1] if missing_mask is not None else None
+    grounding_mask = missing_mask[..., 0:-1] if missing_mask is not None else None
     vs_mask = missing_mask[..., -1] if missing_mask is not None else None
+
+    print("GR", grounding_mask)
 
     rew_sum = others.get('rew_sum', None)
     if rew_sum is not None:

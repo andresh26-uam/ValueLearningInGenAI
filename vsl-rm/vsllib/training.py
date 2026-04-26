@@ -277,7 +277,8 @@ class MORewardTrainer(Trainer):
 
         loss_combined = constrained_optim.custom_backward(
             loss_gr, loss_gr_ideal, loss_vs)
-
+        print("LOSS COMBINED: ", loss_combined)
+        
         return loss_combined
 
     def prediction_step(

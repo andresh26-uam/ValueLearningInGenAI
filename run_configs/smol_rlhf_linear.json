@@ -1,5 +1,5 @@
 {
-    "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
+    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
     "dataset": "ultra",
     "gather_train_metrics": true,
 
@@ -44,5 +44,5 @@
     "save_every_steps": 10000,
     "eval_every_steps": 100,
 
-    "run_name": "llama_rlhf_linear"
+    "run_name": "smol_rlhf_linear"
 }

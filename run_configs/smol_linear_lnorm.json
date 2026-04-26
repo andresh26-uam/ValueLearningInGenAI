@@ -22,7 +22,7 @@
 
     "rew_center_coefficient": 0.01,
     "layer_normalization": "LayerNorm",
-    "learning_rate": 0.0001,
+    "learning_rate": 0.0005,
     "grounding_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.01,
     "grounding_loss_tendency_update_ratio": 0.01,

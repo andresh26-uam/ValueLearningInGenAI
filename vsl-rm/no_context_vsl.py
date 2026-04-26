@@ -34,7 +34,7 @@ from vsllib.dataset_processing import PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
-from vsllib.defines import REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.defines import HAS_UNDEFINED_LABELS, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
 
 
 load_dotenv()
@@ -147,6 +147,7 @@ def main_fun() -> None:
                 reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
 
     mo_config = MORMForSequenceClassificationConfig(
+        check_undefined_label=HAS_UNDEFINED_LABELS[script_args.dataset],
         pad_token_id=pad_token_id,
         num_values=len(dataset.value_keys),
         dtype=str(torch_dtype).replace("torch.", ""),

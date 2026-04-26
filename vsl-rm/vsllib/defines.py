@@ -41,6 +41,10 @@ PROCESSED_DATASET_PATHS = {
     SupportedDatasets.ULTRAFEEDBACK: ULTRAFEEDBACK_PROCESSED_PATH,
 }
 
+HAS_UNDEFINED_LABELS = {
+    SupportedDatasets.PKUALIGNMENT: False,
+    SupportedDatasets.ULTRAFEEDBACK: True,
+}
 HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
     SupportedDatasets.ULTRAFEEDBACK: 0.05,

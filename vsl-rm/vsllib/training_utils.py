@@ -184,7 +184,7 @@ class MORMTrainingVariables(th.nn.Module):
                 lag_gr_loss = th.dot(used_mults, used_grounding_losses)
 
             else:
-                lag_gr_loss = th.dot(used_mults, th.maximum(used_grounding_losses - target_gr_loss[selected_indices], th.zeros_like(used_grounding_losses)))
+                lag_gr_loss = th.dot(used_mults, th.maximum(used_grounding_losses - target_gr_loss[selected_indices], th.zeros_like(used_grounding_losses, requires_grad=False)))
         else:
             lag_gr_loss = th.tensor(0.0, device=grounding_losses.device, dtype=grounding_losses.dtype, requires_grad=False)
             
@@ -203,7 +203,7 @@ class MORMTrainingVariables(th.nn.Module):
         if __debug__:
             print("TOTAL LOSS: ", total_loss , "which is the sum of Lagrange grounding loss and value system loss:" )
             print(f" ADDED: {add_gr_loss} Lagrange grounding loss (lag_gr_loss): ", lag_gr_loss, "dot of" , used_grounding_losses)
-            print(f"  ADDED: {add_vs_loss} Value system loss (vs_losses * vs_coeff): ", vs_loss_scaled)
+            print(f"  ADDED: {add_vs_loss} Value system loss (vs_losses * vs_coeff): ", vs_loss_scaled, "which is vs_losses:", vs_losses, "times vs_coeff:", vs_coeff)
         return total_loss
     
     def _apply(self, fn, recurse=True) -> Any:
