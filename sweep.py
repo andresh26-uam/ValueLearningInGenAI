@@ -113,7 +113,7 @@ def main(default_config_file: str, dataset: str) -> int:
     subprocess_env["WANDB_RESUME"] = "allow"
 
     completed = subprocess.run(
-        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}", f"--do_save={False}", f"--do_train_save={False}"],
+        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}"],
         env=subprocess_env,
         check=False,
     )
