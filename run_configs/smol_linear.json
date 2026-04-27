@@ -24,6 +24,7 @@
     "learning_rate": 0.0001,
     "grounding_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.01,
+    "assume_qualitative_labels": false,  
     "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 0.01,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
