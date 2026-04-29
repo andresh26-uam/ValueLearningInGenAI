@@ -79,8 +79,8 @@ VALUE_SYSTEM_OUTPUT = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': 'score',
 }
 
-EPSILON = 4.0e-2
-SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
+MIN_EPSILON = 4.0e-2
+SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-MIN_EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
 # 0.00999.
 
 VALUE_LAYER_ACTIVATIONS = {

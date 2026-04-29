@@ -14,6 +14,7 @@ import random
 from transformers import (
     set_seed, AutoTokenizer
 )
+from triton.language import assume
 
 from vsllib.defines import MODEL_DIR, MODEL_PRESETS, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
 
@@ -65,6 +66,22 @@ def fuse_parameters(model) -> th.Tensor:
         i += p.numel()
     return params
 
+
+
+def print_tensor_and_grad_fn(grad_fn, level=0):
+    indent = "  " * level
+    if grad_fn is None:
+        print("NO GRAD FN")
+        return
+    if getattr(grad_fn, 'variable', None) is not None:
+        if grad_fn.variable.requires_grad:
+            print(f"{indent}AccumulateGrad for tensor: {grad_fn.variable.shape}")
+    else:
+        print(f"{indent}Grad function: {grad_fn}")
+        if hasattr(grad_fn, 'next_functions'):
+            for next_fn in grad_fn.next_functions:
+                if next_fn[0] is not None:
+                    print_tensor_and_grad_fn(next_fn[0], level + 1)
 
 @dataclass
 class ScriptArguments:
@@ -127,6 +144,7 @@ class ScriptArguments:
         default="average")
     use_metrics_or_losses_for_lagrange_updates: Optional[str] = field(
         default="losses")
+    assume_qualitative_labels: Optional[bool] = field(default=True)
 
     gather_train_metrics: Optional[bool] = field(default=True)
     grad_on_only_worst_value: Optional[bool] = field(default=False)
@@ -149,6 +167,12 @@ class ScriptArguments:
         default="HuggingFaceTB/SmolLM-135M-Instruct",
         metadata={
             "help": "The model that you want to train from the Hugging Face hub. E.g. gpt2, gpt2-xl, bert, etc."
+        },
+    )
+    activate_discordance_epsilon_for_loss : Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Whether to activate the discordance epsilon for the loss function. If True, will use the discordance epsilon to calculate a target probability for each pair, and will ignore pairs that are within the epsilon of each other. This can help with training stability if there is a lot of noise in the labels."
         },
     )
     model_variant: Optional[str] = field(
@@ -197,7 +221,10 @@ class ScriptArguments:
         default_factory=lambda: f"run_",
         metadata={"help": "The name of the run for logging purposes."},
     )
-
+    discordance_epsilon: Optional[float] = field(
+        default=None,
+        metadata={"help": "The epsilon to use for calculating discordance-aware representativeness. If None, will be set to half of the minimum nonzero difference between any pair of labels in the training dataset."},
+    )
     save_every_steps: Optional[int] = field(
         default=10000,
         metadata={"help": "Save the model every x steps"},
@@ -211,6 +238,15 @@ class ScriptArguments:
         default=42,
         metadata={
             "help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
+    )
+
+    do_save: Optional[bool] = field(
+        default=True,
+        metadata={"help": "Whether to save the model after training."},
+    )
+    do_checkpointing: Optional[bool] = field(
+        default=True,
+        metadata={"help": "Whether to save checkpoints during training."},
     )
     config_file: Optional[str] = field(
         default=None,

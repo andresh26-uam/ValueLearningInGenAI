@@ -1,4 +1,5 @@
-from typing import Any, Dict, Optional
+import enum
+from typing import Any, Dict, NamedTuple, Optional
 import numpy as np
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
@@ -15,6 +16,42 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
 from vsllib.utils import to_float
+from vsllib.defines import MIN_EPSILON
+
+
+class EvalPredictionWithExtraLabels(EvalPrediction):
+    """
+    Evaluation output (always contains labels), to be used to compute metrics.
+
+    Parameters:
+        predictions (`np.ndarray`): Predictions of the model.
+        label_ids (`np.ndarray`): Targets to be matched.
+        inputs (`np.ndarray`, *optional*): Input data passed to the model.
+        losses (`np.ndarray`, *optional*): Loss values computed during evaluation.
+    """
+
+    def __init__(
+        self,
+        predictions: np.ndarray | tuple[np.ndarray],
+        label_ids: np.ndarray | tuple[np.ndarray],
+        labels_ql: np.ndarray | tuple[np.ndarray],
+        labels_qt: np.ndarray | tuple[np.ndarray],
+        inputs: np.ndarray | tuple[np.ndarray] | None = None,
+        losses: np.ndarray | tuple[np.ndarray] | None = None,
+    ):
+        super().__init__(predictions=predictions, label_ids=label_ids, inputs=inputs, losses=losses)
+        self.labels_ql = labels_ql
+        self.labels_qt = labels_qt
+        self.elements = (*self.elements, self.labels_ql, self.labels_qt)
+
+
+class EvalLoopOutputWithExtraLabels(NamedTuple):
+    predictions: np.ndarray | tuple[np.ndarray]
+    label_ids: np.ndarray | tuple[np.ndarray] | None
+    metrics: dict[str, float] | None
+    num_samples: int | None
+    labels_qt: np.ndarray | tuple[np.ndarray] | None
+    labels_ql: np.ndarray | tuple[np.ndarray] | None
 
 
 class MORewardTrainer(Trainer):
@@ -109,9 +146,15 @@ class MORewardTrainer(Trainer):
 
     def compute_metrics(eval_pred, config: MORMForSequenceClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
+            epsilon_list = set([0.0, 0.001, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5])
+            epsilon_list.add(config.discordance_epsilon)
+
             result = {}
             logits_shortened = eval_pred.predictions
             labels_shortened = eval_pred.label_ids
+            labels_quantitative = eval_pred.labels_qt
+            labels_qualitative = eval_pred.labels_ql
+
 
             loss_all = eval_pred.losses
             losses = np.mean(loss_all, axis=0)
@@ -124,29 +167,44 @@ class MORewardTrainer(Trainer):
             result['value_system_loss'] = to_float(loss_vs)
 
             represent = accuracy_logits(
-                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
+                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
             result['representativeness'] = represent
 
+            represent_usual = accuracy_logits(
+                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
+            result['representativeness_usual'] = represent_usual
+
             represent_smooth = accuracy_logits_smooth(
-                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False)
+                logits_shortened[..., -1], labels_quantitative[..., -1], assume_torch=False)
             result['representativeness_smooth'] = represent_smooth
 
-            represent = accuracy_logits(
-                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, correction=False)
-            result['representativeness_usual'] = represent
+            for epsilon in epsilon_list:
+                represent = accuracy_logits(
+                    logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=epsilon)
+                result[f'representativeness_e{epsilon}'] = represent
 
             chr = accuracy_logits(
-                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
+                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
             coherences = chr.tolist()
             chr_usual = accuracy_logits(
-                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, correction=False)
+                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
             coherences_usual = chr_usual.tolist()
 
             chr_smooth = accuracy_logits_smooth(
-                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False)
+                logits_shortened[..., 0:-1], labels_quantitative[..., 0:-1], assume_torch=False)
             coherences_smooth = chr_smooth.tolist()
+
+            per_epsilon_chr = []
+            for epsilon in epsilon_list:
+                cohr = accuracy_logits(
+                    logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=epsilon)
+                per_epsilon_chr.append(cohr)
+
             for i, ch in enumerate(coherences):
                 result[f'coherence_{i}'] = float(ch)
+                for j, epsilon in enumerate(epsilon_list):
+                    result[f'coherence_e{epsilon}_{i}'] = float(per_epsilon_chr[j][i])
+                
 
             for i, ch in enumerate(coherences_smooth):
                 result[f'coherence_smooth_{i}'] = float(ch)
@@ -156,6 +214,8 @@ class MORewardTrainer(Trainer):
             result['avg_coherence'] = np.mean(coherences)
             result['avg_coherence_smooth'] = np.mean(coherences_smooth)
             result['avg_coherence_usual'] = np.mean(coherences_usual)
+            for j, epsilon in enumerate(epsilon_list):
+                result[f'avg_coherence_e{epsilon}'] = np.mean([float(per_epsilon_chr[j][i]) for i in range(len(coherences))])
             assert chr.shape == (
                 logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
 
@@ -379,10 +439,10 @@ class MORewardTrainer(Trainer):
         if len(logits) == 1:
             logits = logits[0]
 
-        logits, labels, _ = rewards_and_labels_to_logits_and_targets(
+        logits, labels, others = rewards_and_labels_to_logits_and_targets(
             logits, labels, config=self.model.config, assume_torch=True)
 
-        return (loss, logits, labels)
+        return (loss, logits, labels, others["target_probs_quantitative"], others["target_probs_qualitative"])
 
     def evaluation_loop(
         self,
@@ -391,7 +451,7 @@ class MORewardTrainer(Trainer):
         prediction_loss_only: bool | None = None,
         ignore_keys: list[str] | None = None,
         metric_key_prefix: str = "eval",
-    ) -> EvalLoopOutput:
+    ) -> EvalLoopOutputWithExtraLabels:
         """
         taken from the library. It has changes to handle multiple losses.
         """
@@ -458,6 +518,10 @@ class MORewardTrainer(Trainer):
             self.args.eval_do_concat_batches, padding_index=-100)
         all_labels = EvalLoopContainer(
             self.args.eval_do_concat_batches, padding_index=-100)
+        all_labels_ql = EvalLoopContainer(
+            self.args.eval_do_concat_batches, padding_index=-100)
+        all_labels_qt = EvalLoopContainer(
+            self.args.eval_do_concat_batches, padding_index=-100)
         all_inputs = EvalLoopContainer(
             self.args.eval_do_concat_batches, padding_index=-100)
 
@@ -478,7 +542,7 @@ class MORewardTrainer(Trainer):
                     batch_size = observed_batch_size
 
             # Prediction step
-            losses, logits, labels = self.prediction_step(
+            losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
                 model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             main_input_name = getattr(
                 self.model, "main_input_name", "input_ids")
@@ -514,6 +578,14 @@ class MORewardTrainer(Trainer):
                 # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
                 labels = self.accelerator.pad_across_processes(
                     labels, dim=1, pad_index=-100)
+            if labels_ql is not None:
+                # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
+                labels_ql = self.accelerator.pad_across_processes(
+                    labels_ql, dim=1, pad_index=-100)
+            if labels_qt is not None:
+                # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
+                labels_qt = self.accelerator.pad_across_processes(
+                    labels_qt, dim=1, pad_index=-100)
             if logits is not None:
                 logits = self.accelerator.pad_across_processes(
                     logits, dim=1, pad_index=-100)
@@ -526,6 +598,15 @@ class MORewardTrainer(Trainer):
                 labels = self.gather_function(labels)
                 if not self.args.batch_eval_metrics or description == "Prediction":
                     all_labels.add(labels)
+            if labels_ql is not None:
+                labels_ql = self.gather_function(labels_ql)
+                if not self.args.batch_eval_metrics or description == "Prediction":
+                    all_labels_ql.add(labels_ql)
+            if labels_qt is not None:
+                labels_qt = self.gather_function(labels_qt)
+                if not self.args.batch_eval_metrics or description == "Prediction":
+                    all_labels_qt.add(labels_qt)
+
 
             self.control = self.callback_handler.on_prediction_step(
                 args, self.state, self.control)
@@ -537,12 +618,12 @@ class MORewardTrainer(Trainer):
                     batch_kwargs["losses"] = losses if "loss" in args.include_for_metrics else None
                     batch_kwargs["inputs"] = inputs if "inputs" in args.include_for_metrics else None
                     metrics = self.compute_metrics(
-                        EvalPrediction(predictions=logits,
-                                       label_ids=labels, **batch_kwargs),
+                        EvalPredictionWithExtraLabels(predictions=logits,
+                                                       label_ids=labels, labels_ql=labels_ql, labels_qt=labels_qt, **batch_kwargs),
                         compute_result=is_last_step,
                     )
 
-                del losses, logits, labels, inputs
+                del losses, logits, labels, labels_ql, labels_qt, inputs
                 torch.cuda.empty_cache()
 
             # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
@@ -550,9 +631,12 @@ class MORewardTrainer(Trainer):
                 all_losses.to_cpu_and_numpy()
                 all_preds.to_cpu_and_numpy()
                 all_labels.to_cpu_and_numpy()
+                all_labels_ql.to_cpu_and_numpy()
+                all_labels_qt.to_cpu_and_numpy()
+
                 all_inputs.to_cpu_and_numpy()
 
-                del losses, logits, labels, inputs
+                del losses, logits, labels, labels_ql, labels_qt, inputs
                 torch.cuda.empty_cache()
 
         # After all calls to `.gather_function`, reset to `gather_for_metrics`:
@@ -563,6 +647,8 @@ class MORewardTrainer(Trainer):
         # print("LIBRARY ALL LOSSES", all_losses.shape)
         all_preds = all_preds.get_arrays()
         all_labels = all_labels.get_arrays()
+        all_labels_ql = all_labels_ql.get_arrays()
+        all_labels_qt = all_labels_qt.get_arrays()
         all_inputs = all_inputs.get_arrays()
 
         # Number of samples
@@ -590,8 +676,8 @@ class MORewardTrainer(Trainer):
             eval_set_kwargs["losses"] = all_losses if "loss" in args.include_for_metrics else None
             eval_set_kwargs["inputs"] = all_inputs if "inputs" in args.include_for_metrics else None
             metrics = self.compute_metrics(
-                EvalPrediction(predictions=all_preds,
-                               label_ids=all_labels, **eval_set_kwargs)
+                EvalPredictionWithExtraLabels(predictions=all_preds,
+                               label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, **eval_set_kwargs)
             )
         elif metrics is None:
             metrics = {}
@@ -612,7 +698,7 @@ class MORewardTrainer(Trainer):
             if not key.startswith(f"{metric_key_prefix}_"):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
-        return EvalLoopOutput(predictions=all_preds, label_ids=all_labels, metrics=metrics, num_samples=num_samples)
+        return EvalLoopOutputWithExtraLabels(predictions=all_preds, label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, metrics=metrics, num_samples=num_samples)
 
     def save_with_seed(self, checkpoint_name: str = "last_checkpoint"):
         checkpoint_dir = os.path.join(self.args.output_dir, checkpoint_name)

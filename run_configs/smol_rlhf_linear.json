@@ -13,6 +13,8 @@
     "gradient_accumulation_steps": 8,
     "lambda_decay": 0.001,
 
+    "activate_discordance_epsilon_for_loss": true,
+    
     "hidden_size": 1024,
     "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,

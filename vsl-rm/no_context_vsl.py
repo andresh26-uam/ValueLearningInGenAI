@@ -34,7 +34,7 @@ from vsllib.dataset_processing import PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
-from vsllib.defines import HAS_UNDEFINED_LABELS, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
 
 
 load_dotenv()
@@ -68,7 +68,7 @@ training_args = TrainingArguments(
     weight_decay=script_args.weight_decay,
     eval_strategy="steps",
     eval_steps=script_args.eval_every_steps,
-    save_strategy="steps",
+    save_strategy="steps" if script_args.do_checkpointing else "no",
     save_steps=script_args.save_every_steps,
     gradient_accumulation_steps=script_args.gradient_accumulation_steps,
     gradient_checkpointing=script_args.gradient_checkpointing,
@@ -131,6 +131,14 @@ def main_fun() -> None:
                                         cleanup_cache_files=bool(
                                             script_args.cleanup_dataset_cache_files),
                                         )
+    
+    if script_args.discordance_epsilon is None:
+        suggested_epsilon =dataset.calculate_suggested_epsilon()
+    else:
+        suggested_epsilon = script_args.discordance_epsilon
+    suggested_epsilon = max(suggested_epsilon, MIN_EPSILON)  # Avoid too small epsilon
+    print("Suggested discordance_epsilon based on eval dataset: ", suggested_epsilon)
+    
     print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(
         dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
     num_values_to_use = len(dataset.value_keys)
@@ -151,10 +159,13 @@ def main_fun() -> None:
                 reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
 
     mo_config = MORMForSequenceClassificationConfig(
+        activate_discordance_epsilon_for_loss=script_args.activate_discordance_epsilon_for_loss,
         check_undefined_label=HAS_UNDEFINED_LABELS[script_args.dataset],
         pad_token_id=pad_token_id,
         num_values=len(dataset.value_keys),
         dtype=str(torch_dtype).replace("torch.", ""),
+        assume_qualitative_labels=script_args.assume_qualitative_labels,
+        discordance_epsilon=suggested_epsilon,
         base_model_name_or_path=script_args.model_name,
         base_model_trust_remote_code=True,
         base_model_num_labels=1,
@@ -225,15 +236,18 @@ def main_fun() -> None:
     print("Saving last checkpoint of the model")
     print(mo_model.training_variables.lagrange_multipliers)
     print("Starting trainer.train()", flush=True)
+    print("EVALUATING")
     trainer.evaluate()
+    print("EVALUATED")
     trainer.train()
     trainer.evaluate()
-    save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
+    if script_args.do_save:
+        save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
 
-    mo_model = MORMForSequenceClassification.from_pretrained(save_location)
+        mo_model = MORMForSequenceClassification.from_pretrained(save_location)
     
-    print("TRAINED MODEL", mo_model)
-    print(mo_model.training_variables.lagrange_multipliers)
+        print("TRAINED MODEL", mo_model)
+        print(mo_model.training_variables.lagrange_multipliers)
 
 
 if __name__ == "__main__":

@@ -1,4 +1,6 @@
 
+import dis
+
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
 from collections.abc import Iterator
@@ -15,7 +17,7 @@ from transformers.utils import logging
 from transformers.cache_utils import Cache
 
 from vsllib.training_utils import MORMTrainingVariables
-from vsllib.defines import EPSILON, NO_RATING_MASK, SCORE_DIFF_EPSILON, VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MOLossFunctionsCategories
+from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, SCORE_DIFF_EPSILON, VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MOLossFunctionsCategories
 
 logger = logging.get_logger(__name__)
 
@@ -96,7 +98,9 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         layer_normalization: Literal['LayerNorm',
                                      'BatchNorm', 'none'] = 'LayerNorm',
         reward_diff_threshold: float = 50.0,
-        assume_qualitative_labels: bool = False,
+        assume_qualitative_labels: bool = True,
+        discordance_epsilon=MIN_EPSILON,
+        activate_discordance_epsilon_for_loss: bool = False,
         check_undefined_label: bool = True,
         grounding_loss_tendency_update_ratio: float = 0.001,
         rew_center_coefficient: float = 0.0,
@@ -153,6 +157,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.hidden_sizes = hidden_sizes
         self.value_layer_dropout = value_layer_dropout
         self.value_layer_intermediate_activation = value_layer_intermediate_activation
+        self.activate_discordance_epsilon_for_loss = activate_discordance_epsilon_for_loss
         self.value_layer_final_activation = value_layer_final_activation
         self.reward_diff_threshold = reward_diff_threshold
         self.assume_qualitative_labels = assume_qualitative_labels
@@ -164,6 +169,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.grad_on_only_worst_value = grad_on_only_worst_value
         self.zero_constraint = zero_constraint
         self.rew_center_coefficient = rew_center_coefficient
+        self.discordance_epsilon = discordance_epsilon
         if isinstance(dtype, th.dtype):
             self.dtype = str(dtype).replace("torch.", "")
         else:
@@ -225,21 +231,27 @@ def parse_loss_function(config: MORMForSequenceClassificationConfig) -> LossFunc
     return mo_loss_function
 
 
-def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
+def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True, discordance_epsilon=MIN_EPSILON) -> th.Tensor:
 
     logits, targets, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold=threshold,
                                                                             assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
-    return accuracy_logits(logits, targets, missing_mask=others.get("missing_mask", missing_mask), assume_torch=assume_torch)
+    return accuracy_logits(logits, targets, missing_mask=others.get("missing_mask", missing_mask), assume_torch=assume_torch, discordance_epsilon=discordance_epsilon)
 
 
 def accuracy_logits_smooth(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True) -> th.Tensor:
     with th.no_grad():
         missing_mask = get_missing_rating_mask(
             target_probs) if missing_mask is None else missing_mask
-        all_defined_cases = ~missing_mask
+        if missing_mask is not None:
+            all_defined_cases = ~missing_mask
+            logits_of_smoothing_equal_cases = logits[all_defined_cases]
+            targets_of_smoothing_equal_cases = target_probs[all_defined_cases]
+        else:
+            all_defined_cases = True
+            logits_of_smoothing_equal_cases = logits
+            targets_of_smoothing_equal_cases = target_probs
 
-        logits_of_smoothing_equal_cases = logits[all_defined_cases]
-        targets_of_smoothing_equal_cases = target_probs[all_defined_cases]
+        
 
         if assume_torch:
             f = th.nn.functional.sigmoid(logits_of_smoothing_equal_cases)
@@ -266,68 +278,102 @@ def accuracy_logits_smooth(logits: th.Tensor, target_probs: th.Tensor, missing_m
         return positive_cases/factor
 
 
-def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True, correction=True) -> th.Tensor:
+def print_logits_target_mismatches(logits: th.Tensor, target_probs: th.Tensor, logits1: th.Tensor, target1: th.Tensor, all_defined_cases, assume_torch=True) -> None:
+    """Debug helper: print where `logits1` differs from `target1` and show values.
+
+    Kept as a standalone function so callers can enable/disable it easily.
+    """
+    try:
+        if assume_torch:
+            mismatch = (logits1 != target1) & all_defined_cases
+            if mismatch.any():
+                idx = mismatch.nonzero(as_tuple=False)
+                if idx.numel() > 0:
+                    if logits.ndim == 1:
+                        rows = idx.squeeze(1)
+                        vals_logits = logits[rows].cpu().numpy()
+                        vals_target_probs = target_probs[rows].cpu().numpy()
+                        vals_logits1 = logits1[rows].cpu().numpy()
+                        vals_target1 = target1[rows].cpu().numpy()
+                        print(f"accuracy_logits mismatch at indices: {rows.cpu().numpy()}")
+                        print("logits:", vals_logits)
+                        print("target_probs:", vals_target_probs)
+                        print("logits1:", vals_logits1, "target1:", vals_target1)
+                        input()
+                    else:
+                        rows = idx[:, 0]
+                        cols = idx[:, 1]
+                        vals_logits = logits[rows, cols].cpu().numpy()
+                        vals_target_probs = target_probs[rows, cols].cpu().numpy()
+                        vals_logits1 = logits1[rows, cols].cpu().numpy()
+                        vals_target1 = target1[rows, cols].cpu().numpy()
+                        print("accuracy_logits mismatches at (row,col):", list(zip(rows.cpu().numpy(), cols.cpu().numpy())))
+                        print("logits:", vals_logits)
+                        print("target_probs:", vals_target_probs)
+                        print("logits1:", vals_logits1, "target1:", vals_target1)
+                        input()
+        else:
+            # numpy branch
+            mismatch = (logits1 != target1) & all_defined_cases
+            if mismatch.any():
+                idx = np.nonzero(mismatch)
+                print("accuracy_logits mismatches at indices:", idx)
+                print("logits values:", logits[idx])
+                print("target_probs values:", target_probs[idx])
+                print("logits1:", logits1[idx], "target1:", target1[idx])
+                input()
+    except Exception as e:
+        # Do not raise from the debug helper; report and continue
+        try:
+            print("print_logits_target_mismatches failed:", e)
+        except Exception:
+            pass
+
+
+def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True, discordance_epsilon=MIN_EPSILON, hard_classification=True) -> th.Tensor:
 
     with th.no_grad():
+        score_diff_epsilon = 1.0/(1.0+np.exp(-discordance_epsilon)) -0.5 if discordance_epsilon > 0 else 0.0
+        discordance_epsilon = max(discordance_epsilon, 1e-5)
+
         missing_mask = get_missing_rating_mask(
             target_probs) if missing_mask is None else missing_mask
-        all_defined_cases = ~missing_mask
-
-        # & (target_probs != NO_RATING_MASK))
-        rep_mask1 = (logits > 0) & (target_probs > 0.5)
-        # & (target_probs != NO_RATING_MASK))
-        rep_mask2 = (logits < 0) & (target_probs < 0.5)
-        equal_cases = (target_probs <= 0.5 +
-                       SCORE_DIFF_EPSILON) & (target_probs >= 0.5 - SCORE_DIFF_EPSILON)
-        rep_mask3 = equal_cases & ((logits <= EPSILON) & (logits >= -EPSILON))
-
-        mask = (rep_mask1 | rep_mask2 | rep_mask3) & all_defined_cases
-
-        if correction:
-            smoothing_equal_cases = equal_cases & ~rep_mask3 & all_defined_cases
-
-        if assume_torch:
-            mask = mask.float()
-            factor = (all_defined_cases).float().sum(dim=0)
-            if correction:
-                n_smoothing_equal_cases = smoothing_equal_cases.float().sum()
+        if missing_mask is not None:
+            all_defined_cases = ~missing_mask
         else:
-            mask = mask.astype(float)
-            factor = (all_defined_cases).astype(float).sum(axis=0)
-            if correction:
-                n_smoothing_equal_cases = smoothing_equal_cases.astype(
-                    float).sum()
+            all_defined_cases = th.ones_like(target_probs, dtype=th.bool) if assume_torch else np.ones_like(target_probs, dtype=bool)
+       
+        # & (target_probs != NO_RATING_MASK))
+        logits1 = (logits > discordance_epsilon) if hard_classification else (logits > 0)
+        logits0 = (logits < -discordance_epsilon) if hard_classification else (logits < 0)
+        target1 = (target_probs > 0.5 + score_diff_epsilon) if hard_classification else (target_probs > 0.5)
+        target0 = (target_probs < 0.5 - score_diff_epsilon) if hard_classification else (target_probs < 0.5)
 
-        if correction and n_smoothing_equal_cases > 0:
-            logits_of_smoothing_equal_cases = logits[smoothing_equal_cases]
-            targets_of_smoothing_equal_cases = target_probs[smoothing_equal_cases]
+        mask1_1 = logits1 & target1
+        mask1_2 = logits0 & target0
+        
+        equal_cases_logits = ~(logits1  | logits0) if not hard_classification else (logits <= discordance_epsilon) & (logits >= -discordance_epsilon)
+        equal_cases_targets = ~(target1  |target0) if not hard_classification else (target_probs <= 0.5 + score_diff_epsilon) & (target_probs >= 0.5 - score_diff_epsilon)
+        mask1_3 = equal_cases_logits & equal_cases_targets
 
-            if assume_torch:
-                # assert th.all(th.abs(logits_of_smoothing_equal_cases) > EPSILON)
-                # correction = -th.abs(th.nn.functional.sigmoid(logits_of_smoothing_equal_cases) - 0.5)*2 + 1.0 # This is to predict 0 when sigmoid is 1.
-                f = th.nn.functional.sigmoid(logits_of_smoothing_equal_cases)
-                # g(x) a=0.5, in https://www.geogebra.org/calculator/eubcqant, simply TOTAL VARIATION DISTANCE.
-                correction = 1.0-th.abs(f - targets_of_smoothing_equal_cases)
-                # correction = 1.0-th.square(th.nn.functional.sigmoid(logits_of_smoothing_equal_cases) - targets_of_smoothing_equal_cases)/th.square(th.maximum(targets_of_smoothing_equal_cases,(1.0-targets_of_smoothing_equal_cases)))
-                # The latter is the square of the total variation distance, normalized. (square for smoothness) it tends to 0 if going the opposite direction. Tends to 1 if on the target, tends to maximum 1- target
+        #print_logits_target_mismatches(logits, target_probs, equal_cases_logits, equal_cases_targets, all_defined_cases, assume_torch=assume_torch)
+        
 
-                # assert len(correction.shape) == len(logits.shape), f"Expected correction shape to have same number of dimensions as logits, but got {correction.shape} vs {logits.shape}"
-                # assert correction.shape[-1] == logits.shape[-1], f"Expected correction shape to have last dimension {logits.shape[-1]}, but got {correction.shape}"
-                # assert th.all(correction <= 1.0) and th.all(correction >= 0.0), f"Correction values must be between 0 and 1.0, but got min {th.min(correction)}, max {th.max(correction)}"
+        mask05_1 = equal_cases_logits & ~equal_cases_targets
+        mask05_2 = equal_cases_targets & ~equal_cases_logits
 
-            else:
-                # assert np.all(np.abs(logits_of_smoothing_equal_cases) > EPSILON)
-                f = 1.0/(1.0+np.exp(-logits_of_smoothing_equal_cases))
-                # correction = -np.abs(1/(1+np.exp(-logits_of_smoothing_equal_cases)) - 0.5)*2 +1.0
-                # g(x) a=0.5, in https://www.geogebra.org/calculator/eubcqant, simply 1 - TOTAL VARIATION DISTANCE. This is 0.5 in 1, 0.5 in 0.
-                correction = 1.0-np.abs(f - targets_of_smoothing_equal_cases)
-                # assert np.all(correction <= 1.0) and np.all(correction >= 0.0), f"Correction values must be between 0 and 1.0, but got min {np.min(correction)}, max {np.max(correction)}"
-                # assert len(correction.shape) == len(logits.shape), f"Expected correction shape to have same number of dimensions as logits, but got {correction.shape} vs {logits.shape}"
-                # assert correction.shape[-1] == logits.shape[-1], f"Expected correction shape to have last dimension {logits.shape[-1]}, but got {correction.shape}"
-            mask[smoothing_equal_cases] = correction
+        mask05 = (mask05_1 | mask05_2) & all_defined_cases
+        mask1 = (mask1_1 | mask1_2  | mask1_3) & all_defined_cases
+
         if assume_torch:
+            mask = mask1.float()
+            mask[mask05] = 0.5   
+            factor = (all_defined_cases).float().sum(dim=0)
             positive_cases = mask.sum(dim=0)
         else:
+            mask = mask1.astype(float)
+            mask[mask05] = 0.5   
+            factor = (all_defined_cases).astype(float).sum(axis=0)
             positive_cases = mask.sum(axis=0)
         accuracy = positive_cases / factor
 
@@ -343,6 +389,7 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=Non
 def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=False, missing_mask=None, assume_torch=True) -> th.Tensor:
     
     returns_diff = x - y
+    
     if check_undefined_label:
         if missing_mask is None:
             missing_mask = get_missing_rating_mask(x, y)
@@ -393,19 +440,32 @@ def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=T
         labels_2 = None
 
     logits_new, target_probs, others = reward_pairs_and_scores_to_logits_and_targets(
-        rewards_1, rewards_2, labels_1, labels_2, reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, assume_torch=assume_torch)
+        rewards_1, rewards_2, labels_1, labels_2, 
+        reward_diff_threshold=config.reward_diff_threshold, 
+        assume_qualitative_labels=config.assume_qualitative_labels, 
+        check_undefined_label=config.check_undefined_label, 
+        assume_torch=assume_torch)
     return logits_new, target_probs, others
 
+from vsllib.utils import print_tensor_and_grad_fn
 
 def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold: int = 50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True) -> th.Tensor:
 
     with th.no_grad():
 
         if assume_qualitative_labels:
-            assert th.max(scores1) == 1.0
-            assert th.min(scores1) == 0.0
             # model probability of first one being preferred.
-            target_probs: th.Tensor = scores1
+            mask_greater = scores1 > scores2
+            mask_less = scores1 < scores2
+            mask_equal = ~(mask_greater | mask_less)
+            if assume_torch:
+                target_probs = mask_greater.float()
+            else:
+                target_probs = mask_greater.astype(float)
+            target_probs[mask_equal] = 0.5
+
+            
+        
         else:
             log = logits_BT(scores1, scores2, threshold=reward_diff_threshold,
                             check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
@@ -413,18 +473,28 @@ def scores_to_target_probs(scores1: th.Tensor, scores2: th.Tensor, reward_diff_t
                 target_probs = th.sigmoid(log)
             else:
                 target_probs = 1 / (1 + np.exp(-log))
+        mask = True
         if check_undefined_label:
             # If either score is NO_RATING_MASK, set target_prob to 0.5 (indicating no preference)
             mask = get_missing_rating_mask(
                 scores1, scores2) if missing_mask is None else missing_mask
             if assume_torch:
                 target_probs.masked_fill_(mask, NO_RATING_MASK)
+                assert th.allclose(target_probs[mask_less], th.zeros_like(target_probs[mask_less]))
+                assert th.allclose(target_probs[mask_greater], th.ones_like(target_probs[mask_greater]))
+                assert th.allclose(target_probs[mask_equal], 0.5 * th.ones_like(target_probs[mask_equal]))
             else:
                 target_probs[mask] = NO_RATING_MASK
+
+    if assume_qualitative_labels:
+        assert np.allclose(target_probs[mask_less & mask], np.zeros_like(target_probs[mask_less & mask]))
+        assert np.allclose(target_probs[mask_greater & mask], np.ones_like(target_probs[mask_greater & mask]))
+        assert np.allclose(target_probs[mask_equal & mask], 0.5 * np.ones_like(target_probs[mask_equal & mask]))
+
     return target_probs
 
 
-def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, no_grad_on_indexes: Optional[list[int]] = None) -> th.Tensor:
+def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, no_grad_on_indexes: Optional[list[int]] = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
 
     missing_mask = get_missing_rating_mask(
@@ -436,7 +506,7 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     else:
         logits = logits_p
         target_probs = target_probs_p
-
+    
     if __debug__:
         assert target_probs.shape == logits.shape, f"Target probabilities shape {target_probs.shape} does not match logits shape {logits.shape}"
         assert not th.any(logits.isnan()) and not th.any(
@@ -457,10 +527,24 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
         )
         logits[..., detached_idx] = logits[...,
                                            detached_idx].detach().requires_grad_(False)
+    target_probs = target_probs.detach()
+    
+    if activate_disc_epsilon_for_loss and discordance_epsilon is not None:
+        with th.no_grad():
+            
+            discordance = th.full_like(logits, fill_value=discordance_epsilon)
+            discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
+            if missing_mask is not None:
+                discordance = discordance.masked_fill(missing_mask, 0.0)
+        logits_app = logits+discordance
+    else:
+        logits_app = logits
+    
 
     loss = th.nn.functional.binary_cross_entropy_with_logits(
         # /sum(weights)
-        logits, target_probs, reduction='none')
+        logits_app, target_probs, reduction='none')
+    
     with th.no_grad():
         loss_best = th.nn.functional.binary_cross_entropy(
             # /sum(weights)
@@ -476,13 +560,13 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     if return_metrics:
         metrics = {}
         metrics['coherences'] = accuracy_logits(
-            logits_p, target_probs_p, missing_mask=missing_mask)
+            logits_p, target_probs_p, missing_mask=missing_mask, discordance_epsilon=discordance_epsilon)
         metrics['avg_coherence'] = metrics['coherences'].mean().item()
         return mean, metrics
     return mean
 
 
-def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None) -> th.Tensor:
+def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     missing_mask = get_missing_rating_mask(
         target_probs_p) if check_undefined_label and missing_mask is None else missing_mask
 
@@ -492,11 +576,22 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
     else:
         logits = logits_p
         target_probs = target_probs_p
+    target_probs = target_probs.detach()
+    if activate_disc_epsilon_for_loss and discordance_epsilon is not None:
+        with th.no_grad():
+            
+            discordance = th.full_like(logits, fill_value=discordance_epsilon)
+            discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
+            if missing_mask is not None:
+                discordance = discordance.masked_fill(missing_mask, 0.0)
+        logits_app = logits+discordance
+    else:
+        logits_app = logits
 
     loss = th.nn.functional.binary_cross_entropy_with_logits(
         # /sum(weights)
         # + rew_center_coefficient*th.mean((reward1 + reward2)**2, dim=-2)
-        logits, target_probs.detach(), reduction='none')
+        logits_app, target_probs, reduction='none')
     with th.no_grad():
         loss_best = th.nn.functional.binary_cross_entropy(
             # /sum(weights)
@@ -510,7 +605,7 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
     if return_metrics:
         metrics = {}
         metrics['representativeness'] = accuracy_logits(
-            logits_p, target_probs_p, missing_mask=missing_mask)
+            logits_p, target_probs_p, missing_mask=missing_mask, discordance_epsilon=discordance_epsilon)
         return loss, metrics
     return loss
 
@@ -523,6 +618,9 @@ def reward_pairs_and_scores_to_logits_and_targets(reward1: th.Tensor, reward2: t
                          assume_torch=assume_torch, check_undefined_label=missing_mask is not None)
     target_probs_p = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=assume_qualitative_labels,
                                             check_undefined_label=missing_mask is not None, missing_mask=missing_mask, assume_torch=assume_torch)
+    
+    target_probs_p_ = scores_to_target_probs(scores1, scores2, reward_diff_threshold=reward_diff_threshold, assume_qualitative_labels=not assume_qualitative_labels,
+                                            check_undefined_label=missing_mask is not None, missing_mask=missing_mask, assume_torch=assume_torch)
 
     rew_sum = reward1 + reward2
     rew_sum = rew_sum.masked_fill(
@@ -530,12 +628,14 @@ def reward_pairs_and_scores_to_logits_and_targets(reward1: th.Tensor, reward2: t
 
     others = {
         'missing_mask': missing_mask,
-        'rew_sum': rew_sum
+        'rew_sum': rew_sum,
     }
+    others["target_probs_quantitative"] = target_probs_p_ if assume_qualitative_labels else target_probs_p
+    others["target_probs_qualitative"] = target_probs_p if assume_qualitative_labels else target_probs_p_
     return logits_p, target_probs_p.detach(), others
 
 
-def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = None, scores2: th.Tensor = None, reward_diff_threshold: float = 50.0, return_metrics: bool = False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0) -> th.Tensor:
+def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = None, scores2: th.Tensor = None, reward_diff_threshold: float = 50.0, return_metrics: bool = False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
 
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(
@@ -546,17 +646,22 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = 
 
     # assert len(reward1.shape) == 2 and reward1.shape[-1] == scores1.shape[-1], f"Expected reward1 shape (batch_size, num_values) and scores1 shape (batch_size, num_values), but got {reward1.shape} and {scores1.shape}"
 
-    return grounding_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask)
+    return grounding_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask, discordance_epsilon=discordance_epsilon, activate_disc_epsilon_for_loss=activate_disc_epsilon_for_loss)
 
 
-def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0) -> th.Tensor:
+def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(
         reward1, reward2, scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
     missing_mask = others['missing_mask']
     rew_sum = others['rew_sum']
 
-    return value_system_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask)
+    return value_system_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, 
+                                    check_undefined_label=check_undefined_label, 
+                                    rew_center_coefficient=rew_center_coefficient, 
+                                    missing_mask=missing_mask, 
+                                    discordance_epsilon=discordance_epsilon, 
+                                    activate_disc_epsilon_for_loss=activate_disc_epsilon_for_loss)
 
 
 def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceClassificationConfig = None, training_variables: MORMTrainingVariables = None, **kwargs):
@@ -588,7 +693,10 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
     if MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES:
         
         gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
-                                            check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+                                            check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, 
+                                            rew_center_coefficient=config.rew_center_coefficient, 
+                                            discordance_epsilon=config.discordance_epsilon, 
+                                            activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
 
     elif MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES:
         # gr_loss = grounding_loss(rewards_1[...,0:-1], rewards_2[...,0:-1], scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
@@ -607,25 +715,36 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
             return_metrics=use_metrics,
             rew_center_coefficient=config.rew_center_coefficient,
             no_grad_on_indexes=not_grad_indices,
+            discordance_epsilon=config.discordance_epsilon, 
+            activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss
         )
     else:
         assert MOLossFunctions(config.loss_func_type) not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES, f"Unexpected loss function type {config.loss_func_type} that does not fit into any grounding loss category"
         with th.no_grad():
             gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
-                                        check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+                                        check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
+                                        activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
 
     if ideal_logits is not None:
         gr_loss_ideal = grounding_loss_logits(ideal_logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
-                                              check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+                                              check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
+                                              activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
 
     if MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS:
         vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask,
-                                           check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+                                           check_undefined_label=config.check_undefined_label, 
+                                           return_metrics=use_metrics, 
+                                           rew_center_coefficient=config.rew_center_coefficient, 
+                                           discordance_epsilon=config.discordance_epsilon, 
+                                           activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     else:
         with th.no_grad():
             # vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
             vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask,
-                                               check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+                                               check_undefined_label=config.check_undefined_label, 
+                                               return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, 
+                                               discordance_epsilon=config.discordance_epsilon, 
+                                               activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     
     with th.no_grad():
         if use_metrics:
@@ -1047,12 +1166,14 @@ class MORMForSequenceClassification(PreTrainedModel):
     def score(self, hidden_state, reward_heads='normal') -> th.Tensor:
         if reward_heads == 'ideal' and self.use_ideal_grounding_model:
             reward_heads = self.reward_heads_ideal
+            raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
         else:
             reward_heads = self.reward_heads
 
         if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS:
             rewards = reward_heads(hidden_state)
         else:
+            raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
             with th.no_grad():
                 rewards = reward_heads(hidden_state)
 
@@ -1060,6 +1181,7 @@ class MORMForSequenceClassification(PreTrainedModel):
             if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
                 vs_reward = self.value_system_layer.forward(rewards)
             else:
+                raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
                 with th.no_grad():
                     vs_reward = self.value_system_layer.forward(rewards)
                 
@@ -1081,14 +1203,14 @@ class MORMForSequenceClassification(PreTrainedModel):
         self.training_variables.zero_grad(set_to_none)
 
     def forward(self, *args, **kwargs) -> SequenceClassifierOutputWithPast | SequenceClassifierOutputWithPastAndIdeal:
-        """perfect_debug_forward = False: #DEBUG ONLY.
+        """perfect_debug_forward = True #DEBUG ONLY.
         if perfect_debug_forward: 
             #print(kwargs.keys())
             embeddings = kwargs.pop('embedding')
             all_rewards = self.score(embeddings)
-            logits = kwargs.pop("labels", None) + all_rewards*0.000000001
+            logits = kwargs.pop("labels", None)
             missing = get_missing_rating_mask(logits)
-            logits = logits
+            logits = logits  + th.tensor([0.0], requires_grad=True) + all_rewards*0.1 - all_rewards*0.1 # Just to have a tensor that requires grad for testing.  
             logits = logits.masked_fill(missing, float("-inf"))
             return SequenceClassifierOutputWithPast(logits=logits)"""
 

@@ -79,10 +79,7 @@ parameters:
     max: 0.1
     min: 0.001
     distribution: log_uniform_values
-  num_train_epochs: 
-    values:
-      - 2
-    distribution: categorical
+  
   weight_decay:
     max: 0.01
     min: 0.0001
@@ -92,6 +89,11 @@ parameters:
       - 0.0
       - 0.0001
       - 0.001
+    distribution: categorical
+  activate_discordance_epsilon_for_loss:
+    values:
+      - True
+      - False
     distribution: categorical
   save_every_steps:
     values: 

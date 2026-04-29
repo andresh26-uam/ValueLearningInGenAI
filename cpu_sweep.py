@@ -11,6 +11,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import wandb
 import yaml
 
@@ -90,7 +91,7 @@ def write_merged_config(default_config_file: Path, run: wandb.sdk.wandb_run.Run)
     return merged_config_path
 
 
-def main(default_config_file: str, dataset: str) -> int:
+def main(default_config_file: str, dataset: str, rs: np.random.RandomState, num_train_epochs: int) -> int:
     run = wandb.init()
     if run is None:
         raise RuntimeError("wandb.init() did not return a run")
@@ -112,8 +113,9 @@ def main(default_config_file: str, dataset: str) -> int:
     subprocess_env["WANDB_RUN_ID"] = run_id
     subprocess_env["WANDB_RESUME"] = "allow"
 
+    
     completed = subprocess.run(
-        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}"],
+        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}", f"--do_save={False}", f"--do_checkpointing={False}", f"--num_train_epochs={num_train_epochs}", f"--seed={rs.randint(0, 1000000)}"],
         env=subprocess_env,
         check=False,
     )
@@ -134,7 +136,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--count",
         type=int,
-        default=10,
+        default=100,
         help="Number of sweep runs to execute.",
     )
     parser.add_argument(
@@ -148,15 +150,22 @@ def parse_args() -> argparse.Namespace:
         choices=["ultra", "pku"],
         help="Dataset to use for the sweep.",
     )
+    parser.add_argument(
+        "--nepochs",
+        type=int,
+        required=True,
+        help="Number of training epochs.",
+    )
     return parser.parse_args()
 
 
 def run_sweep() -> None:
+    rs = np.random.RandomState(seed=42)
     args = parse_args()
     sweep_configuration = load_sweep_configuration(Path(args.sweep_config).expanduser().resolve())
     print(sweep_configuration)
     sweep_id = wandb.sweep(sweep=sweep_configuration, project=args.project)
-    wandb.agent(sweep_id, function=partial(main, args.config_file, args.dataset), count=args.count)
+    wandb.agent(sweep_id, function=partial(main, args.config_file, args.dataset, rs, args.nepochs), count=args.count)
 
 
 if __name__ == "__main__":

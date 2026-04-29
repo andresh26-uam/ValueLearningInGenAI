@@ -17,6 +17,8 @@
     "layer_activation": "ReLU",
     "final_layer_activation": "none",
 
+    "activate_discordance_epsilon_for_loss": false,
+
     "rew_center_coefficient": 0.01,
     "layer_normalization": "none",
     "learning_rate": 0.0001,

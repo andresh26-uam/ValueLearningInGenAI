@@ -129,6 +129,18 @@ def save_dataset(dataset: Dataset, path: str) -> None:
     
 class PairwisePreferenceDataset():
     
+    def calculate_suggested_epsilon(self) -> float:
+        suggested_epsilon = float('inf')
+        for i in range(len(self.eval_dataset)):
+            label_pair = np.asarray(self.eval_dataset[i]['labels'])
+            diff = np.abs(label_pair[0]-label_pair[1])
+            # Get the smallest non-zero difference from this pair
+            nonzero_diff = diff[diff > 0]
+            if len(nonzero_diff) > 0:
+                smallest_diff_in_pair = np.min(nonzero_diff)
+                suggested_epsilon = min(suggested_epsilon, smallest_diff_in_pair)
+        return suggested_epsilon/2.0
+
     def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
         
         self.data: Dataset 

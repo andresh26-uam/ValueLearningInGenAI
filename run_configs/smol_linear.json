@@ -11,7 +11,9 @@
     "per_device_train_batch_size": 64,
     "per_device_eval_batch_size": 64,
     "gradient_accumulation_steps": 8,
-    "lambda_decay": 0.001,
+    "lambda_decay": 0.000,
+
+    "activate_discordance_epsilon_for_loss": true,
 
     "hidden_size": 1024,
     "num_hidden_layers": 0,

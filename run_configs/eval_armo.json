@@ -7,6 +7,8 @@
   "grounding_learning_rate": 0.00,
   "lagrange_learning_rate": 0.00,
 
+  "do_save": false,
+  "do_checkpointing": false,
   "use_embeddings": false,
   "save_embedded_dataset": false,
   "num_train_epochs": 1,
@@ -18,6 +20,8 @@
   "rew_center_coefficient": 0.0,
   "layer_normalization": "none",
   "use_cpu": false,
+
+  "activate_discordance_epsilon_for_loss": false,
 
   "run_name": "eval_armo"
 }

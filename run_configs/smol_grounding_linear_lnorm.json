@@ -6,6 +6,8 @@
     "use_frozen_base_model": false,
     "use_embeddings": true,
     "use_cpu": false,
+
+    "activate_discordance_epsilon_for_loss": true,
     
     "deepspeed": null,
     "per_device_train_batch_size": 64,
