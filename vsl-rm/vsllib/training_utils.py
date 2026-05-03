@@ -37,7 +37,7 @@ from vsllib.defines import MOLossFunctions, MOLossFunctionsCategories
 from vsllib.utils import to_float
 
 
-def normalizing_params_softmax(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
+def normalizing_params_linear(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
         if vs_coeff is not None and used_mults is not None:
             mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0, dtype=dtype)
             ret = mults[:-1]*(len(used_mults)+1), mults[-1]*(len(used_mults)+1)

@@ -2,6 +2,7 @@
     "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
     "dataset": "ultra",
     "gather_train_metrics": true,
+    "activate_discordance_epsilon_for_loss": true,
 
     "use_frozen_base_model": false,
     "use_embeddings": true,
