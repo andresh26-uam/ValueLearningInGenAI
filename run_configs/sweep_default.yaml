@@ -10,14 +10,13 @@ parameters:
       - optimum
       - average
     distribution: categorical
+  
   use_metrics_or_losses_for_lagrange_updates:
     values:
-      - metrics
       - losses
     distribution: categorical
   grounding_loss_tendency_update_ratio:
     values:
-      - 0.1
       - 0.01
       - 0.05
     distribution: categorical
@@ -32,22 +31,17 @@ parameters:
     distribution: categorical
   per_device_train_batch_size:
     values:
+      - 32
       - 64
       - 128
-      - 256
     distribution: categorical
   gradient_accumulation_steps:
-    max: 10
+    max: 8
     min: 1
     distribution: int_uniform
   grad_on_only_worst_value:
     values:
-      - "false"
-      - "true"
-    distribution: categorical
-  train_sampling_strategy:
-    values:
-      - random
+      - False
     distribution: categorical
   rew_center_coefficient:
     values:
@@ -57,11 +51,10 @@ parameters:
   layer_normalization:
     values:
       - none
-      - LayerNorm
     distribution: categorical
   zero_constraint:
     values:
-      - "true"
+      - True
     distribution: categorical
   loss_func_type:
     values:
@@ -73,11 +66,11 @@ parameters:
     distribution: uniform
   learning_rate:
     max: 0.001
-    min: 0.00001
+    min: 0.0001
     distribution: log_uniform_values
-  "lagrange_learning_rate":
-    max: 0.1
-    min: 0.001
+  lagrange_learning_rate:
+    max: 0.5
+    min: 0.01
     distribution: log_uniform_values
   
   weight_decay:
@@ -89,11 +82,12 @@ parameters:
       - 0.0
       - 0.0001
       - 0.001
+      - 0.01
     distribution: categorical
   activate_discordance_epsilon_for_loss:
     values:
-      - True
       - False
+      - True
     distribution: categorical
   save_every_steps:
     values: 

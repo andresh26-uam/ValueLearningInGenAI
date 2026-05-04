@@ -37,19 +37,26 @@ from vsllib.defines import MOLossFunctions, MOLossFunctionsCategories
 from vsllib.utils import to_float
 
 
-def normalizing_params_linear(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
+def normalizing_params(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
         if vs_coeff is not None and used_mults is not None:
-            mults = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0, dtype=dtype)
-            ret = mults[:-1]*(len(used_mults)+1), mults[-1]*(len(used_mults)+1)
+            mults_softmax = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0, dtype=dtype)
+            n = float(len(mults_softmax))
+            mults = th.full_like(mults_softmax, fill_value=1.0/(n**2))
+            remaining = 1.0 - 1.0/(n**2) * n
+            mults = mults + remaining * mults_softmax
+            ret = mults[:-1]*n, mults[-1]*n
         elif used_mults is not None:
-            mults = th.nn.functional.softmax(used_mults, dim=0, dtype=dtype)*(len(used_mults))
-
-            ret = mults, None
+            mults_softmax = th.nn.functional.softmax(used_mults, dim=0, dtype=dtype)*(len(used_mults))
+            n = float(len(mults_softmax))
+            mults = th.full_like(mults_softmax, fill_value=1.0/(n**2))
+            remaining = 1.0 - 1.0/(n**2) * n
+            mults = mults + remaining * mults_softmax
+            ret = mults*n, None
         else:
             ret = None, 1.0
         return ret
 
-def normalizing_params(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
+def normalizing_params_linear(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
         
         if vs_coeff is not None and used_mults is not None:
             if len(vs_coeff.shape) == 1:
@@ -248,7 +255,9 @@ class MORMTrainingVariables(th.nn.Module):
         else:
             vs_coeff = self.vs_coeff
 
-        return normalizing_params(used_mults, vs_coeff, dtype=self.lagrange_multipliers.dtype) # This is to ensure the multipliers are 1 on average (to make all model training similar scale regardless of how many active multipliers/losses are used)
+        m1, m2 = normalizing_params(used_mults, vs_coeff, dtype=self.lagrange_multipliers.dtype) # This is to ensure the multipliers are 1 on average (to make all model training similar scale regardless of how many active multipliers/losses are used)
+        
+        return m1, m2
 
     def get_multipliers(self, used_only=False) -> Tuple[th.Tensor, th.Tensor]:
         return self.normalize_coefficients(selected_indices=self._last_selected_indices if used_only else None)
@@ -327,13 +336,13 @@ class MORMTrainingVariables(th.nn.Module):
                 raise ValueError(f"Invalid value for use_exponential_moving_average_or_minimum_targets: {self.use_exponential_moving_average_or_optimum_targets}. Expected 'minimum' or 'average'.")
             if self.use_metrics_or_losses == 'metrics':
                 # Use coherence difference with the tendency as improvement signal.
-                gr_ideal_diff = -(self.last_accumulated_coherences - coherences_tendency).detach()
+                gr_ideal_diff_orig = -(self.last_accumulated_coherences - coherences_tendency).detach()
                 vs_ideal_diff = -(self.last_accumulated_representativeness - representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
                 
                 
             elif self.use_metrics_or_losses == 'losses':
                 # Use loss difference with the tendency as improvement signal.
-                gr_ideal_diff = (self.last_accumulated_grounding_loss - grounding_loss_tendency).detach()
+                gr_ideal_diff_orig = (self.last_accumulated_grounding_loss - grounding_loss_tendency).detach()
                 vs_ideal_diff = (self.last_accumulated_vs_loss - vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
               
             else:
@@ -342,34 +351,34 @@ class MORMTrainingVariables(th.nn.Module):
                 #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
         
         self.requires_grad_(need_backward)
-        was_grad_none = self.lagrange_multipliers.grad is None
         
-        gr_ideal_diff = th.maximum(gr_ideal_diff, th.zeros_like(gr_ideal_diff, requires_grad=False)).detach() # We only want to increase the multipliers for the grounding losses that are above their ideal losses (or below their ideal metrics, depending on the mode), so we set the ideal differences to zero for the ones that are already in a good place.
-        if vs_ideal_diff is not None:
-            vs_ideal_diff = th.maximum(vs_ideal_diff, th.zeros_like(vs_ideal_diff, requires_grad=False)).detach()
-
+        gr_ideal_diff = th.clamp(gr_ideal_diff_orig, min=0.0).detach() # We only want to increase the multipliers for the grounding losses that are above their ideal losses (or below their ideal metrics, depending on the mode), so we set the ideal differences to zero for the ones that are already in a good place.
+        #gr_ideal_diff = gr_ideal_diff_orig.detach()
         
-        before_vs_loss = self._last_add_vs_loss
+        
         add_vs_loss = self._last_add_vs_loss         
         if need_backward:
+            before_vs_loss = self._last_add_vs_loss
             if self.lambda_decay > 0.0:
                 if self._last_selected_indices is not None and self._last_add_gr_loss:
                     norm_penalty_ =  norm_penalty(self.lagrange_multipliers[self._last_selected_indices], self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
                 elif self._last_add_gr_loss:
                     norm_penalty_ =  norm_penalty(self.lagrange_multipliers, self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
-                elif self._last_add_vs_loss:
-                    norm_penalty_ =  th.norm(self.vs_coeff)
+                    """elif self._last_add_vs_loss:
+                        norm_penalty_ =  th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False) #th.norm(self.vs_coeff)#NOT USED.
+                    """
                 else:
-                    norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=True)
+                    norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
             else:
                 norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
-            with th.no_grad():
-                if th.any(gr_ideal_diff > 0.0):
-                    add_vs_loss = False
-                    # This means all groundings are below their ideal grounding losses (or above their ideal metrics, depending on the mode), so we don't need to apply gradients to push them down further, and can focus on the value system loss if present.
-                   # We set the gr_ideal_diff to zero (instead of negative) because we want to not optimize the grounding lagrange multipliers in this case, as they are already in a good place and pushing them further might be counterproductive.
-                    vs_ideal_diff = 0.0 # In this case we set the vs_ideal_diff to 0 because we want to only optimize the grounding lagrange multipliers.
-
+            if vs_ideal_diff is not None:
+                with th.no_grad():
+                    if th.any(gr_ideal_diff_orig > 0.0):
+                        #add_vs_loss = False
+                        vs_ideal_diff = 0.0
+                    else:
+                        vs_ideal_diff = th.clamp(vs_ideal_diff, min=0.0).detach()
+            
             forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=self._last_add_gr_loss) + norm_penalty_ # It is negated, as it is a maximization problem
             self._last_add_vs_loss = before_vs_loss
             forward.backward()
@@ -380,10 +389,7 @@ class MORMTrainingVariables(th.nn.Module):
                 worst_val = coeff[worst_idx].detach().item()
                 coeff.zero_() # Set all gradients to zero
                 coeff[worst_idx] = worst_val # Except the worst one, which we keep as is.
-                if was_grad_none:
-                    self.lagrange_multipliers.grad = coeff
-                else:
-                    self.lagrange_multipliers.grad += coeff 
+                self.lagrange_multipliers.grad = coeff
         
         coeff = self.lagrange_multipliers.grad
         if __debug__:
@@ -423,6 +429,8 @@ class MORMTrainingVariables(th.nn.Module):
     def post_optimizer_step(self) -> None:
         
         self.zero_grad(set_to_none=True)
+        #self.lagrange_multipliers.data.clamp_(min=0.1)
+        #self.vs_coeff.data.clamp_(min=0.1)
         
         
 

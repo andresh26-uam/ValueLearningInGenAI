@@ -29,7 +29,7 @@
     "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 0.01,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
-    "use_exponential_moving_average_or_optimum_targets": "average",
+    "use_exponential_moving_average_or_optimum_targets": "optimum",
     "grad_on_only_worst_value": false,
     "zero_constraint": true,
     "use_ideal_grounding_model": false,
