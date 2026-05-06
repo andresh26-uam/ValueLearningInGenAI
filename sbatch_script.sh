@@ -1,17 +1,10 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
-#SBATCH --mem-per-gpu=24G
-#SBATCH --cpus-per-gpu=1
-#SBATCH --mincpus=1
-#SBATCH --gpus=1
 
-#SRUN --job-name=ValueLearningInGenAI
-#SRUN --chdir=/home/aholg/ValueLearningInGenAI
-#SRUN --mem-per-gpu=24G
-#SRUN --cpus-per-gpu=1
-#SRUN --mincpus=1
-#SRUN --gpus=2
+#SBATCH --gpus=L40S:1
+#SBATCH --mem-per-gpu=24G
+#SBATCH --time=100:00:00
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
@@ -43,9 +36,8 @@ echo "Running with GPU IDs: $gpu_ids"
 echo "Number of processes: $num_processes"
 echo "Number of machines: $num_machines"
 
-python -m accelerate.commands.launch \
+PYTHONOPTIMIZE=1 python -m accelerate.commands.launch \
 	--config_file="$config_file" \
-	--debug \
 	--num_processes="$num_processes" \
 	--num_machines="$num_machines" \
 	--gpu_ids="$gpu_ids" \

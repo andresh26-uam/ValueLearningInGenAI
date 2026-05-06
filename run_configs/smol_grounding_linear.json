@@ -1,0 +1,49 @@
+{
+    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
+    "dataset": "ultra",
+    "gather_train_metrics": true,
+
+    "use_frozen_base_model": false,
+    "use_embeddings": true,
+    "use_cpu": false,
+    
+    "deepspeed": null,
+    "per_device_train_batch_size": 32,
+    "per_device_eval_batch_size": 32,
+    "gradient_accumulation_steps": 4,
+    "lambda_decay": 0.001,
+
+    "activate_discordance_epsilon_for_loss": true,
+
+    "hidden_size": 1024,
+    "num_hidden_layers": 0,
+    "value_layer_dropout": 0.0,
+    "layer_activation": "ReLU",
+    "final_layer_activation": "none",
+
+    "rew_center_coefficient": 0.002,
+    "layer_normalization": "none",
+    "learning_rate": 0.0000,
+    "grounding_learning_rate": 0.0003,
+    "lagrange_learning_rate": 0.05,
+    "grounding_loss_tendency_update_ratio": 0.05,
+    "max_grad_norm": 1.0,
+    "use_metrics_or_losses_for_lagrange_updates": "losses",
+    "use_exponential_moving_average_or_optimum_targets": "optimum",
+    "grad_on_only_worst_value": false,
+    "zero_constraint": true,
+    "use_ideal_grounding_model": false,
+    "loss_func_type": "ONLY_GROUNDING",
+    "loss_func_type_kwargs": null,
+    "weight_decay": 0.002,
+    "bf16": true,
+    "num_train_epochs": 100,
+    "gradient_checkpointing": true,
+    "optim": "paged_adamw_32bit",
+    "lr_scheduler_type": "constant",
+    "max_length": 4096,
+    "save_every_steps": 10000,
+    "eval_every_steps": 100,
+
+    "run_name": "smol_def_linear"
+}
