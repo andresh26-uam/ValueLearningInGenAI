@@ -8,12 +8,13 @@
     "use_cpu": false,
     
     "deepspeed": null,
-    "per_device_train_batch_size": 128,
-    "per_device_eval_batch_size": 128,
+    "per_device_train_batch_size": 32,
+    "per_device_eval_batch_size": 32,
     "gradient_accumulation_steps": 4,
-    "lambda_decay": 0.001,
+    "lambda_decay": 0.000,
 
     "activate_discordance_epsilon_for_loss": true,
+    
     
     "hidden_size": 1024,
     "num_hidden_layers": 0,
@@ -21,13 +22,13 @@
     "layer_activation": "ReLU",
     "final_layer_activation": "none",
 
-    "rew_center_coefficient": 0.01,
+    "rew_center_coefficient": 0.002,
     "layer_normalization": "none",
-    "learning_rate": 0.0001,
-    "grounding_learning_rate": 0.0001,
-    "lagrange_learning_rate": 0.0,
-    "grounding_loss_tendency_update_ratio": 0.01,
-    "max_grad_norm": 0.01,
+    "learning_rate": 0.0003,
+    "grounding_learning_rate": 0.0003,
+    "lagrange_learning_rate": 0.00,
+    "grounding_loss_tendency_update_ratio": 0.05,
+    "max_grad_norm": 1.0,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
     "use_exponential_moving_average_or_optimum_targets": "optimum",
     "grad_on_only_worst_value": false,

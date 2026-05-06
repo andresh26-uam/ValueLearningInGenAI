@@ -344,35 +344,44 @@ def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=Non
             all_defined_cases = th.ones_like(target_probs, dtype=th.bool) if assume_torch else np.ones_like(target_probs, dtype=bool)
        
         # & (target_probs != NO_RATING_MASK))
-        logits1 = (logits > discordance_epsilon) if hard_classification else (logits > 0)
-        logits0 = (logits < -discordance_epsilon) if hard_classification else (logits < 0)
-        target1 = (target_probs > 0.5 + score_diff_epsilon) if hard_classification else (target_probs > 0.5)
-        target0 = (target_probs < 0.5 - score_diff_epsilon) if hard_classification else (target_probs < 0.5)
 
-        mask1_1 = logits1 & target1
-        mask1_2 = logits0 & target0
-        
-        equal_cases_logits = ~(logits1  | logits0) if not hard_classification else (logits <= discordance_epsilon) & (logits >= -discordance_epsilon)
-        equal_cases_targets = ~(target1  |target0) if not hard_classification else (target_probs <= 0.5 + score_diff_epsilon) & (target_probs >= 0.5 - score_diff_epsilon)
-        mask1_3 = equal_cases_logits & equal_cases_targets
+        if hard_classification:
+            logits1 = (logits > discordance_epsilon) 
+            logits0 = (logits < -discordance_epsilon) 
+            target1 = (target_probs > 0.5 + score_diff_epsilon) 
+            target0 = (target_probs < 0.5 - score_diff_epsilon)
 
-        #print_logits_target_mismatches(logits, target_probs, equal_cases_logits, equal_cases_targets, all_defined_cases, assume_torch=assume_torch)
-        
+            mask1_1 = logits1 & target1
+            mask1_2 = logits0 & target0
+            
+            equal_cases_logits = ~(logits1  | logits0) #if not hard_classification else (logits <= discordance_epsilon) & (logits >= -discordance_epsilon)
+            equal_cases_targets = ~(target1  |target0) #if not hard_classification else (target_probs <= 0.5 + score_diff_epsilon) & (target_probs >= 0.5 - score_diff_epsilon)
+            mask1_3 = equal_cases_logits & equal_cases_targets
 
-        mask05_1 = equal_cases_logits & ~equal_cases_targets
-        mask05_2 = equal_cases_targets & ~equal_cases_logits
+            #print_logits_target_mismatches(logits, target_probs, equal_cases_logits, equal_cases_targets, all_defined_cases, assume_torch=assume_torch)
+            mask05_1 = equal_cases_logits & ~equal_cases_targets
+            mask05_2 = equal_cases_targets & ~equal_cases_logits
 
-        mask05 = (mask05_1 | mask05_2) & all_defined_cases
-        mask1 = (mask1_1 | mask1_2  | mask1_3) & all_defined_cases
+            mask05 = (mask05_1 | mask05_2) & all_defined_cases
+            mask1 = (mask1_1 | mask1_2  | mask1_3) & all_defined_cases
+
+        else:
+            repr1 = (logits > 0) & (target_probs > 0.5)
+            repr2 = (logits < 0) & (target_probs < 0.5)
+            equal_targets = (target_probs >= 0.5 - score_diff_epsilon) & (target_probs <= 0.5 + score_diff_epsilon)
+            equal_logits = (logits >= -discordance_epsilon) & (logits <= discordance_epsilon)
+            repr3 = equal_targets & equal_logits
+            mask1 = (repr1 | repr2 | repr3) & all_defined_cases
+            mask05 = all_defined_cases & ((equal_targets & ~equal_logits) | (~equal_targets & equal_logits))
 
         if assume_torch:
             mask = mask1.float()
-            mask[mask05] = 0.5   
+            mask[mask05 & ~mask1] = 0.5   
             factor = (all_defined_cases).float().sum(dim=0)
             positive_cases = mask.sum(dim=0)
         else:
             mask = mask1.astype(float)
-            mask[mask05] = 0.5   
+            mask[mask05 & ~mask1] = 0.5   
             factor = (all_defined_cases).astype(float).sum(axis=0)
             positive_cases = mask.sum(axis=0)
         accuracy = positive_cases / factor
