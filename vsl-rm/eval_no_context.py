@@ -6,7 +6,7 @@ import csv
 import os
 from pathlib import Path
 import sys
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from enum import Enum
 
 import numpy as np
@@ -54,15 +54,15 @@ from vsllib.utils import  ScriptArguments, argument_parser, obtain_tokenizer, se
 @dataclass
 class EvalArguments(ScriptArguments):
 
-    checkpoint_paths: str = field(
-        default=[],
+    checkpoint_paths: List[str] = field(
+        default_factory=list,
         metadata={"help": "run name in the directory saved by no_context_vsl.py. If not supplied, will ask the user to select from the available runs in the output directory."},
     )
-    checkpoint_path: str = field(
+    checkpoint_path: Optional[str] = field(
         default=None,
         metadata={"help": "run name in the directory saved by no_context_vsl.py. If not supplied, will ask the user to select from the available runs in the output directory."},
     )
-    results_dir: str = field(
+    results_dir: Optional[str] = field(
         default=None,
         metadata={"help": "Path to output CSV file. (Normally saved under .results/script_args.output_dir/script_args.run_name/metrics.csv)"},
     )
@@ -71,7 +71,96 @@ class EvalArguments(ScriptArguments):
         metadata={"help": "Whether to push the results to Hugging Face Hub. Requires HF_CLI_TOKEN env variable to be set."},
     )
 
-def parse_eval_args() -> EvalArguments:
+
+def _is_valid_checkpoint_dir(path: Path) -> bool:
+    return (
+        path.exists()
+        and path.is_dir()
+        and (path / "config.json").exists()
+    )
+
+
+def _normalize_candidate_checkpoint_path(path: str, output_path: str) -> Path:
+    path_obj = Path(path).expanduser()
+    if not path_obj.is_absolute():
+        path_obj = Path(output_path) / path_obj
+    return path_obj.resolve()
+
+
+def _resolve_nested_checkpoint_path(start_path: Path, *, allow_finish: bool) -> Optional[Path]:
+    current_path = start_path
+    while True:
+        if _is_valid_checkpoint_dir(current_path):
+            return current_path
+
+        print(
+            f"Warning: The selected checkpoint path does not contain expected files "
+            f"(config.json): {current_path}"
+        )
+
+        subdirs = [item for item in os.listdir(current_path) if os.path.isdir(os.path.join(current_path, item))]
+        if not subdirs:
+            print(f"No subfolders found in {current_path}.")
+            return None
+
+        for i, item in enumerate(subdirs):
+            print(f"  - ({i}) {item}")
+
+        prompt = "Please enter the index of the valid checkpoint path from the above list"
+        if allow_finish:
+            prompt += " or OK to finish"
+        prompt += ": "
+        index_ = input(prompt).strip()
+        if allow_finish and index_.upper() == "OK":
+            return None
+
+        try:
+            current_path = current_path / subdirs[int(index_)]
+        except (ValueError, IndexError):
+            print(f"Invalid index entered: {index_}")
+
+
+def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool) -> Optional[Path]:
+    available_runs = [item for item in os.listdir(output_path) if os.path.isdir(os.path.join(output_path, item)) and len(os.listdir(os.path.join(output_path, item))) > 0]
+    if not available_runs:
+        print(f"No available runs found in {output_path}.")
+        return None
+
+    while True:
+        print(f"Available runs in {output_path}:")
+        for i, item in enumerate(available_runs):
+            print(f"  - ({i}) {item}")
+
+        prompt = "Please enter the index of the valid checkpoint path from the above list"
+        if allow_finish:
+            prompt += " or OK to finish"
+        prompt += ": "
+        index_ = input(prompt).strip()
+        if allow_finish and index_.upper() == "OK":
+            return None
+
+        try:
+            checkpoint_path = output_path / available_runs[int(index_)]
+        except (ValueError, IndexError):
+            print(f"Invalid index entered: {index_}")
+            continue
+
+        resolved_checkpoint_path = _resolve_nested_checkpoint_path(
+            checkpoint_path,
+            allow_finish=allow_finish,
+        )
+        if resolved_checkpoint_path is not None:
+            return resolved_checkpoint_path
+
+
+def _build_eval_arguments(script_args: EvalArguments, checkpoint_path: Path, results_dir: Path) -> EvalArguments:
+    arg_values = vars(script_args).copy()
+    arg_values["checkpoint_paths"] = [str(checkpoint_path)]
+    arg_values["checkpoint_path"] = str(checkpoint_path)
+    arg_values["results_dir"] = str(results_dir)
+    return EvalArguments(**arg_values)
+
+def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
     parser1 = HfArgumentParser(EvalArguments)
     args = parser1.parse_args_into_dataclasses()[0]
 
@@ -86,48 +175,52 @@ def parse_eval_args() -> EvalArguments:
         except ValueError:
             return path_obj.name
 
-    
+    raw_checkpoint_paths: List[str] = []
+    checkpoint_paths_value = getattr(script_args, "checkpoint_paths", None)
+    if checkpoint_paths_value:
+        if isinstance(checkpoint_paths_value, str):
+            raw_checkpoint_paths.append(checkpoint_paths_value)
+        else:
+            raw_checkpoint_paths.extend(str(path) for path in checkpoint_paths_value)
+    elif getattr(script_args, "checkpoint_path", None):
+        raw_checkpoint_paths.append(str(script_args.checkpoint_path))
 
+    output_path = Path(script_args.output_path)
+    resolved_checkpoint_paths: List[Path] = []
 
-    if script_args.checkpoint_path is not None:
-        checkpoint_path = os.path.join(script_args.output_path, script_args.checkpoint_path)
-    else:
-        checkpoint_path = None
-    if checkpoint_path is None or not os.path.exists(checkpoint_path):
-        print(f"Checkpoint path does not exist: {checkpoint_path}")
-        print(f"Available runs in {script_args.output_path}:")
-        for i, item in enumerate(os.listdir(script_args.output_path)):
-            if os.path.isdir(os.path.join(script_args.output_path, item)):
-                print(f"  - ({i}) {item}")
-        index_ = input("Please enter the index of the valid checkpoint path from the above list: ").strip()
-        try:
-            script_args.checkpoint_path = os.path.join(script_args.output_path, os.listdir(script_args.output_path)[int(index_)])
-    
-        except (ValueError, IndexError):
-            print(f"Invalid index entered: {index_}")
-            sys.exit(1)
-        checkpoint_path = script_args.checkpoint_path 
-        if not os.path.exists(checkpoint_path):
-            print(f"File does not exist: {checkpoint_path}")
-            sys.exit(1)
-        # if there is no config.json and seed_info.json in the checkpoint path, it is likely not a valid checkpoint directory
-        if not (Path(checkpoint_path) / "config.json").exists() or not (Path(checkpoint_path) / "training_variables.pt").exists():
-            print(f"Warning: The selected checkpoint path does not contain expected files (config.json and training_variables.pt).")
-            print("Select subfolder with valid checkpoint.")
-        for i, item in enumerate(os.listdir(checkpoint_path)):
-            if os.path.isdir(os.path.join(checkpoint_path, item)):
-                print(f"  - ({i}) {item}")
-        index_ = input("Please enter the index of the valid checkpoint path from the above list: ").strip()
-        try:
-            script_args.checkpoint_path = os.path.join(checkpoint_path, os.listdir(checkpoint_path)[int(index_)])
-        except (ValueError, IndexError):
-            print(f"Invalid index entered: {index_}")
-            sys.exit(1)
-    
-    if script_args.results_dir is None or not os.path.exists(script_args.results_dir):
-        script_args.results_dir = Path(RESULTS_DIR) / removed_model_path_segment(script_args.checkpoint_path)
-        
-    return args, preset
+    for raw_checkpoint_path in raw_checkpoint_paths:
+        candidate_path = _normalize_candidate_checkpoint_path(raw_checkpoint_path, str(output_path))
+        if _is_valid_checkpoint_dir(candidate_path):
+            resolved_checkpoint_paths.append(candidate_path)
+            continue
+
+        print(f"Checkpoint path does not exist: {candidate_path}")
+        prompted_path = _prompt_for_checkpoint_path(
+            output_path,
+            allow_finish=False, 
+        )
+        if prompted_path is not None:
+            resolved_checkpoint_paths.append(prompted_path)
+
+    while True:
+        prompted_path = _prompt_for_checkpoint_path(
+            output_path,
+            allow_finish=len(resolved_checkpoint_paths) > 0,
+        )
+        if prompted_path is None:
+            assert len(resolved_checkpoint_paths) > 0, "At least one valid checkpoint path must be provided."
+            break
+        else:
+            resolved_checkpoint_paths.append(prompted_path)
+
+    results_root = Path(script_args.results_dir) if script_args.results_dir is not None and os.path.exists(script_args.results_dir) else Path(RESULTS_DIR)
+
+    eval_script_args_all: List[EvalArguments] = []
+    for checkpoint_path in resolved_checkpoint_paths:
+        results_dir = results_root / removed_model_path_segment(str(checkpoint_path))
+        eval_script_args_all.append(_build_eval_arguments(script_args, checkpoint_path, results_dir))
+
+    return eval_script_args_all, preset
 
 
 
@@ -168,17 +261,23 @@ def main() -> None:
     script_args_all: List[EvalArguments]
     
 
-    for script_args in range(len(script_args_all)):
+    for script_args in script_args_all:
         seed_everything(int(script_args.seed))
-        torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
+        #torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
+        #print("TORCH DTYPE:", torch_dtype )
+        
         tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
         
         model = MORMForSequenceClassification.from_pretrained(
             str(script_args.checkpoint_path),
         )
-        print("MODEL DETAILS:", model)
-        print("FIRST PARAMETER:", next(model.parameters()))
-        print("TRAINING VARIABLES:", model.training_variables.state_dict())
+        torch_dtype = model.config.dtype
+        print("VS", model.value_system_layer.get_weights())
+        print("MODEL DETAILS:", model, "MODEL DTYPE:", model.dtype, "MODEL CONFIG DTYPE:", torch_dtype)
+        print("MODEL DTYPE", model.value_system_layer.weight.dtype)
+        print("FIRST PARAMETER:", next(model.parameters()), next(model.parameters()).dtype)
+        print("TRAINING VARIABLES:", model.training_variables.state_dict(), model.training_variables.lagrange_multipliers.dtype)
+        
         if script_args.push_to_hub:
             from transformers import AutoConfig, AutoModelForSequenceClassification
             print("Pushing model to Hugging Face Hub...?")
@@ -190,6 +289,7 @@ def main() -> None:
                     str(script_args.checkpoint_path),
                 )
             print("MODEL DETAILS:", model)
+            print("MODEL DTYPE", model.value_system_layer.weight.dtype)
             print("FIRST PARAMETER:", next(model.parameters()))
             print("TRAINING VARIABLES:", model.training_variables.state_dict())
             
@@ -278,13 +378,21 @@ def main() -> None:
             data_collator=dc,
         )
 
-        metrics = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
-        flat_metrics = flatten_metrics_for_csv(metrics)
-    write_metrics_csv(flat_metrics, script_args.results_dir)
+        metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
+        flat_metrics_test = flatten_metrics_for_csv(metrics_test)
+        write_metrics_csv(flat_metrics_test, script_args.results_dir, name="test_metrics.csv")
 
-    print("Test evaluation complete.")
-    print(f"Checkpoint: {script_args.checkpoint_path}")
-    print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
+        print("Test evaluation complete.")
+        print(f"Checkpoint: {script_args.checkpoint_path}")
+        print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
+
+        metrics_eval = trainer.evaluate(eval_dataset=dataset.eval_dataset, metric_key_prefix="eval")
+        flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
+        write_metrics_csv(flat_metrics_eval, script_args.results_dir, name="eval_metrics.csv")
+
+        print("Eval evaluation complete.")
+        print(f"Checkpoint: {script_args.checkpoint_path}")
+        print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
 
 
 if __name__ == "__main__":

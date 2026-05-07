@@ -161,7 +161,7 @@ class MORewardTrainer(Trainer):
             loss_vs = losses[-1]
             loss_gr = losses[0:-1]
 
-            result['grounding_loss'] = loss_gr
+            result['grounding_loss'] = loss_gr.tolist()
             for i in range(len(loss_gr)):
                 result[f'grounding_loss_{i}'] = to_float(loss_gr[i])
             result['value_system_loss'] = to_float(loss_vs)
@@ -545,6 +545,8 @@ class MORewardTrainer(Trainer):
                     batch_size = observed_batch_size
 
             # Prediction step
+            print("MODEL DTYPE", model.value_system_layer.weight.dtype)
+            print("INPUTS DTYPE", inputs[next(iter(inputs))].dtype)
             losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
                 model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             main_input_name = getattr(

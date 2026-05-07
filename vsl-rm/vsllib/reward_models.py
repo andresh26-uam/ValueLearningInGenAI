@@ -36,7 +36,7 @@ class LinearAlignmentLayer(th.nn.Linear):
 
             self.load_state_dict(state_dict)
 
-    @th.compile
+    #@th.compile
     def forward(self, input: th.Tensor) -> th.Tensor:
         # assert w_bounded.dtype == self.weight.dtype, f"Expected w_bounded dtype {self.weight.dtype}, but got {w_bounded.dtype}"
         # assert w_bounded.device == self.weight.device, f"Expected w_bounded device {self.weight.device}, but got {w_bounded.device}"
@@ -58,6 +58,7 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
         super().__init__(in_features, out_features, bias, device, dtype, data)
         self.set_weights([1.0/self.weight.shape[1]
                          for _ in range(self.weight.shape[1])])
+        
 
     def set_weights(self, weights: tuple):
         with th.no_grad():
@@ -115,7 +116,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         lambda_decay: float = 0.0,
         gather_train_metrics: bool = False,
         use_ideal_grounding_model: bool = False,
-        dtype: str = "float16",
+        dtype: str = "float32",
         base_model_name_or_path: Optional[str] = None,
         base_model_trust_remote_code: bool = True,
         base_model_num_labels: int = 1,
@@ -836,6 +837,7 @@ class MultiValueRewardHead(nn.Module):
         rewards = th.cat(rewards_list, dim=-1)
         return self.normalization(rewards)
 
+    
     def reference_weight(self) -> th.Tensor:
         # Used for dtype/device consistency assertions.
         for layer in self.value_heads[0]:
@@ -895,7 +897,13 @@ class MORMForSequenceClassification(PreTrainedModel):
             )
 
         torch_dtype = self._resolve_torch_dtype(
-            getattr(config, "dtype", "float32"))
+            getattr(config, "dtype", th.float32))
+        if torch_dtype == "float16":
+            torch_dtype = th.float16
+        elif torch_dtype == "bfloat16":
+            torch_dtype = th.bfloat16
+        elif torch_dtype == "float32":
+            torch_dtype = th.float32
         trust_remote_code = bool(
             getattr(config, "base_model_trust_remote_code", True))
         base_cfg = AutoConfig.from_pretrained(
@@ -905,7 +913,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         model_kwargs: dict[str, Any] = {
             "config": base_cfg,
             "trust_remote_code": trust_remote_code,
-            "torch_dtype": torch_dtype,
+            "dtype": torch_dtype,
         }
 
         if bool(getattr(config, "use_base_model_heads", False)):
@@ -1066,6 +1074,9 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         super().__init__(config)
+
+        from pprint import pprint
+        
         if base_model is None:
             base_model = self._build_base_model_from_config(config)
 
@@ -1105,7 +1116,7 @@ class MORMForSequenceClassification(PreTrainedModel):
             if config.use_ideal_grounding_model:
                 self.reward_heads_ideal = constructor(config, base_model)
             self.value_system_layer = ConvexAlignmentLayer(
-                config.num_values, 1, device=model_device, dtype=model_dtype)
+                config.num_values, 1, device=model_device, dtype=self.reward_heads.parameters().__next__().dtype)
             self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
@@ -1195,6 +1206,7 @@ class MORMForSequenceClassification(PreTrainedModel):
 
         if self.value_system_layer is not None:
             if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+                print("REWARDS DTYPE", rewards.dtype)
                 vs_reward = self.value_system_layer.forward(rewards)
             else:
                 raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")

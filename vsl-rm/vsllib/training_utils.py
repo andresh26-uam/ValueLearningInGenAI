@@ -6,6 +6,7 @@ from typing import Tuple
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union
 
+import numpy as np
 from numpy import add
 from ordered_set import OrderedSet
 
@@ -330,6 +331,10 @@ class MORMTrainingVariables(th.nn.Module):
         coeff: th.Tensor
         self.zero_grad(set_to_none=True)
         
+
+        self.update_losses()
+        self.update_metrics()
+        
         if self.training_steps_so_far % self.update_tendencies_every_n_steps == 0 and self.training_steps_so_far > 0:
             self.update_loss_tendencies()
             self.update_metrics_tendencies()
@@ -478,6 +483,24 @@ class MORMTrainingVariables(th.nn.Module):
                     setattr(self, field_name, [])
 
 
+    def update_metrics(self) -> None:
+        with th.no_grad():
+            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+            
+            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach()
+
+            if len(self._cached_coherences_ideal) > 0:
+                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+            
+    def update_losses(self) -> None:
+        with th.no_grad():
+            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+            if len(self._cached_groundings_ideal) > 0:
+                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+            else:
+                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach()
+            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach()
+
     def update_metrics_tendencies(self) -> None:
         cached_coherences = None
         if self.use_validation_for_tendencies and len(self.historic_eval_metrics)>0:
@@ -506,13 +529,7 @@ class MORMTrainingVariables(th.nn.Module):
         if cached_coherences is None:
             return None
         with th.no_grad():
-            self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             
-            self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach()
-
-            if len(self._cached_coherences_ideal) > 0:
-                self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
-                
             if self.use_validation_for_tendencies:
                 tendency_coherences = th.stack(cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
                 
@@ -568,13 +585,6 @@ class MORMTrainingVariables(th.nn.Module):
         if cached_groundings is None:
             return None
         with th.no_grad():
-            self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
-            if len(self._cached_groundings_ideal) > 0:
-                self.last_accumulated_grounding_loss_ideal = th.stack(self._cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
-            else:
-                self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach()
-            self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach()
-            
             if self.use_validation_for_tendencies:
                 tendency_gr_loss = th.stack(cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
                 if len(cached_groundings_ideal) > 0:
@@ -583,9 +593,9 @@ class MORMTrainingVariables(th.nn.Module):
                     tendency_gr_loss_ideal = tendency_gr_loss
                 tendency_vs_loss = th.stack(cached_vs_losses).mean().detach()
             else:
-                tendency_gr_loss = self.last_accumulated_grounding_loss
-                tendency_gr_loss_ideal = self.last_accumulated_grounding_loss_ideal
-                tendency_vs_loss = self.last_accumulated_vs_loss
+                tendency_gr_loss = self.last_accumulated_grounding_loss.clone()
+                tendency_gr_loss_ideal = self.last_accumulated_grounding_loss_ideal.clone()
+                tendency_vs_loss = self.last_accumulated_vs_loss.clone()
 
             grounding_loss = th.minimum(tendency_gr_loss, tendency_gr_loss_ideal).detach()
             
@@ -610,7 +620,10 @@ class MORMTrainingVariables(th.nn.Module):
             for key in metrics.keys():
                 if key not in self.historic_eval_metrics:
                     self.historic_eval_metrics[key] = []
-                self.historic_eval_metrics[key].append(metrics[key])
+                m = metrics[key]
+                if isinstance(m, np.ndarray):
+                    m = m.tolist()
+                self.historic_eval_metrics[key].append(m)
         else:
             
             with th.no_grad():
