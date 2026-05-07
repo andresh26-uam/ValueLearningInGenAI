@@ -1,6 +1,7 @@
 
 import dis
 
+from sympy import use
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
 from collections.abc import Iterator
@@ -103,6 +104,8 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         activate_discordance_epsilon_for_loss: bool = False,
         check_undefined_label: bool = True,
         grounding_loss_tendency_update_ratio: float = 0.001,
+        update_tendencies_every_n_steps: int = 1,
+        use_validation_for_tendencies: bool = False,
         rew_center_coefficient: float = 0.0,
         gradient_accumulation_steps: int = 2,
         use_metrics_or_losses_for_lagrange_updates: str = "metrics",
@@ -167,6 +170,8 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         self.use_metrics_or_losses_for_lagrange_updates = use_metrics_or_losses_for_lagrange_updates
         self.use_exponential_moving_average_or_optimum_targets = use_exponential_moving_average_or_optimum_targets
         self.grad_on_only_worst_value = grad_on_only_worst_value
+        self.update_tendencies_every_n_steps = update_tendencies_every_n_steps
+        self.use_validation_for_tendencies = use_validation_for_tendencies
         self.zero_constraint = zero_constraint
         self.rew_center_coefficient = rew_center_coefficient
         self.discordance_epsilon = discordance_epsilon
@@ -1109,6 +1114,8 @@ class MORMForSequenceClassification(PreTrainedModel):
         self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
                                                         device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
                                                         gradient_accumulation_steps=config.gradient_accumulation_steps,
+                                                        update_tendencies_every_n_steps=config.update_tendencies_every_n_steps,
+                                                        use_validation_for_tendencies=config.use_validation_for_tendencies,
                                                         use_metrics_or_losses=config.use_metrics_or_losses_for_lagrange_updates,
                                                         use_exponential_moving_average_or_optimum_targets=config.use_exponential_moving_average_or_optimum_targets,
                                                         grad_on_only_worst_value=config.grad_on_only_worst_value,

@@ -153,7 +153,7 @@ class MORMTrainingVariables(th.nn.Module):
         self: MORMTrainingVariables = self
         result: Dict[str, float] = {}
 
-
+        
         if self.last_accumulated_coherences is not None:
             for i in range(len(self.last_accumulated_coherences)):
                 if self.last_accumulated_coherences[i] is not None:
@@ -267,6 +267,8 @@ class MORMTrainingVariables(th.nn.Module):
                  device: th.DeviceObjType|str ='cpu', dtype: th.Type = th.float32, 
                  grounding_loss_tendency_update_ratio: float = 0.01, 
                  gradient_accumulation_steps=10, 
+                 update_tendencies_every_n_steps=1,
+                 use_validation_for_tendencies=False,
                  use_metrics_or_losses='metrics', 
                  use_exponential_moving_average_or_optimum_targets="optimum",
                  grad_on_only_worst_value=False, zero_constraint: bool = True,
@@ -281,9 +283,14 @@ class MORMTrainingVariables(th.nn.Module):
         self.zero_constraint = zero_constraint
         self.minimum_grounding_loss_tendency: th.Tensor | None = None
         self.maximum_coherences_tendency: th.Tensor | None = None
+        self.grounding_loss_tendency: th.Tensor | None = None
+        self.coherences_tendency: th.Tensor | None = None
 
         self.minimum_vs_loss_tendency: th.Tensor | None = None
         self.maximum_representativeness_tendency: th.Tensor | None = None
+        self.vs_loss_tendency: th.Tensor | None = None
+        self.representativeness_tendency: th.Tensor | None = None
+        
 
         self.last_accumulated_grounding_loss: th.Tensor | None = None
         self.last_accumulated_vs_loss: th.Tensor | None = None
@@ -311,111 +318,124 @@ class MORMTrainingVariables(th.nn.Module):
         self.use_exponential_moving_average_or_optimum_targets = use_exponential_moving_average_or_optimum_targets
         self.grad_on_only_worst_value = grad_on_only_worst_value
 
+        self.use_validation_for_tendencies=use_validation_for_tendencies
+        self.update_tendencies_every_n_steps=update_tendencies_every_n_steps
+
+        self.training_steps_so_far = 0
+        self.is_initialized = False
         self.historic_eval_metrics = {}
             
     
     def prepare_for_optimizer_step(self, need_backward: bool = True) -> None:
         coeff: th.Tensor
         self.zero_grad(set_to_none=True)
-        with th.no_grad():
-                #assert self.lagrange_multipliers[vi].grad is not None, f"Lagrange multiplier {vi} gradient is None before optimizer step."
+        
+        if self.training_steps_so_far % self.update_tendencies_every_n_steps == 0 and self.training_steps_so_far > 0:
             self.update_loss_tendencies()
             self.update_metrics_tendencies()
-
-            if self.use_exponential_moving_average_or_optimum_targets == "optimum":
-                coherences_tendency = self.maximum_coherences_tendency
-                grounding_loss_tendency = self.minimum_grounding_loss_tendency
-                representativeness_tendency = self.maximum_representativeness_tendency
-                vs_loss_tendency = self.minimum_vs_loss_tendency
-            elif self.use_exponential_moving_average_or_optimum_targets == "average":
-                coherences_tendency = self.coherences_tendency
-                grounding_loss_tendency = self.grounding_loss_tendency
-                representativeness_tendency = self.representativeness_tendency
-                vs_loss_tendency = self.vs_loss_tendency
-            else:
-                raise ValueError(f"Invalid value for use_exponential_moving_average_or_minimum_targets: {self.use_exponential_moving_average_or_optimum_targets}. Expected 'minimum' or 'average'.")
-            if self.use_metrics_or_losses == 'metrics':
-                # Use coherence difference with the tendency as improvement signal.
-                gr_ideal_diff_orig = -(self.last_accumulated_coherences - coherences_tendency).detach()
-                vs_ideal_diff = -(self.last_accumulated_representativeness - representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
+        if self.is_initialized:
+            with th.no_grad():
+                if self.use_exponential_moving_average_or_optimum_targets == "optimum":
+                    coherences_tendency = self.maximum_coherences_tendency
+                    grounding_loss_tendency = self.minimum_grounding_loss_tendency
+                    representativeness_tendency = self.maximum_representativeness_tendency
+                    vs_loss_tendency = self.minimum_vs_loss_tendency
+                elif self.use_exponential_moving_average_or_optimum_targets == "average":
+                    coherences_tendency = self.coherences_tendency
+                    grounding_loss_tendency = self.grounding_loss_tendency
+                    representativeness_tendency = self.representativeness_tendency
+                    vs_loss_tendency = self.vs_loss_tendency
+                else:
+                    raise ValueError(f"Invalid value for use_exponential_moving_average_or_minimum_targets: {self.use_exponential_moving_average_or_optimum_targets}. Expected 'minimum' or 'average'.")
+                if self.use_metrics_or_losses == 'metrics':
+                    # Use coherence difference with the tendency as improvement signal.
+                    gr_ideal_diff_orig = -(self.last_accumulated_coherences - coherences_tendency).detach()
+                    vs_ideal_diff = -(self.last_accumulated_representativeness - representativeness_tendency).detach() if self.last_accumulated_representativeness is not None else None
+                    
+                    
+                elif self.use_metrics_or_losses == 'losses':
+                    # Use loss difference with the tendency as improvement signal.
+                    gr_ideal_diff_orig = (self.last_accumulated_grounding_loss - grounding_loss_tendency).detach()
+                    vs_ideal_diff = (self.last_accumulated_vs_loss - vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
                 
-                
-            elif self.use_metrics_or_losses == 'losses':
-                # Use loss difference with the tendency as improvement signal.
-                gr_ideal_diff_orig = (self.last_accumulated_grounding_loss - grounding_loss_tendency).detach()
-                vs_ideal_diff = (self.last_accumulated_vs_loss - vs_loss_tendency).detach() if self.last_accumulated_vs_loss is not None else None
-              
-            else:
-                raise ValueError(f"Invalid value for use_metrics_or_losses: {self.use_metrics_or_losses}. Expected 'metrics' or 'losses'.")    
-                #should be...? 1) forward = self.forward(grounding_losses=gr_ideal_diff, vs_losses=self.last_accumulated_vs_loss)
-                #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
-        
-        self.requires_grad_(need_backward)
-        
-        gr_ideal_diff = th.clamp(gr_ideal_diff_orig, min=0.0).detach() # We only want to increase the multipliers for the grounding losses that are above their ideal losses (or below their ideal metrics, depending on the mode), so we set the ideal differences to zero for the ones that are already in a good place.
-        #gr_ideal_diff = gr_ideal_diff_orig.detach()
-        
-        
-        add_vs_loss = self._last_add_vs_loss         
-        if need_backward:
-            before_vs_loss = self._last_add_vs_loss
-            if self.lambda_decay > 0.0:
-                if self._last_selected_indices is not None and self._last_add_gr_loss:
-                    norm_penalty_ =  norm_penalty(self.lagrange_multipliers[self._last_selected_indices], self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
-                elif self._last_add_gr_loss:
-                    norm_penalty_ =  norm_penalty(self.lagrange_multipliers, self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
-                    """elif self._last_add_vs_loss:
-                        norm_penalty_ =  th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False) #th.norm(self.vs_coeff)#NOT USED.
-                    """
+                else:
+                    raise ValueError(f"Invalid value for use_metrics_or_losses: {self.use_metrics_or_losses}. Expected 'metrics' or 'losses'.")    
+                    #should be...? 1) forward = self.forward(grounding_losses=gr_ideal_diff, vs_losses=self.last_accumulated_vs_loss)
+                    #should be...? 2) coeff = ((gr_ideal_diff*(lag_sum)) - 1*(forward))/th.pow(lag_sum, 2) 
+            
+            self.requires_grad_(need_backward)
+            
+            gr_ideal_diff = th.clamp(gr_ideal_diff_orig, min=0.0).detach() # We only want to increase the multipliers for the grounding losses that are above their ideal losses (or below their ideal metrics, depending on the mode), so we set the ideal differences to zero for the ones that are already in a good place.
+            #gr_ideal_diff = gr_ideal_diff_orig.detach()
+            
+            
+            add_vs_loss = self._last_add_vs_loss         
+            if need_backward:
+                before_vs_loss = self._last_add_vs_loss
+                if self.lambda_decay > 0.0:
+                    if self._last_selected_indices is not None and self._last_add_gr_loss:
+                        norm_penalty_ =  norm_penalty(self.lagrange_multipliers[self._last_selected_indices], self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
+                    elif self._last_add_gr_loss:
+                        norm_penalty_ =  norm_penalty(self.lagrange_multipliers, self.vs_coeff if self._last_add_vs_loss else th.zeros_like(self.vs_coeff,requires_grad=False), self.lambda_decay)
+                        """elif self._last_add_vs_loss:
+                            norm_penalty_ =  th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False) #th.norm(self.vs_coeff)#NOT USED.
+                        """
+                    else:
+                        norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
                 else:
                     norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
-            else:
-                norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
-            if vs_ideal_diff is not None:
-                with th.no_grad():
-                    if th.any(gr_ideal_diff_orig > 0.0):
-                        #add_vs_loss = False
-                        vs_ideal_diff = 0.0
-                    else:
-                        vs_ideal_diff = th.clamp(vs_ideal_diff, min=0.0).detach()
+                if vs_ideal_diff is not None:
+                    with th.no_grad():
+                        if th.any(gr_ideal_diff_orig > 0.0):
+                            #add_vs_loss = False
+                            vs_ideal_diff = 0.0
+                        else:
+                            vs_ideal_diff = th.clamp(vs_ideal_diff, min=0.0).detach()
+                
+                forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=self._last_add_gr_loss) + norm_penalty_ # It is negated, as it is a maximization problem
+                self._last_add_vs_loss = before_vs_loss
+                forward.backward()
+                
+                if self.grad_on_only_worst_value:
+                    coeff = self.lagrange_multipliers.grad.detach()
+                    worst_idx = th.argmax(gr_ideal_diff).detach(), 
+                    worst_val = coeff[worst_idx].detach().item()
+                    coeff.zero_() # Set all gradients to zero
+                    coeff[worst_idx] = worst_val # Except the worst one, which we keep as is.
+                    self.lagrange_multipliers.grad = coeff
             
-            forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=self._last_add_gr_loss) + norm_penalty_ # It is negated, as it is a maximization problem
-            self._last_add_vs_loss = before_vs_loss
-            forward.backward()
-            
-            if self.grad_on_only_worst_value:
-                coeff = self.lagrange_multipliers.grad.detach()
-                worst_idx = th.argmax(gr_ideal_diff).detach(), 
-                worst_val = coeff[worst_idx].detach().item()
-                coeff.zero_() # Set all gradients to zero
-                coeff[worst_idx] = worst_val # Except the worst one, which we keep as is.
-                self.lagrange_multipliers.grad = coeff
-        
-        coeff = self.lagrange_multipliers.grad
-        if __debug__:
-            print("GRAD DIFF", gr_ideal_diff)
-            print("LAG GRAD", coeff, "VS_COEFF GRAD", self.vs_coeff.grad if self._last_add_vs_loss else None)
-            
-            print("LAGRANGE MULTIPLIERS", self.lagrange_multipliers)
-            print("VS COEFF", self.vs_coeff)
-            print("MULTS", self.get_multipliers(used_only=False))
-            print("PRESS.ENTER TO CONTINUE...")
-        #input()
-        with th.no_grad():
-            if add_vs_loss and need_backward:
-                assert self.vs_coeff.grad is not None, "VS Coefficient gradient is None before optimizer step, but it should not be when add_vs_loss is True."
-            else:
-                if add_vs_loss:
-                    assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, th.zeros_like(self.vs_coeff.grad)), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
-            if self._last_add_gr_loss  and need_backward:
-                if self._last_selected_indices is not None:
-                    assert not th.allclose(coeff[self._last_selected_indices], th.zeros_like(coeff[self._last_selected_indices])), "Selected grounding multipliers have zero gradients, but they should not be zero."
+            coeff = self.lagrange_multipliers.grad
+            if __debug__:
+                print("GRAD DIFF", gr_ideal_diff, "ORIG", gr_ideal_diff_orig)
+                
+                print("LAG GRAD", coeff, "VS_COEFF GRAD", self.vs_coeff.grad if self._last_add_vs_loss else None)
+                
+                print("LAGRANGE MULTIPLIERS", self.lagrange_multipliers)
+                print("VS COEFF", self.vs_coeff)
+                print("MULTS", self.get_multipliers(used_only=False))
+                
+                print("---------")
+                print("CHR TENDENCY", coherences_tendency)
+                print("REPR TENDENCY", representativeness_tendency)
+                print("GROUNDING LOSSES TENDENCY", grounding_loss_tendency)
+                print("VS LOSSES TENDENCY", vs_loss_tendency)
+                print("---------")
+            #input()
+            with th.no_grad():
+                if add_vs_loss and need_backward:
+                    assert self.vs_coeff.grad is not None, "VS Coefficient gradient is None before optimizer step, but it should not be when add_vs_loss is True."
                 else:
-                    if th.any(gr_ideal_diff != 0.0):
-                        assert not th.allclose(coeff, th.zeros_like(coeff)), "Grounding multipliers have zero gradients, but they should not be zero."
-            else:
-                assert coeff is None or th.allclose(coeff, 0.0), "Grounding multipliers have non-zero gradients, but they should be zero when add_gr_loss is False."
-        #input()
+                    if add_vs_loss:
+                        assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, th.zeros_like(self.vs_coeff.grad)), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
+                if self._last_add_gr_loss  and need_backward:
+                    if self._last_selected_indices is not None:
+                        assert not th.allclose(coeff[self._last_selected_indices], th.zeros_like(coeff[self._last_selected_indices])), "Selected grounding multipliers have zero gradients, but they should not be zero."
+                    else:
+                        if th.any(gr_ideal_diff != 0.0):
+                            assert not th.allclose(coeff, th.zeros_like(coeff)), "Grounding multipliers have zero gradients, but they should not be zero."
+                else:
+                    assert coeff is None or th.allclose(coeff, 0.0), "Grounding multipliers have non-zero gradients, but they should be zero when add_gr_loss is False."
+            #input()
 
             
     def zero_grad(self, set_to_none: bool = True) -> None:
@@ -429,12 +449,19 @@ class MORMTrainingVariables(th.nn.Module):
     def post_optimizer_step(self) -> None:
         
         self.zero_grad(set_to_none=True)
+        if __debug__:
+            print("--------")
+            print("OPT STEPS", self.training_steps_so_far, self.update_tendencies_every_n_steps)
+            print("--------")
+        
+        self.training_steps_so_far +=1
         #self.lagrange_multipliers.data.clamp_(min=0.1)
         #self.vs_coeff.data.clamp_(min=0.1)
         
         
 
     def reset_state(self) -> None:
+        self.training_steps_so_far = 0
         with th.no_grad():
             self.requires_grad_(False)
             self.zero_grad(set_to_none=True)
@@ -452,33 +479,94 @@ class MORMTrainingVariables(th.nn.Module):
 
 
     def update_metrics_tendencies(self) -> None:
+        cached_coherences = None
+        if self.use_validation_for_tendencies and len(self.historic_eval_metrics)>0:
+            hgr = self.historic_eval_metrics.get("coherences", [])
+            hvs = self.historic_eval_metrics.get("representativeness", [])
+            hgrideal = self.historic_eval_metrics.get("coherences_ideal", [])
+            
+            if len(hgr) > 0:
+                assert len(hvs) > 0, "Expected 'value_system_loss' key in historic_eval_metrics when grounding is used"
+                cached_coherences = [th.as_tensor(h).requires_grad_(False) for h in hgr[-min(1, len(hgr)):]]
+            if len(hgrideal) > 0:
+                print("HISTORIC GROUNDING IDEAL LOSSES: ", hgrideal)
+                cached_coherences_ideal = [th.as_tensor(h).requires_grad_(False) for h in hgrideal[-min(1, len(hgrideal)):]]
+            else:
+                cached_coherences_ideal = []
+            if len(hvs) > 0:
+                cached_representativeness = [th.as_tensor(h).requires_grad_(False) for h in hvs[-min(1, len(hvs)):]]
+
+            #cached_coherences = th.as_tensor(self.historic_eval_metrics.get("coherences", [[0.0]*len(self.lagrange_multipliers)]*self.gradient_accumulation_steps)[-self.gradient_accumulation_steps:]).requires_grad_(False)
+            #cached_coherences_ideal = th.as_tensor(self.historic_eval_metrics.get("coherences_ideal", [[0.0]*len(self.lagrange_multipliers)]*self.gradient_accumulation_steps)[-self.gradient_accumulation_steps:]).requires_grad_(False)
+            #cached_representativeness = th.as_tensor(self.historic_eval_metrics.get("representativeness", [0.0]*self.gradient_accumulation_steps)[-self.gradient_accumulation_steps:]).requires_grad_(False)
+        elif not self.use_validation_for_tendencies:
+            cached_coherences = self._cached_coherences
+            cached_coherences_ideal = self._cached_coherences_ideal
+            cached_representativeness = self._cached_representativeness
+        if cached_coherences is None:
+            return None
         with th.no_grad():
             self.last_accumulated_coherences = th.stack(self._cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             
             self.last_accumulated_representativeness = th.stack(self._cached_representativeness).mean().detach()
 
-            coherence_target =  self.last_accumulated_coherences
             if len(self._cached_coherences_ideal) > 0:
                 self.last_accumulated_coherences_ideal = th.stack(self._cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+                
+            if self.use_validation_for_tendencies:
+                tendency_coherences = th.stack(cached_coherences).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+                
+                tendency_representativeness = th.stack(cached_representativeness).mean().detach()
 
-                coherence_target = th.maximum(self.last_accumulated_coherences, self.last_accumulated_coherences_ideal)
+                if len(cached_coherences_ideal) > 0:
+                    tendency_coherences_ideal = th.stack(cached_coherences_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+                else:
+                    tendency_coherences_ideal = tendency_coherences
+            else:
+                tendency_coherences = self.last_accumulated_coherences
+                tendency_representativeness = self.last_accumulated_representativeness
+                tendency_coherences_ideal = self.last_accumulated_coherences_ideal
+
+            coherence_target = th.maximum(tendency_coherences, tendency_coherences_ideal).detach()
             if self.maximum_coherences_tendency is None:
                 self.maximum_coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
-                self.maximum_representativeness_tendency = th.full_like(self.last_accumulated_representativeness, fill_value=0.5).detach()
+                self.maximum_representativeness_tendency = th.full_like(tendency_representativeness, fill_value=0.5).detach()
                 self.coherences_tendency = th.full_like(coherence_target, fill_value=0.5).detach()
-                self.representativeness_tendency = th.full_like(self.last_accumulated_representativeness, fill_value=0.5).detach()
+                self.representativeness_tendency = th.full_like(tendency_representativeness, fill_value=0.5).detach()
             else:
                 maximum = th.maximum(coherence_target, self.maximum_coherences_tendency)
                 
                 self.maximum_coherences_tendency = (th.multiply(maximum, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 self.coherences_tendency = (th.multiply(coherence_target, self.loss_metric_tendency_update_ratio) + th.multiply(self.coherences_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 
-                maximum_repr = th.maximum(self.last_accumulated_representativeness, self.maximum_representativeness_tendency)
+                maximum_repr = th.maximum(tendency_representativeness, self.maximum_representativeness_tendency)
                 self.maximum_representativeness_tendency = (th.multiply(maximum_repr, self.loss_metric_tendency_update_ratio) + th.multiply(self.maximum_representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.representativeness_tendency = (th.multiply(self.last_accumulated_representativeness, self.loss_metric_tendency_update_ratio) + th.multiply(self.representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+                self.representativeness_tendency = (th.multiply(tendency_representativeness, self.loss_metric_tendency_update_ratio) + th.multiply(self.representativeness_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
 
+            self.is_initialized = True
     def update_loss_tendencies(self) -> Optional[th.Tensor]:
-        
+        cached_groundings = None
+        if self.use_validation_for_tendencies and len(self.historic_eval_metrics)>0:
+            hgr = self.historic_eval_metrics.get("grounding_loss", [])
+            hvs = self.historic_eval_metrics.get("value_system_loss", [])
+            hgrideal = self.historic_eval_metrics.get("grounding_loss_ideal", [])
+            
+            if len(hgr) > 0:
+                assert len(hvs) > 0, "Expected 'value_system_loss' key in historic_eval_metrics when grounding is used"
+                cached_groundings = [th.as_tensor(h).requires_grad_(False) for h in hgr[-min(1, len(hgr)):]]
+            if len(hgrideal) > 0:
+                print("HISTORIC GROUNDING IDEAL LOSSES: ", hgrideal)
+                cached_groundings_ideal = [th.as_tensor(h).requires_grad_(False) for h in hgrideal[-min(1, len(hgrideal)):]]
+            else:
+                cached_groundings_ideal = []
+            if len(hvs) > 0:
+                cached_vs_losses = [th.as_tensor(h).requires_grad_(False) for h in hvs[-min(1, len(hvs)):]]
+        elif not self.use_validation_for_tendencies:
+            cached_groundings = self._cached_groundings
+            cached_groundings_ideal = self._cached_groundings_ideal
+            cached_vs_losses = self._cached_vs_losses
+        if cached_groundings is None:
+            return None
         with th.no_grad():
             self.last_accumulated_grounding_loss = th.stack(self._cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
             if len(self._cached_groundings_ideal) > 0:
@@ -486,23 +574,35 @@ class MORMTrainingVariables(th.nn.Module):
             else:
                 self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach()
             self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach()
+            
+            if self.use_validation_for_tendencies:
+                tendency_gr_loss = th.stack(cached_groundings).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+                if len(cached_groundings_ideal) > 0:
+                    tendency_gr_loss_ideal = th.stack(cached_groundings_ideal).mean(dim=0, dtype=self.lagrange_multipliers.dtype).detach()
+                else:
+                    tendency_gr_loss_ideal = tendency_gr_loss
+                tendency_vs_loss = th.stack(cached_vs_losses).mean().detach()
+            else:
+                tendency_gr_loss = self.last_accumulated_grounding_loss
+                tendency_gr_loss_ideal = self.last_accumulated_grounding_loss_ideal
+                tendency_vs_loss = self.last_accumulated_vs_loss
 
-            grounding_loss = th.minimum(self.last_accumulated_grounding_loss, self.last_accumulated_grounding_loss_ideal).detach()
+            grounding_loss = th.minimum(tendency_gr_loss, tendency_gr_loss_ideal).detach()
             
             if self.minimum_grounding_loss_tendency is None:
                 self.minimum_grounding_loss_tendency = th.full_like(grounding_loss, fill_value=th.max(grounding_loss).float()).detach()
-                self.minimum_vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
+                self.minimum_vs_loss_tendency = th.full_like(tendency_vs_loss, fill_value=th.max(tendency_vs_loss).float()).detach()
                 self.grounding_loss_tendency = th.full_like(grounding_loss, fill_value=th.max(grounding_loss).float()).detach()
-                self.vs_loss_tendency = th.full_like(self.last_accumulated_vs_loss, fill_value=th.max(self.last_accumulated_vs_loss).float()).detach()
+                self.vs_loss_tendency = th.full_like(tendency_vs_loss, fill_value=th.max(tendency_vs_loss).float()).detach()
             else:
                 minimum = th.minimum(grounding_loss, self.minimum_grounding_loss_tendency)
-                minimum_vs = th.minimum(self.last_accumulated_vs_loss, self.minimum_vs_loss_tendency)
+                minimum_vs = th.minimum(tendency_vs_loss, self.minimum_vs_loss_tendency)
 
                 self.minimum_grounding_loss_tendency = (th.multiply(minimum, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 self.minimum_vs_loss_tendency = (th.multiply(minimum_vs, self.loss_metric_tendency_update_ratio) + th.multiply(self.minimum_vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
                 self.grounding_loss_tendency = (th.multiply(grounding_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.grounding_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-                self.vs_loss_tendency = (th.multiply(self.last_accumulated_vs_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
-
+                self.vs_loss_tendency = (th.multiply(tendency_vs_loss, self.loss_metric_tendency_update_ratio) + th.multiply(self.vs_loss_tendency, (1.0 - self.loss_metric_tendency_update_ratio))).detach()
+            self.is_initialized = True
     def record_metrics(self, metrics: Dict[str, float|list], metric_type: Literal["train", "validation"] = "train") -> None:
         # This is called at the end of each evaluation phase, and records the grounding loss and vs loss for the last evaluation phase, which will be used to update the Lagrange multipliers before the next optimizer step.
         
@@ -510,9 +610,9 @@ class MORMTrainingVariables(th.nn.Module):
             for key in metrics.keys():
                 if key not in self.historic_eval_metrics:
                     self.historic_eval_metrics[key] = []
-                else:
-                    self.historic_eval_metrics[key].append(metrics[key])
+                self.historic_eval_metrics[key].append(metrics[key])
         else:
+            
             with th.no_grad():
 
                 for field in self._iter_cached_field_names():
@@ -534,17 +634,26 @@ class MORMTrainingVariables(th.nn.Module):
                 if coherences_ideal is not None:
                     self._cached_coherences_ideal.append(coherences_ideal)
 
-    def record_grounding_loss(self, gr_loss_detached: th.Tensor, vs_loss_detached: th.Tensor, gr_loss_ideal_detached=None) -> None:
-        with th.no_grad():
-            # This estimates the minimum obtainable loss for each value. The optimizer will take this into account
-            for field in self._iter_cached_field_names():
-                field_value = getattr(self, field, None)
-                if len(field_value) > self.gradient_accumulation_steps:
-                    field_value.pop(0)
-            self._cached_groundings.append(gr_loss_detached)
-            self._cached_vs_losses.append(vs_loss_detached)
-            if gr_loss_ideal_detached is not None:
-                self._cached_groundings_ideal.append(gr_loss_ideal_detached)
+    def record_grounding_loss(self, gr_loss_detached: th.Tensor, vs_loss_detached: th.Tensor, gr_loss_ideal_detached=None, loss_type: Literal["train", "validation"] = "train") -> None:
+        if loss_type == "validation":
+            for key in ["grounding_loss", "value_system_loss", "grounding_loss_ideal"]:
+                if key not in self.historic_eval_metrics:
+                    self.historic_eval_metrics[key] = []
+                if key == "grounding_loss_ideal" and gr_loss_ideal_detached is None:
+                    continue
+                else:
+                    self.historic_eval_metrics[key].append(gr_loss_detached if key == "grounding_loss" else vs_loss_detached)
+        else:
+            with th.no_grad():
+                # This estimates the minimum obtainable loss for each value. The optimizer will take this into account
+                for field in self._iter_cached_field_names():
+                    field_value = getattr(self, field, None)
+                    if len(field_value) > self.gradient_accumulation_steps:
+                        field_value.pop(0)
+                self._cached_groundings.append(gr_loss_detached)
+                self._cached_vs_losses.append(vs_loss_detached)
+                if gr_loss_ideal_detached is not None:
+                    self._cached_groundings_ideal.append(gr_loss_ideal_detached)
 
 
 
@@ -739,11 +848,11 @@ class ConstrainedOptimizer(VSLOptimizer):
         if self.optimy is not None and self.lr_value_system > 0.0:
                 self.optimy.step()
         
-
+        
         self.training_variables.prepare_for_optimizer_step(need_backward=self.lr_lambda > 0)
         if self.lr_lambda > 0:
-            self.optim_lambdas.step()
-        #print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
+                self.optim_lambdas.step()
+            #print("LAGRANGE MULTIPLIERS AFTER STEP (BEFORE DECAY):", self.training_variables.lagrange_multipliers)
         self.training_variables.post_optimizer_step()
         
         #print("LAGRANGE MULTIPLIERS AFTER STEP (VS right):", self.training_variables.get_multipliers())

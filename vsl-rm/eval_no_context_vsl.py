@@ -6,7 +6,7 @@ import csv
 import os
 from pathlib import Path
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List
 from enum import Enum
 
 import numpy as np
@@ -53,6 +53,11 @@ from vsllib.utils import  ScriptArguments, argument_parser, obtain_tokenizer, se
 
 @dataclass
 class EvalArguments(ScriptArguments):
+
+    checkpoint_paths: str = field(
+        default=[],
+        metadata={"help": "run name in the directory saved by no_context_vsl.py. If not supplied, will ask the user to select from the available runs in the output directory."},
+    )
     checkpoint_path: str = field(
         default=None,
         metadata={"help": "run name in the directory saved by no_context_vsl.py. If not supplied, will ask the user to select from the available runs in the output directory."},
@@ -159,121 +164,122 @@ def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "te
 
 
 def main() -> None:
-    script_args, preset = parse_eval_args()
-    script_args: EvalArguments
-    seed_everything(int(script_args.seed))
+    script_args_all, preset = parse_eval_args()
+    script_args_all: List[EvalArguments]
+    
 
-    
-    torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
-    tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
-    
-    model = MORMForSequenceClassification.from_pretrained(
-        str(script_args.checkpoint_path),
-    )
-    print("MODEL DETAILS:", model)
-    print("FIRST PARAMETER:", next(model.parameters()))
-    print("TRAINING VARIABLES:", model.training_variables.state_dict())
-    if script_args.push_to_hub:
-        from transformers import AutoConfig, AutoModelForSequenceClassification
-        print("Pushing model to Hugging Face Hub...?")
-        input("")
-        AutoConfig.register("morm_for_sequence_classification", MORMForSequenceClassificationConfig)
-        AutoModelForSequenceClassification.register(MORMForSequenceClassificationConfig, MORMForSequenceClassification)
+    for script_args in range(len(script_args_all)):
+        seed_everything(int(script_args.seed))
+        torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
+        tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
         
-        mo_1 = AutoModelForSequenceClassification.from_pretrained(
-                str(script_args.checkpoint_path),
-            )
+        model = MORMForSequenceClassification.from_pretrained(
+            str(script_args.checkpoint_path),
+        )
         print("MODEL DETAILS:", model)
         print("FIRST PARAMETER:", next(model.parameters()))
         print("TRAINING VARIABLES:", model.training_variables.state_dict())
-        
-
-    model.eval()
-
-    dc = MORewardDataCollatorWithPadding(
-        tokenizer=tokenizer,
-        max_length=int(script_args.max_length),
-        dtype=torch_dtype,
-        use_embeddings=bool(script_args.use_embeddings),
-    )
-
-    train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
-    extra_keep_keys = EXTRA_KEYS[script_args.dataset]
-    test_proportion_or_indices = get_test_indices(script_args.dataset)
-    eval_proportion_or_indices = get_validation_indices(script_args.dataset)
-
-    embed_model = model.full_model if script_args.use_embeddings else None
-
-    dataset = PairwisePreferenceDataset(
-        train_path,
-        tokenizer,
-        from_disk=True,
-        extra_keep_keys=extra_keep_keys,
-        retokenize=False,
-        recalculate_embeddings=False,
-        use_embeddings=bool(script_args.use_embeddings),
-        model_reference=embed_model,
-        collator=dc,
-        split_seed=int(script_args.seed),
-        eval_proportion_or_indices=eval_proportion_or_indices,
-        test_proportion_or_indices=test_proportion_or_indices,
-        cleanup_cache_files=False,
-    )
-
-    model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
-    reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
-    value_system_module_name = VALUE_SYSTEM_OUTPUT.get(model_name_for_maps, None)
-    reward_head_indices = REWARD_HEADS_INDICES.get(model_name_for_maps, {}).get(script_args.dataset, None)
-
-    if bool(script_args.use_frozen_base_model):
-        if reward_head_indices is not None:
-            if len(dataset.value_keys) != len(reward_head_indices):
-                raise ValueError(
-                    "Mismatch between dataset value key count and reward head indices: "
-                    f"{len(dataset.value_keys)} vs {len(reward_head_indices)}"
+        if script_args.push_to_hub:
+            from transformers import AutoConfig, AutoModelForSequenceClassification
+            print("Pushing model to Hugging Face Hub...?")
+            input("")
+            AutoConfig.register("morm_for_sequence_classification", MORMForSequenceClassificationConfig)
+            AutoModelForSequenceClassification.register(MORMForSequenceClassificationConfig, MORMForSequenceClassification)
+            
+            mo_1 = AutoModelForSequenceClassification.from_pretrained(
+                    str(script_args.checkpoint_path),
                 )
+            print("MODEL DETAILS:", model)
+            print("FIRST PARAMETER:", next(model.parameters()))
+            print("TRAINING VARIABLES:", model.training_variables.state_dict())
+            
 
-    # Read-only eval args; MORewardTrainer still needs TrainingArguments.
-    eval_args = TrainingArguments(
-        output_dir=str(script_args.results_dir),
-        seed=int(script_args.seed),
-        data_seed=int(script_args.seed),
-        per_device_eval_batch_size=len(dataset.test_dataset),
-        remove_unused_columns=False,
-        bf16=bool(script_args.bf16),
-        report_to="none",
-        label_names=["labels"],
-        use_cpu=bool(script_args.use_cpu),
-        do_train=False,
-        do_eval=True,
-        save_strategy="no",
-        logging_strategy="no",
-    )
+        model.eval()
 
-    # Keep these in sync with model config if base-model reward heads are active.
-    model.config.base_model_reward_heads_module_name = reward_heads_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_reward_heads_module_name
-    model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
+        dc = MORewardDataCollatorWithPadding(
+            tokenizer=tokenizer,
+            max_length=int(script_args.max_length),
+            dtype=torch_dtype,
+            use_embeddings=bool(script_args.use_embeddings),
+        )
 
-    # Use the exact same metric and loss functions as training.
-    trainer = MORewardTrainer(
-        model=model,
-        args=eval_args,
-        eval_dataset=dataset.test_dataset,
-        compute_metrics=partial(
-            MORewardTrainer.compute_metrics,
-            config=model.config,
-            training_variables=model.training_variables,
-        ),
-        compute_loss_func=partial(
-            mo_compute_loss_func,
-            config=model.config,
-            training_variables=model.training_variables,
-        ),
-        data_collator=dc,
-    )
+        train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
+        extra_keep_keys = EXTRA_KEYS[script_args.dataset]
+        test_proportion_or_indices = get_test_indices(script_args.dataset)
+        eval_proportion_or_indices = get_validation_indices(script_args.dataset)
 
-    metrics = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
-    flat_metrics = flatten_metrics_for_csv(metrics)
+        embed_model = model.full_model if script_args.use_embeddings else None
+
+        dataset = PairwisePreferenceDataset(
+            train_path,
+            tokenizer,
+            from_disk=True,
+            extra_keep_keys=extra_keep_keys,
+            retokenize=False,
+            recalculate_embeddings=False,
+            use_embeddings=bool(script_args.use_embeddings),
+            model_reference=embed_model,
+            collator=dc,
+            split_seed=int(script_args.seed),
+            eval_proportion_or_indices=eval_proportion_or_indices,
+            test_proportion_or_indices=test_proportion_or_indices,
+            cleanup_cache_files=False,
+        )
+
+        model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
+        reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
+        value_system_module_name = VALUE_SYSTEM_OUTPUT.get(model_name_for_maps, None)
+        reward_head_indices = REWARD_HEADS_INDICES.get(model_name_for_maps, {}).get(script_args.dataset, None)
+
+        if bool(script_args.use_frozen_base_model):
+            if reward_head_indices is not None:
+                if len(dataset.value_keys) != len(reward_head_indices):
+                    raise ValueError(
+                        "Mismatch between dataset value key count and reward head indices: "
+                        f"{len(dataset.value_keys)} vs {len(reward_head_indices)}"
+                    )
+
+        # Read-only eval args; MORewardTrainer still needs TrainingArguments.
+        eval_args = TrainingArguments(
+            output_dir=str(script_args.results_dir),
+            seed=int(script_args.seed),
+            data_seed=int(script_args.seed),
+            per_device_eval_batch_size=len(dataset.test_dataset),
+            remove_unused_columns=False,
+            bf16=bool(script_args.bf16),
+            report_to="none",
+            label_names=["labels"],
+            use_cpu=bool(script_args.use_cpu),
+            do_train=False,
+            do_eval=True,
+            save_strategy="no",
+            logging_strategy="no",
+        )
+
+        # Keep these in sync with model config if base-model reward heads are active.
+        model.config.base_model_reward_heads_module_name = reward_heads_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_reward_heads_module_name
+        model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
+
+        # Use the exact same metric and loss functions as training.
+        trainer = MORewardTrainer(
+            model=model,
+            args=eval_args,
+            eval_dataset=dataset.test_dataset,
+            compute_metrics=partial(
+                MORewardTrainer.compute_metrics,
+                config=model.config,
+                training_variables=model.training_variables,
+            ),
+            compute_loss_func=partial(
+                mo_compute_loss_func,
+                config=model.config,
+                training_variables=model.training_variables,
+            ),
+            data_collator=dc,
+        )
+
+        metrics = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
+        flat_metrics = flatten_metrics_for_csv(metrics)
     write_metrics_csv(flat_metrics, script_args.results_dir)
 
     print("Test evaluation complete.")

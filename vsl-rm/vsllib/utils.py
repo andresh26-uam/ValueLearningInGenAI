@@ -216,7 +216,14 @@ class ScriptArguments:
         metadata={"help": "The lr scheduler"},
     )
     max_length: Optional[int] = field(default=4096)
-
+    update_tendencies_every_n_steps: Optional[int] = field(
+        default=1,
+        metadata={"help": "How often to update the loss/metric tendencies for the Lagrange multiplier updates."},
+    )
+    use_validation_for_tendencies: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use the validation set for calculating the loss/metric tendencies for the Lagrange multiplier updates. If False, will use the training set."},
+    )
     run_name: Optional[str] = field(
         default_factory=lambda: f"run_",
         metadata={"help": "The name of the run for logging purposes."},
@@ -315,6 +322,8 @@ def argument_parser(script_args: ScriptArguments) -> Tuple[ScriptArguments, Dict
             script_args.loss_func_type_kwargs = script_args.loss_func_type_kwargs
     else:
         script_args.loss_func_type_kwargs = {}
+
+    script_args.update_tendencies_every_n_steps = script_args.eval_every_steps if script_args.use_validation_for_tendencies else script_args.update_tendencies_every_n_steps
     preset = MODEL_PRESETS[variant]
     return script_args, preset
 

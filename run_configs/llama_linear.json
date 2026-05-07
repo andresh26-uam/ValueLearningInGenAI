@@ -1,5 +1,5 @@
 {
-    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
+    "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
     "dataset": "ultra",
     "gather_train_metrics": true,
 
@@ -11,7 +11,7 @@
     "per_device_train_batch_size": 32,
     "per_device_eval_batch_size": 32,
     "gradient_accumulation_steps": 4,
-    "lambda_decay": 0.01,
+    "lambda_decay": 0.001,
 
     "activate_discordance_epsilon_for_loss": true,
 
@@ -21,15 +21,12 @@
     "layer_activation": "ReLU",
     "final_layer_activation": "none",
 
-    "use_validation_for_tendencies": true,
-    "update_tendencies_every_n_steps": 1,
-
-    "rew_center_coefficient": 0.01,
+    "rew_center_coefficient": 0.002,
     "layer_normalization": "none",
     "learning_rate": 0.0003,
     "grounding_learning_rate": 0.0003,
     "lagrange_learning_rate": 0.05,
-    "grounding_loss_tendency_update_ratio": 0.1,
+    "grounding_loss_tendency_update_ratio": 0.05,
     "max_grad_norm": 1.0,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
     "use_exponential_moving_average_or_optimum_targets": "optimum",
@@ -40,7 +37,7 @@
     "loss_func_type_kwargs": null,
     "weight_decay": 0.002,
     "bf16": true,
-    "num_train_epochs": 100,
+    "num_train_epochs": 1,
     "gradient_checkpointing": true,
     "optim": "paged_adamw_32bit",
     "lr_scheduler_type": "constant",
@@ -48,5 +45,5 @@
     "save_every_steps": 10000,
     "eval_every_steps": 100,
 
-    "run_name": "smol_def_linear"
+    "run_name": "llama_def_linear"
 }

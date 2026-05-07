@@ -10,4 +10,4 @@ if [[ ! -f "$config_file" ]]; then
     exit 1
 fi
 
-PYTHONOPTIMIZE=1 accelerate launch --config_file="accelerate_config/cpu_config.yaml" vsl-rm/no_context_vsl.py --use_cpu --config_file="$config_file" "$@"
+PYTHONOPTIMIZE=0 accelerate launch --config_file="accelerate_config/cpu_config.yaml" vsl-rm/no_context_vsl.py --use_cpu --config_file="$config_file" "$@"

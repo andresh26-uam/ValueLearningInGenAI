@@ -165,6 +165,8 @@ def main_fun() -> None:
         num_values=len(dataset.value_keys),
         dtype=str(torch_dtype).replace("torch.", ""),
         assume_qualitative_labels=script_args.assume_qualitative_labels,
+        use_validation_for_tendencies=script_args.use_validation_for_tendencies,
+        update_tendencies_every_n_steps=script_args.update_tendencies_every_n_steps,
         discordance_epsilon=suggested_epsilon,
         base_model_name_or_path=script_args.model_name,
         base_model_trust_remote_code=True,
@@ -240,8 +242,10 @@ def main_fun() -> None:
     trainer.evaluate()
     print("EVALUATED")
     trainer.train()
+    print("TRAINING FINISHED")
     trainer.evaluate()
     if script_args.do_save:
+
         save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
 
         mo_model = MORMForSequenceClassification.from_pretrained(save_location)

@@ -161,7 +161,7 @@ class MORewardTrainer(Trainer):
             loss_vs = losses[-1]
             loss_gr = losses[0:-1]
 
-            result['grounding_loss'] = to_float(loss_gr)
+            result['grounding_loss'] = loss_gr
             for i in range(len(loss_gr)):
                 result[f'grounding_loss_{i}'] = to_float(loss_gr[i])
             result['value_system_loss'] = to_float(loss_vs)
@@ -200,6 +200,7 @@ class MORewardTrainer(Trainer):
                     logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=epsilon)
                 per_epsilon_chr.append(cohr)
 
+            result["coherences"] = coherences
             for i, ch in enumerate(coherences):
                 result[f'coherence_{i}'] = float(ch)
                 for j, epsilon in enumerate(epsilon_list):
@@ -220,6 +221,8 @@ class MORewardTrainer(Trainer):
                 logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
 
             training_variables.record_metrics(result, metric_type='validation')
+            training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False), 
+                                                     vs_loss_detached=th.tensor(loss_vs, requires_grad=False), gr_loss_ideal_detached=None, loss_type="validation")
             
             return result
 
