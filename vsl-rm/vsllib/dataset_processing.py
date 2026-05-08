@@ -284,7 +284,7 @@ class PairwisePreferenceDataset():
             self.test_dataset = self.data.select(test_proportion_or_indices)
             self.eval_dataset = self.data.select(eval_proportion_or_indices)
             remaining_indices = [i for i in range(len(self.data)) if (i not in test_proportion_or_indices) and (i not in eval_proportion_or_indices)]
-            self.train_dataset = self.data.select(remaining_indices[0:1000])
+            self.train_dataset = self.data.select(remaining_indices)
             print(f"Train dataset size: {len(self.train_dataset)}")
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
