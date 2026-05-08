@@ -113,6 +113,8 @@ class ScriptArguments:
         },
     )
 
+    do_train: Optional[bool] = field(default=True)
+
     hidden_size: Optional[int] = field(
         default=1024, metadata={"help": "The hidden size of the grounding MLP."})
     num_hidden_layers: Optional[int] = field(default=0, metadata={

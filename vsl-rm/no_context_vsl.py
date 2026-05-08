@@ -144,116 +144,116 @@ def main_fun() -> None:
     num_values_to_use = len(dataset.value_keys)
     print("Dataset value keys: ", dataset.value_keys,
           "\n Total number of values: ", num_values_to_use)
+    if script_args.do_train:
+        if script_args.use_frozen_base_model:
+            reward_heads_module_name = REWARD_HEADS_OUTPUT.get(
+                script_args.model_name, None)
+            value_system_module_name = VALUE_SYSTEM_OUTPUT.get(
+                script_args.model_name, None)
+            reward_head_indices = REWARD_HEADS_INDICES.get(
+                script_args.model_name, {}).get(script_args.dataset, None)
 
-    if script_args.use_frozen_base_model:
-        reward_heads_module_name = REWARD_HEADS_OUTPUT.get(
-            script_args.model_name, None)
-        value_system_module_name = VALUE_SYSTEM_OUTPUT.get(
-            script_args.model_name, None)
-        reward_head_indices = REWARD_HEADS_INDICES.get(
-            script_args.model_name, {}).get(script_args.dataset, None)
+            if reward_head_indices is not None:
+                print(f"Using reward head indices: {reward_head_indices}")
+                assert num_values_to_use == len(
+                    reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
 
-        if reward_head_indices is not None:
-            print(f"Using reward head indices: {reward_head_indices}")
-            assert num_values_to_use == len(
-                reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
+        mo_config = MORMForSequenceClassificationConfig(
+            activate_discordance_epsilon_for_loss=script_args.activate_discordance_epsilon_for_loss,
+            check_undefined_label=HAS_UNDEFINED_LABELS[script_args.dataset],
+            pad_token_id=pad_token_id,
+            num_values=len(dataset.value_keys),
+            dtype=str(torch_dtype).replace("torch.", ""),
+            assume_qualitative_labels=script_args.assume_qualitative_labels,
+            use_validation_for_tendencies=script_args.use_validation_for_tendencies,
+            update_tendencies_every_n_steps=script_args.update_tendencies_every_n_steps,
+            discordance_epsilon=suggested_epsilon,
+            base_model_name_or_path=script_args.model_name,
+            base_model_trust_remote_code=True,
+            base_model_num_labels=1,
+            loss_func_type=script_args.loss_func_type,
+            loss_func_kwargs=script_args.loss_func_type_kwargs,
+            lambda_decay=script_args.lambda_decay,
+            hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, value_layer_dropout=script_args.value_layer_dropout,
+            value_layer_intermediate_activation=script_args.layer_activation,
+            value_layer_final_activation=script_args.final_layer_activation,
+            layer_normalization=script_args.layer_normalization,
+            grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio,
+            gradient_accumulation_steps=script_args.gradient_accumulation_steps,
+            use_metrics_or_losses_for_lagrange_updates=script_args.use_metrics_or_losses_for_lagrange_updates,
+            use_exponential_moving_average_or_optimum_targets=script_args.use_exponential_moving_average_or_optimum_targets,
+            grad_on_only_worst_value=script_args.grad_on_only_worst_value,
+            zero_constraint=script_args.zero_constraint,
+            use_ideal_grounding_model=script_args.use_ideal_grounding_model,
+            rew_center_coefficient=script_args.rew_center_coefficient,
+            base_model_reward_heads_module_name=reward_heads_module_name if script_args.use_frozen_base_model else None,
+            base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
+            base_model_reward_head_indices=reward_head_indices if script_args.use_frozen_base_model else None,
+            use_base_model_heads=script_args.use_frozen_base_model,
+            gather_train_metrics=script_args.gather_train_metrics,
+            lr_value_system=script_args.learning_rate,
+            lr_grounding=script_args.grounding_learning_rate,
+            lr_lambda=script_args.lagrange_learning_rate,
+        )
 
-    mo_config = MORMForSequenceClassificationConfig(
-        activate_discordance_epsilon_for_loss=script_args.activate_discordance_epsilon_for_loss,
-        check_undefined_label=HAS_UNDEFINED_LABELS[script_args.dataset],
-        pad_token_id=pad_token_id,
-        num_values=len(dataset.value_keys),
-        dtype=str(torch_dtype).replace("torch.", ""),
-        assume_qualitative_labels=script_args.assume_qualitative_labels,
-        use_validation_for_tendencies=script_args.use_validation_for_tendencies,
-        update_tendencies_every_n_steps=script_args.update_tendencies_every_n_steps,
-        discordance_epsilon=suggested_epsilon,
-        base_model_name_or_path=script_args.model_name,
-        base_model_trust_remote_code=True,
-        base_model_num_labels=1,
-        loss_func_type=script_args.loss_func_type,
-        loss_func_kwargs=script_args.loss_func_type_kwargs,
-        lambda_decay=script_args.lambda_decay,
-        hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, value_layer_dropout=script_args.value_layer_dropout,
-        value_layer_intermediate_activation=script_args.layer_activation,
-        value_layer_final_activation=script_args.final_layer_activation,
-        layer_normalization=script_args.layer_normalization,
-        grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio,
-        gradient_accumulation_steps=script_args.gradient_accumulation_steps,
-        use_metrics_or_losses_for_lagrange_updates=script_args.use_metrics_or_losses_for_lagrange_updates,
-        use_exponential_moving_average_or_optimum_targets=script_args.use_exponential_moving_average_or_optimum_targets,
-        grad_on_only_worst_value=script_args.grad_on_only_worst_value,
-        zero_constraint=script_args.zero_constraint,
-        use_ideal_grounding_model=script_args.use_ideal_grounding_model,
-        rew_center_coefficient=script_args.rew_center_coefficient,
-        base_model_reward_heads_module_name=reward_heads_module_name if script_args.use_frozen_base_model else None,
-        base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
-        base_model_reward_head_indices=reward_head_indices if script_args.use_frozen_base_model else None,
-        use_base_model_heads=script_args.use_frozen_base_model,
-        gather_train_metrics=script_args.gather_train_metrics,
-        lr_value_system=script_args.learning_rate,
-        lr_grounding=script_args.grounding_learning_rate,
-        lr_lambda=script_args.lagrange_learning_rate,
-    )
+        mo_model = MORMForSequenceClassification(
+            config=mo_config, base_model=model)
 
-    mo_model = MORMForSequenceClassification(
-        config=mo_config, base_model=model)
+        sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
+            training_args, mo_model)
 
-    sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
-        training_args, mo_model)
+        print("Sub optimizer class: ", sub_optimizer_cls,
+            " Sub optimizer kwargs: ", sub_optimizer_kwargs)
 
-    print("Sub optimizer class: ", sub_optimizer_cls,
-          " Sub optimizer kwargs: ", sub_optimizer_kwargs)
+        print("Script arguments: ")
 
-    print("Script arguments: ")
-
-    pprint(vars(script_args))
-    # exit(0)
-    trainer: Trainer = MORewardTrainer(
-        model=mo_model,
-        args=training_args,
-        train_dataset=dataset.train_dataset,  # TODO: RESET THIS!!
-        eval_dataset=dataset.eval_dataset,
-        compute_metrics=partial(MORewardTrainer.compute_metrics,
-                                config=mo_config, training_variables=mo_model.training_variables),
-        compute_loss_func=partial(
-            mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
-        optimizer_cls_and_kwargs=(ConstrainedOptimizer, {
-            'params_gr': list(mo_model.grounding_parameters()),
-            'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
-            'params_vs': list(mo_model.value_system_parameters()),
-            'n_values': mo_config.num_values,
-            'lr_value_system': mo_config.lr_value_system,
-            'lr_grounding': mo_config.lr_grounding,
-            'lr_lambda': mo_config.lr_lambda,
-            'loss_func_type': mo_config.loss_func_type,
-            'loss_func_type_kwargs': mo_config.loss_func_type_kwargs,
-            'sub_optimizer_class': sub_optimizer_cls,
-            'training_variables': mo_model.training_variables,
-            ** sub_optimizer_kwargs
-        }),
-        data_collator=dc,
-    )
-    # trainer.train()
-    print("Saving last checkpoint of the model")
-    print(mo_model.training_variables.lagrange_multipliers)
-    print("Starting trainer.train()", flush=True)
-    print("EVALUATING")
-
-    
-    trainer.evaluate()
-    print("EVALUATED")
-    trainer.train()
-    print("TRAINING FINISHED")
-    trainer.evaluate()
-    if script_args.do_save:
-
-        save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
-
-        mo_model = MORMForSequenceClassification.from_pretrained(save_location)
-    
-        print("TRAINED MODEL", mo_model)
+        pprint(vars(script_args))
+        # exit(0)
+        trainer: Trainer = MORewardTrainer(
+            model=mo_model,
+            args=training_args,
+            train_dataset=dataset.train_dataset,  # TODO: RESET THIS!!
+            eval_dataset=dataset.eval_dataset,
+            compute_metrics=partial(MORewardTrainer.compute_metrics,
+                                    config=mo_config, training_variables=mo_model.training_variables),
+            compute_loss_func=partial(
+                mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            optimizer_cls_and_kwargs=(ConstrainedOptimizer, {
+                'params_gr': list(mo_model.grounding_parameters()),
+                'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
+                'params_vs': list(mo_model.value_system_parameters()),
+                'n_values': mo_config.num_values,
+                'lr_value_system': mo_config.lr_value_system,
+                'lr_grounding': mo_config.lr_grounding,
+                'lr_lambda': mo_config.lr_lambda,
+                'loss_func_type': mo_config.loss_func_type,
+                'loss_func_type_kwargs': mo_config.loss_func_type_kwargs,
+                'sub_optimizer_class': sub_optimizer_cls,
+                'training_variables': mo_model.training_variables,
+                ** sub_optimizer_kwargs
+            }),
+            data_collator=dc,
+        )
+        # trainer.train()
+        print("Saving last checkpoint of the model")
         print(mo_model.training_variables.lagrange_multipliers)
+        print("Starting trainer.train()", flush=True)
+        print("EVALUATING")
+
+        
+        trainer.evaluate()
+        print("EVALUATED")
+        trainer.train()
+        print("TRAINING FINISHED")
+        trainer.evaluate()
+        if script_args.do_save:
+
+            save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
+
+            mo_model = MORMForSequenceClassification.from_pretrained(save_location)
+        
+            print("TRAINED MODEL", mo_model)
+            print(mo_model.training_variables.lagrange_multipliers)
 
 
 if __name__ == "__main__":
