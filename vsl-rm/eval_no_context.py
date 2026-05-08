@@ -249,6 +249,7 @@ def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "te
     path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = sorted(metrics.keys())
+    print(f"Writing metrics", metrics)
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
