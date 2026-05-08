@@ -340,7 +340,6 @@ class MORewardTrainer(Trainer):
 
         loss_combined = constrained_optim.custom_backward(
             loss_gr, loss_gr_ideal, loss_vs)
-        print("LOSS COMBINED: ", loss_combined)
         
         return loss_combined
 
@@ -545,8 +544,6 @@ class MORewardTrainer(Trainer):
                     batch_size = observed_batch_size
 
             # Prediction step
-            print("MODEL DTYPE", model.value_system_layer.weight.dtype)
-            print("INPUTS DTYPE", inputs[next(iter(inputs))].dtype)
             losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
                 model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             main_input_name = getattr(

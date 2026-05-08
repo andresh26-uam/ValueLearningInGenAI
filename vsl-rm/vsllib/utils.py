@@ -119,26 +119,23 @@ class ScriptArguments:
                                              "help": "The number of hidden layers in the grounding MLP. If 0, there will be no hidden layers and the value head will be a simple linear layer from the prompt-respose final embedding into the number of values."})
     value_layer_dropout: Optional[float] = field(default=0.0)
     layer_activation: Optional[str] = field(default="ReLU", metadata={
-                                            # TODO "ReLU" see
                                             "help": f"The activation function to use for the hidden layers. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"})
     final_layer_activation: Optional[str] = field(default="none", metadata={
-                                                  # TODO "ReLU" or "GELU" or "none"
                                                   "help": f"The activation function to use for the final layer. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"})
 
     per_device_train_batch_size: Optional[int] = field(default=128)
     per_device_eval_batch_size: Optional[int] = field(default=128)
-    gradient_accumulation_steps: Optional[int] = field(default=5)  # TODO 32?
+    gradient_accumulation_steps: Optional[int] = field(default=5)  
     
     lambda_decay: Optional[float] = field(default=0.0005)
     rew_center_coefficient: Optional[float] = field(default=0.01)
     layer_normalization: Optional[str] = field(default="LayerNorm")
-    max_grad_norm: Optional[float] = field(default=0.01)  # TODO 0.01?
+    max_grad_norm: Optional[float] = field(default=0.01)  
 
     learning_rate: Optional[float] = field(default=0.0001)
     grounding_learning_rate: Optional[float] = field(
-        default=0.0001)  # TODO must be > 1e-4 to make any effect??
-    lagrange_learning_rate: Optional[float] = field(default=0.1)  # TODO 0.01
-
+        default=0.0001) 
+    lagrange_learning_rate: Optional[float] = field(default=0.1)  
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.01)
     use_exponential_moving_average_or_optimum_targets: Optional[str] = field(
         default="average")

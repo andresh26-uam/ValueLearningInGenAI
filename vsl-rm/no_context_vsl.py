@@ -82,12 +82,11 @@ training_args = TrainingArguments(
     optim_args={},
     optim=script_args.optim,
     lr_scheduler_type=script_args.lr_scheduler_type,
-    warmup_steps=0,  # TODO. 50?
+    warmup_steps=0,  
     label_names=["labels"],
     report_to="wandb",
-    max_grad_norm=script_args.max_grad_norm,  # TODO 0.01?
+    max_grad_norm=script_args.max_grad_norm,  
     run_name=script_args.run_name,
-    # report_to=None, # 'wandb'
     use_cpu=script_args.use_cpu,
 )
 
@@ -240,6 +239,8 @@ def main_fun() -> None:
     print(mo_model.training_variables.lagrange_multipliers)
     print("Starting trainer.train()", flush=True)
     print("EVALUATING")
+
+    
     trainer.evaluate()
     print("EVALUATED")
     trainer.train()

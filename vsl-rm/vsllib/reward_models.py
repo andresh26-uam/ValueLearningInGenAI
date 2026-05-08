@@ -928,15 +928,26 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:
         # Override parameters to only return reward head and value system parameters for optimization.
-        if self.use_base_model_heads and (MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS):
+        loss_func_enum = MOLossFunctions(self.config.loss_func_type)
+        
+        # Condition 1: Base model heads
+        if self.use_base_model_heads and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS):
             yield from self.full_model.parameters(recurse=recurse)
 
-        if self.reward_heads is not None and (MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+        # Condition 2: Reward heads
+        if self.reward_heads is not None and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+            
             yield from self.reward_heads.parameters(recurse=recurse)
-        if self.value_system_layer is not None and (MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
+            
+        # Condition 3: Value system layer
+        if self.value_system_layer is not None and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
+            
             yield from self.value_system_layer.parameters(recurse=recurse)
         # yield from self.training_variables.parameters(recurse=recurse)
-        if self.use_ideal_grounding_model and (MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+        
+        # Condition 4: Ideal grounding model
+        if self.use_ideal_grounding_model and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+            
             yield from self.reward_heads_ideal.parameters(recurse=recurse)
 
     def _select_reward_indices(self, rewards: th.Tensor) -> th.Tensor:
@@ -1074,8 +1085,6 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         super().__init__(config)
-
-        from pprint import pprint
         
         if base_model is None:
             base_model = self._build_base_model_from_config(config)
@@ -1206,7 +1215,6 @@ class MORMForSequenceClassification(PreTrainedModel):
 
         if self.value_system_layer is not None:
             if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
-                print("REWARDS DTYPE", rewards.dtype)
                 vs_reward = self.value_system_layer.forward(rewards)
             else:
                 raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")

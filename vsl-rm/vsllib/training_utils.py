@@ -512,7 +512,6 @@ class MORMTrainingVariables(th.nn.Module):
                 assert len(hvs) > 0, "Expected 'value_system_loss' key in historic_eval_metrics when grounding is used"
                 cached_coherences = [th.as_tensor(h).requires_grad_(False) for h in hgr[-min(1, len(hgr)):]]
             if len(hgrideal) > 0:
-                print("HISTORIC GROUNDING IDEAL LOSSES: ", hgrideal)
                 cached_coherences_ideal = [th.as_tensor(h).requires_grad_(False) for h in hgrideal[-min(1, len(hgrideal)):]]
             else:
                 cached_coherences_ideal = []
@@ -542,7 +541,7 @@ class MORMTrainingVariables(th.nn.Module):
             else:
                 tendency_coherences = self.last_accumulated_coherences
                 tendency_representativeness = self.last_accumulated_representativeness
-                tendency_coherences_ideal = self.last_accumulated_coherences_ideal
+                tendency_coherences_ideal = self.last_accumulated_coherences_ideal if self.last_accumulated_coherences_ideal is not None else self.last_accumulated_coherences
 
             coherence_target = th.maximum(tendency_coherences, tendency_coherences_ideal).detach()
             if self.maximum_coherences_tendency is None:
@@ -572,7 +571,6 @@ class MORMTrainingVariables(th.nn.Module):
                 assert len(hvs) > 0, "Expected 'value_system_loss' key in historic_eval_metrics when grounding is used"
                 cached_groundings = [th.as_tensor(h).requires_grad_(False) for h in hgr[-min(1, len(hgr)):]]
             if len(hgrideal) > 0:
-                print("HISTORIC GROUNDING IDEAL LOSSES: ", hgrideal)
                 cached_groundings_ideal = [th.as_tensor(h).requires_grad_(False) for h in hgrideal[-min(1, len(hgrideal)):]]
             else:
                 cached_groundings_ideal = []
@@ -594,7 +592,7 @@ class MORMTrainingVariables(th.nn.Module):
                 tendency_vs_loss = th.stack(cached_vs_losses).mean().detach()
             else:
                 tendency_gr_loss = self.last_accumulated_grounding_loss.clone()
-                tendency_gr_loss_ideal = self.last_accumulated_grounding_loss_ideal.clone()
+                tendency_gr_loss_ideal = self.last_accumulated_grounding_loss_ideal.clone() if self.last_accumulated_grounding_loss_ideal is not None else self.last_accumulated_grounding_loss.clone()
                 tendency_vs_loss = self.last_accumulated_vs_loss.clone()
 
             grounding_loss = th.minimum(tendency_gr_loss, tendency_gr_loss_ideal).detach()
