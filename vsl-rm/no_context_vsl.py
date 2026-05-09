@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 import sys
 from pprint import pprint
+from accelerate import PartialState
+import accelerate
 from dotenv import load_dotenv
 from transformers import Trainer
 # import evaluate
@@ -39,111 +41,60 @@ from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, REWARD_HEADS_INDIC
 
 load_dotenv()
 
-# W&B init can be slow on sweep/CPU runs; use safer defaults.
-os.environ.setdefault("WANDB_INIT_TIMEOUT", "600")
-os.environ.setdefault("WANDB__SERVICE_WAIT", "600")
-
-parser = HfArgumentParser(ScriptArguments)  # type: ignore
-script_args = parser.parse_args_into_dataclasses()[0]
-script_args, preset = argument_parser(script_args)
-seed_everything(int(script_args.seed))
-
-tokenizer = obtain_tokenizer(script_args, preset)
-
-dataset_path = PROCESSED_DATASET_PATHS[script_args.dataset]
-extra_keep_keys = EXTRA_KEYS[script_args.dataset]
-test_proportion_or_indices = get_test_indices(script_args.dataset)
-eval_proportion_or_indices = get_validation_indices(script_args.dataset)
-
-output_dir = os.path.join(script_args.output_path, script_args.run_name)
-
-training_args = TrainingArguments(
-    output_dir=output_dir,
-    seed=int(script_args.seed),
-    data_seed=int(script_args.seed),
-    learning_rate=script_args.learning_rate,
-    per_device_train_batch_size=script_args.per_device_train_batch_size,
-    per_device_eval_batch_size=script_args.per_device_eval_batch_size,
-    num_train_epochs=script_args.num_train_epochs,
-    weight_decay=script_args.weight_decay,
-    eval_strategy="steps",
-    eval_steps=script_args.eval_every_steps,
-    save_strategy="steps" if script_args.do_checkpointing else "no",
-    save_steps=script_args.save_every_steps,
-    gradient_accumulation_steps=script_args.gradient_accumulation_steps,
-    gradient_checkpointing=script_args.gradient_checkpointing,
-    deepspeed=script_args.deepspeed,
-    local_rank=script_args.local_rank,
-    remove_unused_columns=False,
-    bf16=script_args.bf16,
+def main_fun(script_args, training_args, tokenizer) -> None:
     
-    logging_strategy="steps",
-    logging_steps=1,
-    optim_args={},
-    optim=script_args.optim,
-    lr_scheduler_type=script_args.lr_scheduler_type,
-    warmup_steps=0,  
-    label_names=["labels"],
-    report_to="wandb",
-    max_grad_norm=script_args.max_grad_norm,  
-    run_name=script_args.run_name,
-    use_cpu=script_args.use_cpu,
-)
+    with accelerate_state.main_process_first():
+        torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
 
+        model_kwargs = dict(dtype=torch_dtype, trust_remote_code=True)
+        if preset.get("use_flash_attention_2", False):
+            model_kwargs["use_flash_attention_2"] = True
 
-def main_fun() -> None:
-    torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
+        model_full = AutoModelForSequenceClassification.from_pretrained(
+            script_args.model_name, **model_kwargs)
+        base_model = model_full.base_model if hasattr(
+            model_full, 'base_model') else model_full
 
-    model_kwargs = dict(dtype=torch_dtype, trust_remote_code=True)
-    if preset.get("use_flash_attention_2", False):
-        model_kwargs["use_flash_attention_2"] = True
+        if script_args.use_frozen_base_model:
+            # For models like ArmoRM that have built-in multiple reward structure
+            model = model_full
+        else:
+            model = base_model
 
-    model_full = AutoModelForSequenceClassification.from_pretrained(
-        script_args.model_name, **model_kwargs)
-    base_model = model_full.base_model if hasattr(
-        model_full, 'base_model') else model_full
+        for mod in [model, base_model]:
+            maybe_assign_pad_token(mod, script_args, tokenizer, preset)
 
-    if script_args.use_frozen_base_model:
-        # For models like ArmoRM that have built-in multiple reward structure
-        model = model_full
-    else:
-        model = base_model
+        pad_token_id = model.config.pad_token_id
+        dc = MORewardDataCollatorWithPadding(
+            tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_embeddings)  # type: ignore
 
-    for mod in [model, base_model]:
-        maybe_assign_pad_token(mod, script_args, tokenizer, preset)
-
-    pad_token_id = model.config.pad_token_id
-
-    dc = MORewardDataCollatorWithPadding(
-        tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_embeddings)  # type: ignore
-
-    dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
-                                        from_disk=True,
-                                        extra_keep_keys=extra_keep_keys,
-                                        retokenize=script_args.retokenize,
-                                        recalculate_embeddings=script_args.recalculate_embeddings,
-                                        use_embeddings=script_args.use_embeddings,
-                                        model_reference=base_model,
-                                        collator=dc,
-                                        split_seed=int(42),
-                                        eval_proportion_or_indices=eval_proportion_or_indices,
-                                        test_proportion_or_indices=test_proportion_or_indices,
-                                        cleanup_cache_files=bool(
-                                            script_args.cleanup_dataset_cache_files),
-                                        )
+        dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
+                                            from_disk=True,
+                                            extra_keep_keys=extra_keep_keys,
+                                            retokenize=script_args.retokenize,
+                                            recalculate_embeddings=script_args.recalculate_embeddings,
+                                            use_embeddings=script_args.use_embeddings,
+                                            model_reference=base_model,
+                                            collator=dc,
+                                            split_seed=int(42),
+                                            eval_proportion_or_indices=eval_proportion_or_indices,
+                                            test_proportion_or_indices=test_proportion_or_indices,
+                                            cleanup_cache_files=bool(
+                                                script_args.cleanup_dataset_cache_files),
+                                            )
     
-    if script_args.discordance_epsilon is None:
-        suggested_epsilon =dataset.calculate_suggested_epsilon()
-    else:
-        suggested_epsilon = script_args.discordance_epsilon
-    suggested_epsilon = max(suggested_epsilon, MIN_EPSILON)  # Avoid too small epsilon
-    print("Suggested discordance_epsilon based on eval dataset: ", suggested_epsilon)
-    
-    print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(
-        dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
-    num_values_to_use = len(dataset.value_keys)
-    print("Dataset value keys: ", dataset.value_keys,
-          "\n Total number of values: ", num_values_to_use)
+        if script_args.discordance_epsilon is None:
+            suggested_epsilon =dataset.calculate_suggested_epsilon()
+        else:
+            suggested_epsilon = script_args.discordance_epsilon
+        suggested_epsilon = max(suggested_epsilon, MIN_EPSILON)  # Avoid too small epsilon
+        print("Suggested discordance_epsilon based on eval dataset: ", suggested_epsilon)
+        
+        print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(
+            dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
+        num_values_to_use = len(dataset.value_keys)
+        print("Dataset value keys: ", dataset.value_keys,
+            "\n Total number of values: ", num_values_to_use)
     if script_args.do_train:
         if script_args.use_frozen_base_model:
             reward_heads_module_name = REWARD_HEADS_OUTPUT.get(
@@ -246,16 +197,94 @@ def main_fun() -> None:
         trainer.train()
         print("TRAINING FINISHED")
         trainer.evaluate()
-        if script_args.do_save:
-
-            save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
-
-            mo_model = MORMForSequenceClassification.from_pretrained(save_location)
-        
-            print("TRAINED MODEL", mo_model)
-            print(mo_model.training_variables.lagrange_multipliers)
+        return trainer
 
 
 if __name__ == "__main__":
+    accelerate_state = PartialState()
+    using_accelerate = accelerate_state.num_processes > 1
+    is_main_accelerate_process = accelerate_state.is_main_process if using_accelerate else True
 
-    main_fun()
+    # Configure W&B only on the main process under Accelerate.
+    if is_main_accelerate_process:
+        os.environ.setdefault("WANDB_INIT_TIMEOUT", "600")
+        os.environ.setdefault("WANDB__SERVICE_WAIT", "600")
+
+    # Parse/configure once on the main process, then broadcast to workers.
+    if using_accelerate and torch.distributed.is_available() and torch.distributed.is_initialized():
+        shared_config = [None]
+        if is_main_accelerate_process:
+            parser = HfArgumentParser(ScriptArguments)  # type: ignore
+            main_script_args = parser.parse_args_into_dataclasses()[0]
+            main_script_args, main_preset = argument_parser(main_script_args)
+            shared_config[0] = (vars(main_script_args), main_preset)
+        torch.distributed.broadcast_object_list(shared_config, src=0)
+        script_args_dict, preset = shared_config[0]
+        script_args = ScriptArguments(**script_args_dict)
+    else:
+        parser = HfArgumentParser(ScriptArguments)  # type: ignore
+        script_args = parser.parse_args_into_dataclasses()[0]
+        script_args, preset = argument_parser(script_args)
+
+    accelerate_state.on_main_process()
+    seed_everything(int(script_args.seed))
+
+    tokenizer = obtain_tokenizer(script_args, preset)
+
+    dataset_path = PROCESSED_DATASET_PATHS[script_args.dataset]
+    extra_keep_keys = EXTRA_KEYS[script_args.dataset]
+    test_proportion_or_indices = get_test_indices(script_args.dataset)
+    eval_proportion_or_indices = get_validation_indices(script_args.dataset)
+
+    output_dir = os.path.join(script_args.output_path, script_args.run_name)
+
+    training_args = TrainingArguments(
+        output_dir=output_dir,
+        seed=int(script_args.seed),
+        data_seed=int(script_args.seed),
+        learning_rate=script_args.learning_rate,
+        per_device_train_batch_size=script_args.per_device_train_batch_size,
+        per_device_eval_batch_size=script_args.per_device_eval_batch_size,
+        num_train_epochs=script_args.num_train_epochs,
+        weight_decay=script_args.weight_decay,
+        eval_strategy="steps",
+        eval_steps=script_args.eval_every_steps,
+        save_strategy="steps" if script_args.do_checkpointing else "no",
+        save_steps=script_args.save_every_steps,
+        gradient_accumulation_steps=script_args.gradient_accumulation_steps,
+        gradient_checkpointing=script_args.gradient_checkpointing,
+        deepspeed=script_args.deepspeed,
+        local_rank=script_args.local_rank,
+        remove_unused_columns=False,
+        bf16=script_args.bf16,
+        logging_strategy="steps",
+        logging_steps=1,
+        optim_args={},
+        optim=script_args.optim,
+        lr_scheduler_type=script_args.lr_scheduler_type,
+        warmup_steps=0,
+        label_names=["labels"],
+        report_to="wandb" if is_main_accelerate_process else "none",
+        max_grad_norm=script_args.max_grad_norm,
+        run_name=script_args.run_name,
+        use_cpu=script_args.use_cpu,
+    )
+
+    trainer: MORewardTrainer = main_fun(script_args, training_args, tokenizer)
+
+    @accelerate_state.on_main_process
+    def saving():
+        if script_args.do_save:
+
+                save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
+
+                mo_model = MORMForSequenceClassification.from_pretrained(save_location)
+            
+                print("TRAINED MODEL", mo_model)
+                print(mo_model.training_variables.lagrange_multipliers)
+
+    if using_accelerate:
+        trainer.accelerator.on_main_process(saving)
+    else:
+        saving()
+        

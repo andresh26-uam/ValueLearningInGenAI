@@ -704,6 +704,7 @@ class MORewardTrainer(Trainer):
 
     def save_with_seed(self, checkpoint_name: str = "last_checkpoint"):
         checkpoint_dir = os.path.join(self.args.output_dir, checkpoint_name)
+        os.makedirs(checkpoint_dir, exist_ok=True)
         self.save_state()  # saved in the self.args.output_dir.
         #  save inside the checkpoint_name directory inside the output_dir.
         self.save_model(checkpoint_dir)

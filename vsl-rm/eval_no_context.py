@@ -197,7 +197,7 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
         print(f"Checkpoint path does not exist: {candidate_path}")
         prompted_path = _prompt_for_checkpoint_path(
             output_path,
-            allow_finish=False, 
+            allow_finish=len(resolved_checkpoint_paths) > 0,
         )
         if prompted_path is not None:
             resolved_checkpoint_paths.append(prompted_path)
@@ -208,6 +208,9 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
             allow_finish=len(resolved_checkpoint_paths) > 0,
         )
         if prompted_path is None:
+            if len(resolved_checkpoint_paths) == 0:
+                print(f"There are no valid checkpoint paths available for model type: {script_args.model_name}. Revise the folders in {output_path}")
+                exit(0)
             assert len(resolved_checkpoint_paths) > 0, "At least one valid checkpoint path must be provided."
             break
         else:
