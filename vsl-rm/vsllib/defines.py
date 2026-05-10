@@ -47,7 +47,7 @@ HAS_UNDEFINED_LABELS = {
 }
 HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
-    SupportedDatasets.ULTRAFEEDBACK: 0.05,
+    SupportedDatasets.ULTRAFEEDBACK: 0.02,
 }
 
 HAS_CUSTOM_TEST_SETS = {

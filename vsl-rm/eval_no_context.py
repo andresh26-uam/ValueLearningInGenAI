@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from typing import Any, Dict, List, Optional
 from enum import Enum
-
+import json
 import numpy as np
 import torch
 from transformers import (
@@ -48,7 +48,7 @@ from vsllib.reward_models import (
     MORMForSequenceClassificationConfig,
     mo_compute_loss_func,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, obtain_tokenizer, seed_everything
+from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -110,7 +110,8 @@ def _resolve_nested_checkpoint_path(start_path: Path, *, allow_finish: bool) -> 
         if allow_finish:
             prompt += " or OK to finish"
         prompt += ": "
-        index_ = input(prompt).strip()
+        print(prompt)
+        index_ = input().strip()
         if allow_finish and index_.upper() == "OK":
             return None
 
@@ -118,6 +119,7 @@ def _resolve_nested_checkpoint_path(start_path: Path, *, allow_finish: bool) -> 
             current_path = current_path / subdirs[int(index_)]
         except (ValueError, IndexError):
             print(f"Invalid index entered: {index_}")
+        print("trying...")
 
 
 def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool) -> Optional[Path]:
@@ -135,7 +137,8 @@ def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool) -> Opt
         if allow_finish:
             prompt += " or OK to finish"
         prompt += ": "
-        index_ = input(prompt).strip()
+        print(prompt)
+        index_ = input().strip()
         if allow_finish and index_.upper() == "OK":
             return None
 
@@ -151,7 +154,7 @@ def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool) -> Opt
         )
         if resolved_checkpoint_path is not None:
             return resolved_checkpoint_path
-
+        print("trying... 2")
 
 def _build_eval_arguments(script_args: EvalArguments, checkpoint_path: Path, results_dir: Path) -> EvalArguments:
     arg_values = vars(script_args).copy()
@@ -215,7 +218,8 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
             break
         else:
             resolved_checkpoint_paths.append(prompted_path)
-
+        print("trying... 3")
+    print("RESOLVED.")
     results_root = Path(script_args.results_dir) if script_args.results_dir is not None and os.path.exists(script_args.results_dir) else Path(RESULTS_DIR)
 
     eval_script_args_all: List[EvalArguments] = []
@@ -227,36 +231,34 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
 
 
 
-def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
-    flat: Dict[str, Any] = {}
-    for key, value in metrics.items():
-        if isinstance(value, (list, tuple, np.ndarray)):
-            for i, entry in enumerate(value):
-                flat[f"{key}_{i}"] = float(entry)
-        elif isinstance(value, Enum):
-            flat[key] = value.value
-        elif isinstance(value, (np.floating, np.integer)):
-            flat[key] = value.item()
-        elif isinstance(value, torch.Tensor):
-            flat[key] = float(value.detach().cpu().item()) if value.numel() == 1 else float(value.detach().cpu().mean().item())
-        elif isinstance(value, (float, int, str, bool)):
-            flat[key] = value
-        else:
-            flat[key] = str(value)
-    return flat
+
+def load_training_args_from_checkpoint(checkpoint_path: str, default_batch_size: int = 8) -> tuple[int, int]:
+    """
+    Try to load per_device_train_batch_size from checkpoint's training_args.
+    Supports both training_args.json and training_args.bin formats.
+    Falls back to default if file doesn't exist or is missing the key.
+    Returns (per_device_train_batch_size, per_device_eval_batch_size)
+    """
+    checkpoint_dir = Path(checkpoint_path)
+    
+
+    
+    # Try BIN format with torch.load (transformers uses torch.save for .bin files)
+    training_args_bin = checkpoint_dir / "training_args.bin"
+    if training_args_bin.exists():
+        try:
+            training_args_obj = torch.load(training_args_bin, weights_only=False)
+            batch_size = getattr(training_args_obj, "per_device_train_batch_size", default_batch_size)
+            eval_batch_size = getattr(training_args_obj, "per_device_eval_batch_size", batch_size)
+            print(f"Loaded training batch size from checkpoint (BIN): {batch_size}")
+            return batch_size, eval_batch_size
+        except Exception as e:
+            print(f"Warning: Failed to load training_args.bin: {e}")
+    
+    print(f"Using default batch size: {default_batch_size}")
+    return default_batch_size, default_batch_size
 
 
-
-def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "test_metrics.csv") -> None:
-    path = Path(output_path).joinpath(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    fieldnames = sorted(metrics.keys())
-    print(f"Writing metrics", metrics)
-    with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerow(metrics)
 
 
 
@@ -264,17 +266,44 @@ def main() -> None:
     script_args_all, preset = parse_eval_args()
     script_args_all: List[EvalArguments]
     
-
+    print("EVAL ARGUMENTS PARSED")
     for script_args in script_args_all:
+        with open(os.path.join(str(script_args.checkpoint_path), "seed_info.json"), "r", encoding="utf-8") as fp:
+            seed_info = json.load(fp)
+        script_args.seed = seed_info.get("seed", script_args.seed)
+        script_args.data_seed = seed_info.get("dataseed", script_args.data_seed)
         seed_everything(int(script_args.seed))
+        
         #torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
         #print("TORCH DTYPE:", torch_dtype )
-        
+        print("LOADING TOKENIZER...")
         tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
-        
+        print("LOADED TOKENIZER")
+        print(f"LOADING MODEL... ({script_args.checkpoint_path})")
+        import subprocess
+
+        def du(path):
+            """disk usage in human readable format (e.g. '2,1GB')"""
+            return subprocess.check_output(['du','-sh', path]).split()[0].decode('utf-8')
+        checkpoint_size = du(script_args.checkpoint_path)
+        print(f"Checkpoint size: {checkpoint_size}")
+
         model = MORMForSequenceClassification.from_pretrained(
             str(script_args.checkpoint_path),
         )
+        # Read seed info:
+        """seed_info = {
+            "seed": self.args.seed,
+            "dataseed": self.args.data_seed,
+            "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
+            "torch_initial_seed": int(th.initial_seed()),
+        }
+        with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
+            json.dump(seed_info, fp, indent=2, sort_keys=True)"""
+        
+
+
+        
         torch_dtype = model.config.dtype
         print("VS", model.value_system_layer.get_weights())
         print("MODEL DETAILS:", model, "MODEL DTYPE:", model.dtype, "MODEL CONFIG DTYPE:", torch_dtype)
@@ -324,11 +353,15 @@ def main() -> None:
             use_embeddings=bool(script_args.use_embeddings),
             model_reference=embed_model,
             collator=dc,
-            split_seed=int(script_args.seed),
+            split_seed=int(script_args.data_seed),
             eval_proportion_or_indices=eval_proportion_or_indices,
             test_proportion_or_indices=test_proportion_or_indices,
             cleanup_cache_files=False,
         )
+        if model.num_values != len(dataset.value_keys):
+            raise ValueError(
+                f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
+            )
 
         model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
         reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
@@ -344,20 +377,26 @@ def main() -> None:
                     )
 
         # Read-only eval args; MORewardTrainer still needs TrainingArguments.
+        per_device_train_batch_size, per_device_eval_batch_size = load_training_args_from_checkpoint(
+            str(script_args.checkpoint_path)
+        )
+        
         eval_args = TrainingArguments(
             output_dir=str(script_args.results_dir),
             seed=int(script_args.seed),
-            data_seed=int(script_args.seed),
-            per_device_eval_batch_size=len(dataset.test_dataset),
+            data_seed=int(script_args.data_seed),
+            per_device_eval_batch_size=per_device_eval_batch_size,
+            per_device_train_batch_size=per_device_train_batch_size,
             remove_unused_columns=False,
             bf16=bool(script_args.bf16),
+            logging_strategy="steps",
+            logging_steps=1,
             report_to="none",
             label_names=["labels"],
             use_cpu=bool(script_args.use_cpu),
             do_train=False,
             do_eval=True,
             save_strategy="no",
-            logging_strategy="no",
         )
 
         # Keep these in sync with model config if base-model reward heads are active.
@@ -381,7 +420,7 @@ def main() -> None:
             ),
             data_collator=dc,
         )
-
+        print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
         metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
         flat_metrics_test = flatten_metrics_for_csv(metrics_test)
         write_metrics_csv(flat_metrics_test, script_args.results_dir, name="test_metrics.csv")
@@ -389,7 +428,7 @@ def main() -> None:
         print("Test evaluation complete.")
         print(f"Checkpoint: {script_args.checkpoint_path}")
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
-
+        print("Starting eval evaluation...")
         metrics_eval = trainer.evaluate(eval_dataset=dataset.eval_dataset, metric_key_prefix="eval")
         flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
         write_metrics_csv(flat_metrics_eval, script_args.results_dir, name="eval_metrics.csv")
@@ -397,6 +436,9 @@ def main() -> None:
         print("Eval evaluation complete.")
         print(f"Checkpoint: {script_args.checkpoint_path}")
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
+
+        del trainer, dataset, model, tokenizer
+        torch.cuda.empty_cache()
 
 
 if __name__ == "__main__":

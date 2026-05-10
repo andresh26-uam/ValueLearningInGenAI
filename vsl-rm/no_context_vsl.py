@@ -36,8 +36,8 @@ from vsllib.dataset_processing import PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, MORewardTrainer
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, mo_compute_loss_func
-from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
-
+from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 
 load_dotenv()
 
@@ -66,7 +66,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
 
         pad_token_id = model.config.pad_token_id
         dc = MORewardDataCollatorWithPadding(
-            tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_embeddings)  # type: ignore
+            tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_embeddings) 
 
         dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
                                             from_disk=True,
@@ -76,7 +76,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
                                             use_embeddings=script_args.use_embeddings,
                                             model_reference=base_model,
                                             collator=dc,
-                                            split_seed=int(42),
+                                            split_seed=int(training_args.data_seed),
                                             eval_proportion_or_indices=eval_proportion_or_indices,
                                             test_proportion_or_indices=test_proportion_or_indices,
                                             cleanup_cache_files=bool(
@@ -163,7 +163,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
         trainer: Trainer = MORewardTrainer(
             model=mo_model,
             args=training_args,
-            train_dataset=dataset.train_dataset,  # TODO: RESET THIS!!
+            train_dataset=dataset.train_dataset if not script_args.use_frozen_base_model else dataset.train_dataset.select(list(range(min(len(dataset.train_dataset), training_args.per_device_train_batch_size * mo_config.gradient_accumulation_steps*2)))),  # TODO: RESET THIS!!
             eval_dataset=dataset.eval_dataset,
             compute_metrics=partial(MORewardTrainer.compute_metrics,
                                     config=mo_config, training_variables=mo_model.training_variables),
@@ -189,14 +189,26 @@ def main_fun(script_args, training_args, tokenizer) -> None:
         print("Saving last checkpoint of the model")
         print(mo_model.training_variables.lagrange_multipliers)
         print("Starting trainer.train()", flush=True)
-        print("EVALUATING")
-
         
-        trainer.evaluate()
+        print("EVALUATING")
+        if not script_args.use_frozen_base_model:
+            trainer.evaluate()
         print("EVALUATED")
         trainer.train()
         print("TRAINING FINISHED")
         trainer.evaluate()
+
+        if script_args.use_frozen_base_model:
+            print("Starting test evaluation...")
+            metrics_eval = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
+            flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
+            write_metrics_csv(flat_metrics_eval, os.path.join(RESULTS_DIR, script_args.model_name, script_args.run_name), name="test_metrics.csv")
+
+            print("Starting eval evaluation...")
+            metrics_eval = trainer.evaluate(eval_dataset=dataset.eval_dataset, metric_key_prefix="eval")
+            flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
+            write_metrics_csv(flat_metrics_eval, os.path.join(RESULTS_DIR, script_args.model_name, script_args.run_name), name="eval_metrics.csv")
+
         return trainer
 
 
@@ -214,7 +226,7 @@ if __name__ == "__main__":
     if using_accelerate and torch.distributed.is_available() and torch.distributed.is_initialized():
         shared_config = [None]
         if is_main_accelerate_process:
-            parser = HfArgumentParser(ScriptArguments)  # type: ignore
+            parser = HfArgumentParser(ScriptArguments) 
             main_script_args = parser.parse_args_into_dataclasses()[0]
             main_script_args, main_preset = argument_parser(main_script_args)
             shared_config[0] = (vars(main_script_args), main_preset)
@@ -222,7 +234,7 @@ if __name__ == "__main__":
         script_args_dict, preset = shared_config[0]
         script_args = ScriptArguments(**script_args_dict)
     else:
-        parser = HfArgumentParser(ScriptArguments)  # type: ignore
+        parser = HfArgumentParser(ScriptArguments) 
         script_args = parser.parse_args_into_dataclasses()[0]
         script_args, preset = argument_parser(script_args)
 
@@ -241,7 +253,7 @@ if __name__ == "__main__":
     training_args = TrainingArguments(
         output_dir=output_dir,
         seed=int(script_args.seed),
-        data_seed=int(script_args.seed),
+        data_seed=int(script_args.data_seed),
         learning_rate=script_args.learning_rate,
         per_device_train_batch_size=script_args.per_device_train_batch_size,
         per_device_eval_batch_size=script_args.per_device_eval_batch_size,
@@ -271,20 +283,18 @@ if __name__ == "__main__":
     )
 
     trainer: MORewardTrainer = main_fun(script_args, training_args, tokenizer)
-
+    
     @accelerate_state.on_main_process
     def saving():
+        
         if script_args.do_save:
 
                 save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
 
                 mo_model = MORMForSequenceClassification.from_pretrained(save_location)
-            
+                
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)
 
-    if using_accelerate:
-        trainer.accelerator.on_main_process(saving)
-    else:
-        saving()
+    saving()
         

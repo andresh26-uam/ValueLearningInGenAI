@@ -1085,15 +1085,14 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
         super().__init__(config)
-        
+        print(f"Initializing MORMForSequenceClassification")
         if base_model is None:
             base_model = self._build_base_model_from_config(config)
-
+        print(f"Base model loaded: {base_model.__class__.__name__}")
         self.full_model = base_model
         self.supports_gradient_checkpointing = hasattr(
             self.full_model, "gradient_checkpointing_enable")
         model_device = self._module_device(self.full_model)
-        model_dtype = self._module_dtype(self.full_model)
         self.num_values = config.num_values
         self.use_ideal_grounding_model = config.use_ideal_grounding_model
         self.use_base_model_heads = config.use_base_model_heads
@@ -1265,9 +1264,9 @@ class MORMForSequenceClassification(PreTrainedModel):
 
             return SequenceClassifierOutputWithPast(
                 logits=pooled_logits,
-                past_key_values=getattr(base_output, "past_key_values", None),
-                hidden_states=getattr(base_output, "hidden_states", None),
-                attentions=getattr(base_output, "attentions", None),
+                #past_key_values=getattr(base_output, "past_key_values", None),
+                #hidden_states=getattr(base_output, "hidden_states", None),
+                #attentions=getattr(base_output, "attentions", None),
             )
 
         if 'embedding' in kwargs:

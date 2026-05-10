@@ -57,6 +57,8 @@ done
 
 MODEL_NAME="$(resolve_model_name "$MODEL_ALIAS")"
 
-exec srun --gpus=L40S:1 python vsl-rm/eval_no_context.py \
+echo "Evaluating model: $MODEL_NAME on dataset: $DATASET_ALIAS with extra args: ${EXTRA_ARGS[*]}"
+
+srun --pty --gpus=L40S:1 python vsl-rm/eval_no_context.py \
     --model_name="$MODEL_NAME" \
     --dataset="$DATASET_ALIAS" "${EXTRA_ARGS[@]}"

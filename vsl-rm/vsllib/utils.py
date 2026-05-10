@@ -1,5 +1,7 @@
+import csv
 from datetime import datetime
 from dataclasses import dataclass, field
+from enum import Enum
 import json
 import sys
 from typing import Any
@@ -7,6 +9,7 @@ from typing import Any
 import numpy as np
 import torch as th
 
+from pathlib import Path
 from typing import Any, Optional, Dict, Tuple
 import os
 import random
@@ -245,6 +248,11 @@ class ScriptArguments:
         metadata={
             "help": "Global seed for Python, NumPy, PyTorch, and Transformers."},
     )
+    data_seed: Optional[int] = field(
+        default=42,
+        metadata={
+            "help": "Data seed for splittig datasets. Do not change"},
+    )
 
     do_save: Optional[bool] = field(
         default=True,
@@ -350,3 +358,36 @@ def maybe_assign_pad_token(mod, script_args: ScriptArguments, tokenizer: AutoTok
     assert mod.config.pad_token_id is not None, "Tokenizer does not have a pad token, which is required for this script. To add a padtoken, see defines.py."
     if preset["tokenizer_add_pad_token"]:
         mod.resize_token_embeddings(len(tokenizer))
+
+
+
+
+
+def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    flat: Dict[str, Any] = {}
+    for key, value in metrics.items():
+        if isinstance(value, (list, tuple, np.ndarray)):
+            for i, entry in enumerate(value):
+                flat[f"{key}_{i}"] = float(entry)
+        elif isinstance(value, Enum):
+            flat[key] = value.value
+        elif isinstance(value, (np.floating, np.integer)):
+            flat[key] = value.item()
+        elif isinstance(value, th.Tensor):
+            flat[key] = float(value.detach().cpu().item()) if value.numel() == 1 else float(value.detach().cpu().mean().item())
+        elif isinstance(value, (float, int, str, bool)):
+            flat[key] = value
+        else:
+            flat[key] = str(value)
+    return flat
+
+def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "test_metrics.csv") -> None:
+    path = Path(output_path).joinpath(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = sorted(metrics.keys())
+    print(f"Writing metrics", metrics)
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(metrics)

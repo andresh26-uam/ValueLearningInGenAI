@@ -817,7 +817,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         elif self.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_EVER:
                 with th.no_grad():
                     loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=None, add_vs_loss=True, add_gr_loss=True)
-                loss += th.tensor(0.0, requires_grad=True) 
+                loss += 0.5*th.tensor(1.0, requires_grad=True) 
         else:
             if (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS):
                 loss_vs = loss_vs.detach() if loss_vs is not None else None
@@ -841,8 +841,7 @@ class ConstrainedOptimizer(VSLOptimizer):
                 else: 
                     self.training_variables.lagrange_multipliers.requires_grad_(False)
 
-        # Add dummy loss to allow backward to be called without error, even though no gradients will be computed.
-        loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=add_gr_loss)   
+            loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=add_gr_loss)   
         loss.backward(**kwargs)
         return loss
     def step(self, closure=None)->None:
