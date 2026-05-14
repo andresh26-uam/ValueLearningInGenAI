@@ -1,0 +1,80 @@
+\documentclass{article}
+
+\usepackage{booktabs}
+
+\usepackage{longtable}
+
+\usepackage{array}
+
+\usepackage{makecell}
+
+\usepackage{graphicx}
+
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+\title{Analyzed Results}
+
+\date{}
+
+\maketitle
+
+\section*{Summary}
+
+\begin{table}[p]
+\centering
+\small
+\caption{Average and standard deviation of each metric per group.}
+\label{tab:group-summary}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{lrrrrrrr}
+\toprule
+Group & \multicolumn{1}{c}{Prompt Follow.} & \multicolumn{1}{c}{Object.} & \multicolumn{1}{c}{Clarity} & \multicolumn{1}{c}{Inf. Rich.} & \multicolumn{1}{c}{Safety} & \multicolumn{1}{c}{Avg. Chr.} & \multicolumn{1}{c}{Represent.} \\
+\midrule
+Armo-RM & \makecell[r]{0.715 \\ $\pm$0.0000} & \makecell[r]{0.798 \\ $\pm$0.0000} & \makecell[r]{0.609 \\ $\pm$0.0000} & \makecell[r]{0.647 \\ $\pm$0.0000} & \makecell[r]{0.837 \\ $\pm$0.0000} & \makecell[r]{0.721 \\ $\pm$0.0000} & \makecell[r]{0.685 \\ $\pm$0.0000} \\
+BT-RM & \makecell[r]{0.718 \\ $\pm$0.0099} & \makecell[r]{0.725 \\ $\pm$0.0059} & \makecell[r]{0.690 \\ $\pm$0.0037} & \makecell[r]{0.712 \\ $\pm$0.0130} & \makecell[r]{0.724 \\ $\pm$0.0077} & \makecell[r]{0.714 \\ $\pm$0.0024} & \makecell[r]{0.740 \\ $\pm$0.0019} \\
+VSL-RM & \makecell[r]{0.759 \\ $\pm$0.0027} & \makecell[r]{0.822 \\ $\pm$0.0006} & \makecell[r]{0.700 \\ $\pm$0.0027} & \makecell[r]{0.801 \\ $\pm$0.0022} & \makecell[r]{0.915 \\ $\pm$0.0014} & \makecell[r]{0.800 \\ $\pm$0.0014} & \makecell[r]{0.672 \\ $\pm$0.0006} \\
+\bottomrule
+\end{tabular}%
+}
+\end{table}
+
+\section*{Pairwise statistical tests}
+
+\begin{longtable}{llllrrl}
+\caption{Pairwise one-tailed Welch t-tests with data-adaptive direction per metric: test $H_1: \mu_{A} > \mu_{B}$ when Group A's sample mean exceeds Group B's, otherwise test $H_1: \mu_{A} < \mu_{B}$.}\label{tab:pairwise-tests}\\
+\toprule
+Group A & Group B & Metric & Test & $t$ & One-tailed $p$-value & Sig. \\
+\midrule
+\endfirsthead
+\toprule
+Group A & Group B & Metric & Test & $t$ & One-tailed $p$-value & Sig. \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Armo-RM & BT-RM & Prompt Follow. & Welch t-test (A<B) & -0.71 & 0.2644 & ns \\
+Armo-RM & BT-RM & Object. & Welch t-test (A>B) & 24.56 & 0.0001 & *** \\
+Armo-RM & BT-RM & Clarity & Welch t-test (A<B) & -44.19 & 0.0000 & *** \\
+Armo-RM & BT-RM & Inf. Rich. & Welch t-test (A<B) & -9.98 & 0.0011 & ** \\
+Armo-RM & BT-RM & Safety & Welch t-test (A>B) & 29.12 & 0.0000 & *** \\
+Armo-RM & BT-RM & Avg. Chr. & Welch t-test (A>B) & 5.85 & 0.0050 & ** \\
+Armo-RM & BT-RM & Represent. & Welch t-test (A<B) & -57.85 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Prompt Follow. & Welch t-test (A<B) & -33.62 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Object. & Welch t-test (A<B) & -76.69 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Clarity & Welch t-test (A<B) & -68.95 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Inf. Rich. & Welch t-test (A<B) & -141.09 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Safety & Welch t-test (A<B) & -111.02 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Avg. Chr. & Welch t-test (A<B) & -108.97 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Represent. & Welch t-test (A>B) & 41.72 & 0.0000 & *** \\
+BT-RM & VSL-RM & Prompt Follow. & Welch t-test (A<B) & -8.13 & 0.0012 & ** \\
+BT-RM & VSL-RM & Object. & Welch t-test (A<B) & -32.50 & 0.0000 & *** \\
+BT-RM & VSL-RM & Clarity & Welch t-test (A<B) & -4.57 & 0.0024 & ** \\
+BT-RM & VSL-RM & Inf. Rich. & Welch t-test (A<B) & -13.53 & 0.0003 & *** \\
+BT-RM & VSL-RM & Safety & Welch t-test (A<B) & -48.65 & 0.0000 & *** \\
+BT-RM & VSL-RM & Avg. Chr. & Welch t-test (A<B) & -60.54 & 0.0000 & *** \\
+BT-RM & VSL-RM & Represent. & Welch t-test (A>B) & 68.05 & 0.0000 & *** \\
+\end{longtable}
+
+\end{document}

@@ -1208,7 +1208,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS:
             rewards = reward_heads(hidden_state)
         else:
-            raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
+            #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
             with th.no_grad():
                 rewards = reward_heads(hidden_state)
 
@@ -1216,7 +1216,7 @@ class MORMForSequenceClassification(PreTrainedModel):
             if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
                 vs_reward = self.value_system_layer.forward(rewards)
             else:
-                raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
+                #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
                 with th.no_grad():
                     vs_reward = self.value_system_layer.forward(rewards)
                 

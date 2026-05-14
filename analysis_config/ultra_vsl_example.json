@@ -1,0 +1,63 @@
+{
+  "groups": [
+    {
+        "name": "Armo-RM",
+        "folders": [
+          "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+          "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+          "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+          "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42"
+        ],
+        "metrics": {
+            "Avg. Chr.": "test_avg_coherence_e0.1",
+            "Represent.": "test_representativeness_e0.01",
+            "Helpfulness": "test_coherence_e0.1_0",
+            "Honesty": "test_coherence_e0.1_1",
+            "Truthfulness": "test_coherence_e0.1_2",
+            "Instruct. Follow.": "test_coherence_e0.1_3"
+        }
+      },
+      {
+        "name": "BT-RM",
+        "folders": [
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaRLHFBTRM_0510_121722_epo10_s43/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaRLHFBTRM_0510_121721_epo10_s42/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaRLHFBTRM_0510_121722_epo10_s44/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaRLHFBTRM_0510_121722_epo10_s45/last_checkpoint"
+        ],
+        "metrics": {
+            "Avg. Chr.": "test_avg_coherence_e0.25",
+            "Represent.": "test_representativeness_e0.25",
+            "Helpfulness": "test_coherence_e0.25_0",
+            "Honesty": "test_coherence_e0.25_1",
+            "Truthfulness": "test_coherence_e0.25_2",
+            "Instruct. Follow.": "test_coherence_e0.25_3"
+        }
+      },
+    {
+      "name": "VSL-RM",
+      "folders": [
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_{L40S:1}LlamaVSLRM_0509_161838_epo10_s42/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_{L40S:1}LlamaVSLRM_0509_161838_epo10_s43/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_{L40S:1}LlamaVSLRM_0509_161839_epo10_s44/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_{L40S:1}LlamaVSLRM_0509_161839_epo10_s45/last_checkpoint"
+      ],
+      "metrics": {
+        "AvgChr. ultrafeedback": "test_avg_coherence_e0.25",
+        "Representativeness": "test_representativeness_e0.25",
+        "Helpfulness": "test_coherence_e0.25_0",
+        "Honesty": "test_coherence_e0.25_1",
+        "Truthfulness": "test_coherence_e0.25_2",
+        "Instruct. Follow.": "test_coherence_e0.25_3"
+      }
+    }
+  ],
+  "metrics": {
+    "test_coherence_0": "Helpfulness",
+    "test_coherence_1": "Honesty",
+    "test_coherence_2": "Truthfulness",
+    "test_coherence_3": "Instruct. Follow.",
+    "test_avg_coherence": "Avg. Chr.",
+    "test_representativeness": "Represent."
+  }
+}

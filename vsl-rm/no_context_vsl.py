@@ -95,6 +95,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
         num_values_to_use = len(dataset.value_keys)
         print("Dataset value keys: ", dataset.value_keys,
             "\n Total number of values: ", num_values_to_use)
+    
     if script_args.do_train:
         if script_args.use_frozen_base_model:
             reward_heads_module_name = REWARD_HEADS_OUTPUT.get(

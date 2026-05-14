@@ -61,15 +61,26 @@ ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer
    'ultrafeedback-honesty','ultrafeedback-helpfulness','beavertails-is_safe',
    'prometheus-score','argilla-overall_quality','argilla-judge_lm','code-complexity',
    'code-style','code-explanation','code-instruction-following','code-readability']
+
+VALUES_PKU = ["promptfollowing", "objectivity", "clarity", "inforichness", "safety"]
+
 ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
-ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
+#ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
+ATTRIBUTES_ARMO_RM_INDEX_PKU = [6, 7, 2, 3, 10] # ultrainstruct -> promptfollowing
+"""We map the most related attributes from the ArmoRM dataset to approximate the PKU-Alignment values as follows:
+ultrafeedback-instruction_following -> promptfollowing
+ultrafeedback-truthfulness -> objectivity
+helpsteer-coherence -> clarity
+helpsteer-complexity -> inforichness
+beavertails-is_safe -> safety
+"""
 REWARD_HEADS_OUTPUT = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': 'rewards',
 }
 REWARD_HEADS_INDICES = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': {
         SupportedDatasets.ULTRAFEEDBACK: ATTRIBUTES_ARMO_RM_INDEX_ULTRA,
-        SupportedDatasets.PKUALIGNMENT: None,
+        SupportedDatasets.PKUALIGNMENT: ATTRIBUTES_ARMO_RM_INDEX_PKU,
     }
 }
 NUM_OBJECTIVES = {
@@ -152,6 +163,7 @@ class MOLossFunctions(enum.Enum):
     ONLY_VALUES_IN_KWARGS = "ONLY_VALUES_IN_KWARGS"
     EVALUATION_ONLY = "EVALUATION_ONLY"
     DEFAULT_BUT_STATIC_LAGRANGE = "DEFAULT_BUT_STATIC_LAGRANGE"
+    ONLY_GROUNDING_NO_LAGRANGE = "ONLY_GROUNDING_NO_LAGRANGE"
     
 
 class MOLossFunctionsCategories():
@@ -162,11 +174,11 @@ class MOLossFunctionsCategories():
                                            MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
     
     REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
-    REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES = [MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+    REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES = [MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
     REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES = REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES + REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES
     
     SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS = [MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
-    SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS = [MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_VALUES_IN_KWARGS, MOLossFunctions.ONLY_VALUE_SYSTEM,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+    SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS = [MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_VALUES_IN_KWARGS, MOLossFunctions.ONLY_VALUE_SYSTEM,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
     SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
     SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS = [MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUES_IN_KWARGS]
 

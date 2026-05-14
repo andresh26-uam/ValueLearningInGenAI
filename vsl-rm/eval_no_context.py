@@ -437,7 +437,9 @@ def main() -> None:
         print(f"Checkpoint: {script_args.checkpoint_path}")
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
 
-        del trainer, dataset, model, tokenizer
+        model = model.to(device="cpu")
+        embed_model = embed_model.to(device="cpu") if embed_model is not None else None
+        del trainer, dataset, model, tokenizer, dc, embed_model
         torch.cuda.empty_cache()
 
 

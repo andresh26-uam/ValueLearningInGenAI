@@ -1,7 +1,7 @@
 
 #!/bin/bash
 GPUS=L40S:1
-DATASET=ultra
+DATASET=pku
 
 if [[ "$DATASET" == "ultra" ]]; then
   DISCORDANCE_EPSILON=0.25
