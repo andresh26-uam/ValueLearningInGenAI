@@ -1130,7 +1130,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
         training_variables_dtype = th.float32
 
-        self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
+        self.training_variables = MORMTrainingVariables(n_values=config.num_values, 
                                                         device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
                                                         gradient_accumulation_steps=config.gradient_accumulation_steps,
                                                         update_tendencies_every_n_steps=config.update_tendencies_every_n_steps,

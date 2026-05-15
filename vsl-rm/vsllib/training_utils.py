@@ -194,7 +194,7 @@ class MORMTrainingVariables(th.nn.Module):
     def forward(self, grounding_losses: th.Tensor, vs_losses: th.Tensor, target_gr_loss: th.Tensor = None, selected_indices: list = None, add_vs_loss: bool = True, add_gr_loss: bool = True) -> th.Tensor:
         
         used_mults, vs_coeff = self.normalize_coefficients(selected_indices=selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=add_gr_loss)
-        #print("\nUSED MULTS: ", used_mults, vs_coeff, "\n")
+        print("\nUSED MULTS: ", used_mults, vs_coeff, "\n")
         
         
         if __debug__ and add_gr_loss:
@@ -256,29 +256,34 @@ class MORMTrainingVariables(th.nn.Module):
         else:
             vs_coeff = self.vs_coeff
 
-        m1, m2 = normalizing_params(used_mults, vs_coeff, dtype=self.lagrange_multipliers.dtype) # This is to ensure the multipliers are 1 on average (to make all model training similar scale regardless of how many active multipliers/losses are used)
+        #m1, m2 = normalizing_params(used_mults, vs_coeff, dtype=self.lagrange_multipliers.dtype) # This is to ensure the multipliers are 1 on average (to make all model training similar scale regardless of how many active multipliers/losses are used)
         
+
+        if vs_coeff is not None:
+            if len(vs_coeff.shape) == 1:
+                vs_coeff = vs_coeff.squeeze(0)
+        m1, m2 = used_mults, vs_coeff #!!!
         return m1, m2
 
     def get_multipliers(self, used_only=False) -> Tuple[th.Tensor, th.Tensor]:
         return self.normalize_coefficients(selected_indices=self._last_selected_indices if used_only else None)
-        #union_mults_s = th.nn.functional.softmax(union_mults, dim=0)
+         #union_mults_s = th.nn.functional.softmax(union_mults, dim=0)
             
-    def __init__(self, n_values: int, initial_lambda: int =1.0 , 
+    def __init__(self, n_values: int, initial_lambda: int =0.1 , # TODO !!!! 
                  device: th.DeviceObjType|str ='cpu', dtype: th.Type = th.float32, 
                  grounding_loss_tendency_update_ratio: float = 0.01, 
                  gradient_accumulation_steps=10, 
                  update_tendencies_every_n_steps=1,
                  use_validation_for_tendencies=False,
-                 use_metrics_or_losses='metrics', 
+                 use_metrics_or_losses='losses', 
                  use_exponential_moving_average_or_optimum_targets="optimum",
                  grad_on_only_worst_value=False, zero_constraint: bool = True,
                  lambda_decay: float = 1e-9):
         
         super().__init__()
         self.lagrange_multipliers = th.nn.Parameter(th.tensor([initial_lambda]*n_values,  device=device, dtype=dtype), requires_grad=False)
-        self.vs_coeff = th.nn.Parameter(th.tensor([initial_lambda], device=device, dtype=dtype), requires_grad=False)
-
+        #TODO!!!! self.vs_coeff = th.nn.Parameter(th.tensor([initial_lambda], device=device, dtype=dtype), requires_grad=False)
+        self.vs_coeff = th.tensor([1.0], device=device, dtype=dtype, requires_grad=False)
         self._last_selected_indices = None
 
         self.zero_constraint = zero_constraint
@@ -428,10 +433,13 @@ class MORMTrainingVariables(th.nn.Module):
             #input()
             with th.no_grad():
                 if add_vs_loss and need_backward:
-                    assert self.vs_coeff.grad is not None, "VS Coefficient gradient is None before optimizer step, but it should not be when add_vs_loss is True."
+                    pass
+                    # !!! TODO
+                    #assert self.vs_coeff.grad is not None, "VS Coefficient gradient is None before optimizer step, but it should not be when add_vs_loss is True."
                 else:
                     if add_vs_loss:
-                        assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, th.zeros_like(self.vs_coeff.grad)), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
+                        pass
+                        #assert self.vs_coeff.grad is None or th.allclose(self.vs_coeff.grad, th.zeros_like(self.vs_coeff.grad)), "VS Coefficient gradient is not zero before optimizer step, but it should be when add_vs_loss is False."
                 if self._last_add_gr_loss  and need_backward:
                     if self._last_selected_indices is not None:
                         assert not th.allclose(coeff[self._last_selected_indices], th.zeros_like(coeff[self._last_selected_indices])), "Selected grounding multipliers have zero gradients, but they should not be zero."
@@ -450,7 +458,8 @@ class MORMTrainingVariables(th.nn.Module):
         #return super().zero_grad(set_to_none)
     def requires_grad_(self, requires_grad: bool = True):
         self.lagrange_multipliers.requires_grad_(requires_grad)
-        self.vs_coeff.requires_grad_(requires_grad)
+        #TODO !!!!! self.vs_coeff.requires_grad_(requires_grad)
+        self.vs_coeff.requires_grad_(False)
     def post_optimizer_step(self) -> None:
         
         self.zero_grad(set_to_none=True)
