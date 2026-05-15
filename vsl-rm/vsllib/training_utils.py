@@ -283,7 +283,7 @@ class MORMTrainingVariables(th.nn.Module):
         super().__init__()
         self.lagrange_multipliers = th.nn.Parameter(th.tensor([initial_lambda]*n_values,  device=device, dtype=dtype), requires_grad=False)
         #TODO!!!! self.vs_coeff = th.nn.Parameter(th.tensor([initial_lambda], device=device, dtype=dtype), requires_grad=False)
-        self.vs_coeff = th.tensor([1.0], device=device, dtype=dtype, requires_grad=False)
+        self.vs_coeff = th.nn.Parameter(th.tensor([1.0], device=device, dtype=dtype, requires_grad=False), requires_grad=False)
         self._last_selected_indices = None
 
         self.zero_constraint = zero_constraint
