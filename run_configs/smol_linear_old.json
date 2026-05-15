@@ -16,7 +16,7 @@
     "activate_discordance_epsilon_for_loss": true,
 
     "hidden_size": 1024,
-    "num_hidden_layers": 4,
+    "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
     "layer_activation": "ReLU",
     "final_layer_activation": "none",
@@ -36,8 +36,8 @@
     "grad_on_only_worst_value": false,
     "zero_constraint": true,
     "use_ideal_grounding_model": false,
-    "loss_func_type": "DEFAULT_BUT_STATIC_LAGRANGE",
-    "loss_func_type_kwargs": {},
+    "loss_func_type": "DEFAULT",
+    "loss_func_type_kwargs": null,
     "weight_decay": 0.003,
     "bf16": true,
     "num_train_epochs": 100,
@@ -47,7 +47,6 @@
     "max_length": 4096,
     "save_every_steps": 10000,
     "eval_every_steps": 100,
-
 
     "run_name": "smol_def_linear"
 }
