@@ -46,7 +46,7 @@
     "lr_scheduler_type": "constant",
     "max_length": 4096,
     "save_every_steps": 10000,
-    "eval_every_steps": 50,
+    "eval_every_steps": 100,
 
 
     "run_name": "llama_def_linear"
