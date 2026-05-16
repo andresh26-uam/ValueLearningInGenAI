@@ -831,11 +831,13 @@ class ConstrainedOptimizer(VSLOptimizer):
                 loss_vs = loss_vs.detach() if loss_vs is not None else None
                 loss_vs.requires_grad_(False)
                 add_vs_loss = False
+                print("Not applying gradients on value system loss for epoch", epoch)
 
             if not self.loss_management.requires_grad_for_some_or_all_grounding_losses(epoch=epoch):#(self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES):
                 loss_gr = loss_gr.detach() if loss_gr is not None else None
                 loss_gr.requires_grad_(False)
                 add_gr_loss = False
+                print("Not applying gradients on value system loss for epoch", epoch)
 
             if not self.loss_management.should_apply_grad_on_lagrange_multipliers(epoch=epoch):
                 self.training_variables.requires_grad_(False)

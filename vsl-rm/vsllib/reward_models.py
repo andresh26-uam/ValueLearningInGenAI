@@ -712,6 +712,7 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
 
     if config.loss_management.requires_grad_for_all_grounding_losses(epoch=epoch):
         
+        print("GR YES GRAD")
         gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                             check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, 
                                             rew_center_coefficient=config.rew_center_coefficient, 
@@ -720,6 +721,7 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
 
     elif config.loss_management.requires_grad_for_only_some_grounding_losses(epoch=epoch):
         # gr_loss = grounding_loss(rewards_1[...,0:-1], rewards_2[...,0:-1], scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+        print("GR PARTIAL GRAD")
         value_indices = config.loss_func_type_kwargs.get(
             'value_indices', config.base_model_reward_head_indices)
         if value_indices is None:
@@ -740,6 +742,7 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
         )
     else:
         with th.no_grad():
+            print("GR NO GRAD")
             gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                         check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
                                         activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
@@ -758,6 +761,7 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
                                            activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     else:
         with th.no_grad():
+            print("VS NO GRAD")
             # vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
             vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask,
                                                check_undefined_label=config.check_undefined_label, 

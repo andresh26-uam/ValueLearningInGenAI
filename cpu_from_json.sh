@@ -18,7 +18,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --debug)
             debug_mode=1
-            extra_args+=("$1")
             ;;
         *)
             extra_args+=("$1")

@@ -392,8 +392,9 @@ class MORewardTrainer(Trainer):
                     grad_norm = None
                     if self.args.max_grad_norm > 0:
                         grad_norm = self._clip_grad_norm(model)
+                        
                     grad_norm = self._get_grad_norm(model, grad_norm=grad_norm)
-
+                    
                     self.control = self.callback_handler.on_pre_optimizer_step(self.args, self.state, self.control)
                     self.optimizer.step()
                     self.control = self.callback_handler.on_optimizer_step(self.args, self.state, self.control)
@@ -403,7 +404,7 @@ class MORewardTrainer(Trainer):
 
                     if not self.accelerator.optimizer_step_was_skipped:
                         # Delay optimizer scheduling until metrics are generated
-                        if not isinstance(self.lr_scheduler, (torch.optim.lr_scheduler.ReduceLROnPlateau, GreedyLR)):
+                        if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
                             self.lr_scheduler.step()
 
                     model.zero_grad()
@@ -452,6 +453,7 @@ class MORewardTrainer(Trainer):
             start_time,
             learning_rate=learning_rate,
         )
+
 
     def _gradients(self, loss: th.Tensor, epoch: int, **kwargs):
         # Compute gradients for grounding and value system losses separately
@@ -515,6 +517,7 @@ class MORewardTrainer(Trainer):
         inputs: dict[str, torch.Tensor | Any],
         prediction_loss_only: bool,
         ignore_keys: list[str] | None = None,
+        epoch="EVAL",
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """
         Taken from the library. It has changes to handle multiple losses. Some implementations may raise errors as they were not tested
@@ -796,7 +799,7 @@ class MORewardTrainer(Trainer):
 
             # Prediction step
             losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
-                model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+                model, inputs, prediction_loss_only, ignore_keys=ignore_keys, epoch="EVAL")
             main_input_name = getattr(
                 self.model, "main_input_name", "input_ids")
             inputs_decode = (
