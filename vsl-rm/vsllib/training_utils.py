@@ -847,6 +847,16 @@ class ConstrainedOptimizer(VSLOptimizer):
 
             if not self.loss_management.should_apply_grad_on_lagrange_multipliers(epoch=epoch):
                 self.training_variables.requires_grad_(False)
+            
+            if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
+                grgrad = self.loss_management.should_apply_grad_on_grounding_parameters(epoch=epoch)
+                print("GR GRAD", grgrad, epoch, self.loss_func_kwargs )
+                for p in self.params_gr:
+                    p.requires_grad_(grgrad)
+                vsgrad = self.loss_management.should_apply_grad_on_value_system_weights(epoch=epoch)
+                print("VS GRAD", vsgrad , epoch,  self.loss_func_kwargs)
+                for p in self.params_vs:
+                    p.requires_grad_(vsgrad)
 
             if self.loss_management.requires_grad_for_only_some_grounding_losses(epoch=epoch):
                 selected_indices = self.loss_func_kwargs['value_indices']

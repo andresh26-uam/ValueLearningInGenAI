@@ -208,19 +208,23 @@ class MOLossManagement():
         if epoch == "EVAL":
                     return False # Assumedly, evaluation step.
         if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
+            if epoch is None:
+                 raise ValueError("Epoch must be provided for loss functions with epoch-dependent grad requirements.")
             if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
                 n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
-                return epoch > n_epochs_for_grounding
+                return epoch>=n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS)
 
     def requires_grad_for_all_grounding_losses(self, epoch: int = 0, **kwargs) -> bool:
         if epoch == "EVAL":
                     return False # Assumedly, evaluation step.
         if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
+            if epoch is None:
+                 raise ValueError("Epoch must be provided for loss functions with epoch-dependent grad requirements.")
             if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
                 
                 n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
-                return epoch <= n_epochs_for_grounding
+                return epoch < n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES)
 
     def requires_grad_for_only_some_grounding_losses(self, epoch: int = 0, **kwargs) -> bool:
@@ -236,26 +240,40 @@ class MOLossManagement():
                     return False # Assumedly, evaluation step.if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
 
         if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
-                if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+            if epoch is None:
+                 raise ValueError("Epoch must be provided for loss functions with epoch-dependent grad requirements.")
+            if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
                     n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
-                    return epoch <= n_epochs_for_grounding
+                    return epoch < n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES)
 
-    def should_apply_grad_on_value_system_weights(self, epoch: int = 0, **kwargs) -> bool:
+    def should_apply_grad_on_value_system_weights(self, epoch: int = None, **kwargs) -> bool:
+        if epoch is not None and epoch != "EVAL":
+             if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                    n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
+                    return epoch>=n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS)
 
-    def should_apply_grad_on_grounding_parameters(self, epoch: int = 0, **kwargs) -> bool:
+    def should_apply_grad_on_grounding_parameters(self, epoch: int = None, **kwargs) -> bool:
+        if epoch is not None and epoch != "EVAL":
+            if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                    n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
+                    return epoch < n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS)
 
-    def should_apply_grad_on_part_of_grounding_parameters(self, epoch: int = 0, **kwargs) -> bool:
+    def should_apply_grad_on_part_of_grounding_parameters(self, epoch: int = None, **kwargs) -> bool:
+        #TODO.
         return self._in_category(MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS)
 
     def should_apply_grad_on_lagrange_multipliers(self, **kwargs) -> bool:
+        #TODO. maybe with epoch too...
         if self.loss_func_type in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS and len(self.loss_func_type_kwargs.get('value_indices', [])) <= 1:
             return False
         return self._in_category(MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS)
 
-    def should_apply_grad_on_grounding_or_value_system_params(self, epoch: int = 0, **kwargs) -> bool:
+    def should_apply_grad_on_grounding_or_value_system_params(self, epoch: int = None, **kwargs) -> bool:
         return self.should_apply_grad_on_grounding_parameters(epoch=epoch, **kwargs) or self.should_apply_grad_on_value_system_weights(epoch=epoch, **kwargs)
 
 def get_validation_indices(dataset_name: SupportedDatasets) -> list[int] | float | None:

@@ -740,7 +740,6 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
         )
     else:
         with th.no_grad():
-            print("GR NO GRAD")
             gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                         check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
                                         activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)

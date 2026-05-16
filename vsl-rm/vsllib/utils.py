@@ -329,7 +329,7 @@ def argument_parser(script_args: ScriptArguments) -> Tuple[ScriptArguments, Dict
             script_args.loss_func_type_kwargs = script_args.loss_func_type_kwargs
     else:
         script_args.loss_func_type_kwargs = {}
-    if "n_epochs_for_grounding" in script_args.loss_func_type_kwargs and isinstance(script_args.loss_func_type_kwargs["n_epochs_for_grounding"], float):
+    if "n_epochs_for_grounding" in script_args.loss_func_type_kwargs and isinstance(script_args.loss_func_type_kwargs["n_epochs_for_grounding"], float) and script_args.loss_func_type_kwargs["n_epochs_for_grounding"] < 1:
         script_args.loss_func_type_kwargs["n_epochs_for_grounding"] = int(script_args.loss_func_type_kwargs["n_epochs_for_grounding"] * script_args.num_train_epochs)
     print(f"Using loss function {script_args.loss_func_type} with kwargs {script_args.loss_func_type_kwargs}")
     
