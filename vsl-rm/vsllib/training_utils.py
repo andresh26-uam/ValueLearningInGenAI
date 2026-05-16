@@ -16,7 +16,7 @@ from transformers.utils import PaddingStrategy
 import torch as th
 
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-from vsllib.defines import MOLossFunctionsCategories, MOLossFunctions
+from vsllib.defines import MOLossFunctionsCategories, MOLossFunctions, MOLossManagement
 
 from vsllib.utils import to_float
 
@@ -740,6 +740,11 @@ class VSLOptimizer(th.optim.Optimizer):
         return None
 
 class ConstrainedOptimizer(VSLOptimizer):
+
+    @property
+    def loss_management(self) -> MOLossManagement:
+        return MOLossManagement(self.loss_func_type, self.loss_func_kwargs)
+    
     def __init__(self, params, params_gr, params_vs, n_values, params_gr_ideal=None, lr_grounding=None,
                  lr_value_system=None, lr_lambda=None,
                  loss_func_type: MOLossFunctions=MOLossFunctions.DEFAULT, loss_func_type_kwargs: dict = {},
@@ -748,6 +753,9 @@ class ConstrainedOptimizer(VSLOptimizer):
         # Params must be provided for compatibility with transformers library.
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
+        self.loss_func_type = MOLossFunctions(loss_func_type)
+        self.loss_func_kwargs=loss_func_type_kwargs
+        
         if params_gr_ideal is not None:
             assert len(params_gr) == len(params_gr_ideal), "Grounding parameters and ideal grounding parameters must have the same length."
             
@@ -755,10 +763,9 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
 
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system
-        if MOLossFunctions(loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS and self.lr_lambda == 0.0:
+        if self.loss_management.should_apply_grad_on_lagrange_multipliers() and self.lr_lambda == 0.0:
             raise ValueError(f"Loss function type {loss_func_type} requires applying gradients on Lagrange multipliers, but lr_lambda is set to 0.0. Please set lr_lambda to a positive value to enable optimization of Lagrange multipliers.")
-        self.loss_func_type = MOLossFunctions(loss_func_type)
-        self.loss_func_kwargs=loss_func_type_kwargs
+        
 
         self.training_variables: MORMTrainingVariables = training_variables
         
@@ -778,7 +785,7 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optimx_ideal.zero_grad(set_to_none)
         return None
     
-    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, **kwargs) -> th.Tensor:
+    def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, epoch: int, **kwargs) -> th.Tensor:
         
         if __debug__:
             x = self.params_gr 
@@ -812,27 +819,28 @@ class ConstrainedOptimizer(VSLOptimizer):
         add_vs_loss = True
         add_gr_loss = True
         selected_indices = None
-        if self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_ON_EVERYTHING:
+        
+        if self.loss_management.requires_grad_on_everything():
             loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=None, add_vs_loss=True, add_gr_loss=True)
-        elif self.loss_func_type in MOLossFunctionsCategories.NEEDS_NO_GRAD_EVER:
+        elif self.loss_management.needs_no_grad_ever():
                 with th.no_grad():
                     loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=None, add_vs_loss=True, add_gr_loss=True)
                 loss += 0.5*th.tensor(1.0, requires_grad=True) 
         else:
-            if (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS):
+            if not self.loss_management.requires_grad_for_value_system_loss(epoch=epoch):
                 loss_vs = loss_vs.detach() if loss_vs is not None else None
                 loss_vs.requires_grad_(False)
                 add_vs_loss = False
 
-            if (self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES):
+            if not self.loss_management.requires_grad_for_some_or_all_grounding_losses(epoch=epoch):#(self.loss_func_type not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES):
                 loss_gr = loss_gr.detach() if loss_gr is not None else None
                 loss_gr.requires_grad_(False)
                 add_gr_loss = False
 
-            if (self.loss_func_type not in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS):
+            if not self.loss_management.should_apply_grad_on_lagrange_multipliers(epoch=epoch):
                 self.training_variables.requires_grad_(False)
 
-            if self.loss_func_type in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES:
+            if self.loss_management.requires_grad_for_only_some_grounding_losses(epoch=epoch):
                 selected_indices = self.loss_func_kwargs['value_indices']
                 unselected_indices = [i for i in range(len(loss_gr)) if i not in selected_indices]
                 loss_gr[unselected_indices] = loss_gr[unselected_indices].detach()
