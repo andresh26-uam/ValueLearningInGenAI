@@ -779,7 +779,7 @@ class ConstrainedOptimizer(VSLOptimizer):
         
         if self.lr_lambda > 0:
             self.optim_lambdas = th.optim.SGD(
-                self.training_variables.parameters(), lr=self.lr_lambda, weight_decay=0.0)
+                self.training_variables.parameters(), lr=self.lr_lambda, weight_decay=0.0) # lambda_decay is managed manually.
         
         self.training_variables.reset_state()
     def zero_grad(self, set_to_none=True)-> None:

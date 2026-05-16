@@ -156,6 +156,8 @@ def main_fun(script_args, training_args, tokenizer) -> None:
 
         print("Sub optimizer class: ", sub_optimizer_cls,
             " Sub optimizer kwargs: ", sub_optimizer_kwargs)
+        sub_optimizer_kwargs = sub_optimizer_kwargs or {}
+        sub_optimizer_kwargs["weight_decay"] = training_args.weight_decay
 
         print("Script arguments: ")
 
