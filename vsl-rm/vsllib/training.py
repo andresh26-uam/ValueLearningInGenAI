@@ -221,8 +221,8 @@ class MORewardTrainer(Trainer):
                 logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
 
             training_variables.record_metrics(result, metric_type='validation')
-            training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False), 
-                                                     vs_loss_detached=th.tensor(loss_vs, requires_grad=False), gr_loss_ideal_detached=None, loss_type="validation")
+            training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False, device=training_variables.lagrange_multipliers.device, dtype=training_variables.lagrange_multipliers.dtype) if loss_gr is not None else None, 
+                                                     vs_loss_detached=th.tensor(loss_vs, requires_grad=False, device=training_variables.lagrange_multipliers.device, dtype=training_variables.lagrange_multipliers.dtype), gr_loss_ideal_detached=None, loss_type="validation")
             
             return result
 

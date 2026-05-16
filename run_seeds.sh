@@ -1,10 +1,12 @@
 #!/bin/bash
 GPUS=L40S:1
-DATASET=pku
-CONFIG=run_configs/llama_rlhf_linear.json
+DATASET=ultra
+CONFIG=run_configs/llama_linear_firstgr_thenvs.json
 
 if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRM
+elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
+  NAME=LlamaSEQ-RM
 elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
   NAME=LlamaVSLRM
 elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
@@ -34,6 +36,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42 43 44 45; do
-  bash sbatch_from_json.sh $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS --discordance_epsilon=$DISCORDANCE_EPSILON --gpus=$GPUS 
+  bash sbatch_from_json.sh $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS --discordance_epsilon=$DISCORDANCE_EPSILON --gpus=$GPUS
 done
 

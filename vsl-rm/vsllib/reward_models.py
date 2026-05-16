@@ -711,8 +711,6 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
         use_metrics = use_metrics or config.gather_train_metrics
 
     if config.loss_management.requires_grad_for_all_grounding_losses(epoch=epoch):
-        
-        print("GR YES GRAD")
         gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                             check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, 
                                             rew_center_coefficient=config.rew_center_coefficient, 
@@ -761,7 +759,6 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
                                            activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     else:
         with th.no_grad():
-            print("VS NO GRAD")
             # vs_loss = value_system_loss(rewards_1[...,-1],rewards_2[...,-1], scores1=labels_1[..., -1], scores2=labels_2[..., -1] , reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
             vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask,
                                                check_undefined_label=config.check_undefined_label, 
@@ -1136,7 +1133,6 @@ class MORMForSequenceClassification(PreTrainedModel):
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
         training_variables_dtype = th.float32
-
         self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
                                                         device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
                                                         gradient_accumulation_steps=config.gradient_accumulation_steps,

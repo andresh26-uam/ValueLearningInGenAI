@@ -21,10 +21,10 @@
       {
         "name": "BT-RM",
         "folders": [
-            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0512_113421_epo30_s42/last_checkpoint",
-          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0512_113554_epo30_s43/last_checkpoint",
-          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0512_114936_epo30_s44/last_checkpoint",
-          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0512_115125_epo30_s45/last_checkpoint"
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_153954_epo100_s42/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191049_epo100_s43/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191051_epo100_s44/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191054_epo100_s45/last_checkpoint"
         ],
         "metrics": {
             "Avg. Chr.": "test_avg_coherence_e0.5",
@@ -39,10 +39,10 @@
     {
       "name": "VSL-RM",
       "folders": [
-        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0511_165718_epo30_s43/last_checkpoint",
-        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0511_165718_epo30_s44/last_checkpoint",
-        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0511_165719_epo30_s42/last_checkpoint",
-        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0511_165719_epo30_s45/last_checkpoint"
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0513_125545_epo100_s42/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0513_125545_epo100_s43/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0513_194744_epo100_s44/last_checkpoint",
+        "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaVSLRM_0514_010323_epo100_s45/last_checkpoint"
       ],
       "metrics": {
         "Avg. Chr.": "test_avg_coherence_e0.5",
