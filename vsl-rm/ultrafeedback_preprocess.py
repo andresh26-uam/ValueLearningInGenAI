@@ -88,7 +88,7 @@ def ultrafeedback_processor(
 	# Save to LOCAL_PROCESSED_DATASETS folder
 	local_datasets_path = Path(ULTRAFEEDBACK_PROCESSED_PATH).joinpath("preprocessed")
 	local_datasets_path.mkdir(parents=True, exist_ok=True)
-	final_output = local_datasets_path / output_path
+	final_output = local_datasets_path
 	hf_dataset.save_to_disk(final_output)
 	
 	return len(rows)
