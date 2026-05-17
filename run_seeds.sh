@@ -1,5 +1,12 @@
 #!/bin/bash
-GPUS=L40S:1
+GPUS="--gpus=L40S:1"
+CPU=False
+if [[ "$CPU" == "True" ]]; then
+  GPUS=""
+  SCRIPT=cpu_from_json.sh
+else
+  SCRIPT=sbatch_from_json.sh
+fi
 DATASET=ultra
 CONFIG=run_configs/llama_linear_firstgr_thenvs.json
 
@@ -45,6 +52,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash sbatch_from_json.sh $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON --gpus=$GPUS
+  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUS
 done
 

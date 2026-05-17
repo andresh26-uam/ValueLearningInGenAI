@@ -550,11 +550,12 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     if activate_disc_epsilon_for_loss and discordance_epsilon is not None:
         with th.no_grad():
             
-            discordance = th.full_like(logits, fill_value=discordance_epsilon)
+            discordance = th.full_like(logits, fill_value=0.0)
             discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
+            discordance = discordance.masked_fill(target_probs > 0.5, discordance_epsilon)
             if missing_mask is not None:
                 discordance = discordance.masked_fill(missing_mask, 0.0)
-        logits_app = logits+discordance
+        logits_app = logits-discordance
     else:
         logits_app = logits
     
@@ -598,11 +599,12 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
     if activate_disc_epsilon_for_loss and discordance_epsilon is not None:
         with th.no_grad():
             
-            discordance = th.full_like(logits, fill_value=discordance_epsilon)
+            discordance = th.full_like(logits, fill_value=0.0)
             discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
+            discordance = discordance.masked_fill(target_probs > 0.5, discordance_epsilon)
             if missing_mask is not None:
                 discordance = discordance.masked_fill(missing_mask, 0.0)
-        logits_app = logits+discordance
+        logits_app = logits-discordance
     else:
         logits_app = logits
 
