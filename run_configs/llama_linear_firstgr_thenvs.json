@@ -26,7 +26,7 @@
 
     "rew_center_coefficient": 0.01,
     "layer_normalization": "none",
-    "learning_rate": 0.0001,
+    "learning_rate": 0.001,
     "grounding_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.00,
     "grounding_loss_tendency_update_ratio": 0.1,
@@ -37,7 +37,7 @@
     "zero_constraint": true,
     "use_ideal_grounding_model": false,
     "loss_func_type": "FIRST_GROUNDING_THEN_VALUE_SYSTEM",
-    "loss_func_type_kwargs": {"n_epochs_for_grounding": 0.5},
+    "loss_func_type_kwargs": {"n_epochs_for_grounding": 0.667},
     "weight_decay": 0.00,
     "bf16": true,
     "num_train_epochs": 100,
