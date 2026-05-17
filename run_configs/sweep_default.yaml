@@ -1,8 +1,8 @@
 program: sweep.py
 method: bayes
 metric:
-  goal: minimize
-  name: eval/loss
+  goal: maximize
+  name: eval/avg_coherence
 
 parameters:
   use_exponential_moving_average_or_optimum_targets:
@@ -14,11 +14,13 @@ parameters:
   use_metrics_or_losses_for_lagrange_updates:
     values:
       - losses
+      - metrics
     distribution: categorical
   grounding_loss_tendency_update_ratio:
     values:
       - 0.01
       - 0.05
+      - 0.1
     distribution: categorical
   layer_activation:
     values:
@@ -51,6 +53,7 @@ parameters:
   layer_normalization:
     values:
       - none
+      - LayerNorm
     distribution: categorical
   zero_constraint:
     values:

@@ -97,7 +97,7 @@ def ultrafeedback_processor(
 if __name__ == "__main__":
     ultrafeedback_processor()
     # Show the rows with different principles for the same prompt upto 100 rows:
-    processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
+    """processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
 
     count = 0
     per_principle_count = {}
@@ -135,4 +135,4 @@ if __name__ == "__main__":
     print("Total cases where responses have different principles for the same prompt:", count)
     print("Count of different principles across all pairs:", per_principle_count)
     print("Count of same principles across all pairs:", per_principle_count_same_principle)
-    print("Total rows processed:", i + 1)
+    print("Total rows processed:", i + 1)"""

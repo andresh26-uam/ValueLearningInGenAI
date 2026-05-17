@@ -1,5 +1,12 @@
 #!/bin/bash
-GPUS=L40S:1
+GPUS="--gpus=L40S:1"
+CPU=True
+if [[ "$CPU" == "True" ]]; then
+  GPUS=""
+  SCRIPT=cpu_from_json.sh
+else
+  SCRIPT=sbatch_from_json.sh
+fi
 DATASET=pku
 CONFIG=run_configs/llama_linear.json
 
@@ -29,11 +36,12 @@ else
   exit 1
 fi
 
+echo "Script: $SCRIPT"
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash sbatch_from_json.sh $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS --discordance_epsilon=$DISCORDANCE_EPSILON --gpus=$GPUS 
+  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUS 
 done
 
