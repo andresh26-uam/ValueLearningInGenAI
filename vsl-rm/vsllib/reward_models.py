@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from functools import partial
-from typing import Any, Callable, Dict, Literal, Optional, Unpack
+from typing import Any, Callable, Dict, Literal, Optional
 
 import numpy as np
 import torch as th
@@ -91,7 +91,7 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
     def __init__(
         self,
         # This will be set properly in the model init based on the tokenizer
-        pad_token_id: int = "UNKNOWN",
+        pad_token_id: int|str = "UNKNOWN",
         num_values: int = 3,
         hidden_sizes: list[int] = [1024, 1024, 1024],
         value_layer_dropout: float = 0.1,
@@ -121,11 +121,11 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         base_model_trust_remote_code: bool = True,
         base_model_num_labels: int = 1,
         use_base_model_heads: bool = False,
-        base_model_reward_heads_module_name: str = None,
-        base_model_value_system_module_name: str = None,
-        base_model_reward_head_indices: list = None,
-        loss_func_type: str = MOLossFunctions.DEFAULT,
-        loss_func_kwargs: dict = None,
+        base_model_reward_heads_module_name: Optional[str] = None,
+        base_model_value_system_module_name: Optional[str] = None,
+        base_model_reward_head_indices: Optional[list] = None,
+        loss_func_type: str = MOLossFunctions.DEFAULT.value,
+        loss_func_kwargs: Optional[dict] = None,
         lr_grounding: Optional[float] = None,
         lr_value_system: Optional[float] = None,
         lr_lambda: Optional[float] = None,
@@ -1301,7 +1301,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         labels: th.LongTensor | None = None,
         use_cache: bool | None = None,
         score_mode = "normal",
-        **kwargs: Unpack[Dict[str, Any]],
+        **kwargs: Dict[str, Any],
     ) -> SequenceClassifierOutputWithPast:
         transformer_outputs: BaseModelOutputWithPast = getattr(self, self.base_model_prefix)(
             input_ids,

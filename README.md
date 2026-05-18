@@ -37,3 +37,8 @@ We use SLURM commands in our available setup, but you can use this general comma
 
 Training is perfectly feasible in CPU, will assume full Float32 precision. Just add `--use_cpu` as an optional flag at the end of the previous training commands, and make sure to change to a different accelerator configuration file (e.g. `accelerate launch --config_file=accelerate_config/cpu_config.yaml vsl-rm/no_context_vsl.py...`). See the [cpu_from_json.sh](https://github.com/andresh26-uam/ValueLearningInGenAI/blob/main/cpu_from_json.sh) file for an example.
  
+## Known issues
+
+- Armo RM issue: If you get an error such as (specially when using older versions of Transformers):
+    `ImportError: cannot import name 'LLAMA_INPUTS_DOCSTRING' from 'transformers.models.llama.modeling_llama'` 
+    ... there is no other fix to my knowledge than manually commenting the decorator line where this is used and removing the import. 

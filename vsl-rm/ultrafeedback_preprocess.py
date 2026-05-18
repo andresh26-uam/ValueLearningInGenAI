@@ -4,13 +4,12 @@ from pathlib import Path
 from typing import Any
 
 # IMport HF_TOKEN from .env
-import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from datasets import load_dataset, load_from_disk, Dataset
+from datasets import load_dataset, Dataset
 
-from vsllib.defines import LOCAL_DATASET_PATH, ULTRAFEEDBACK_PROCESSED_PATH
+from vsllib.defines import ULTRAFEEDBACK_PROCESSED_PATH
 
 # Load HF tokens.
 def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
@@ -62,7 +61,6 @@ def _build_pair_row(sample: dict[str, Any], completion_a: dict[str, Any], comple
 
 
 def ultrafeedback_processor(
-	output_path: str = "ultrafeedback_pairs",
 	dataset_name: str = "openbmb/UltraFeedback",
 ) -> int:
 	dataset: Dataset = load_dataset(dataset_name, split="train")
@@ -88,7 +86,7 @@ def ultrafeedback_processor(
 	# Save to LOCAL_PROCESSED_DATASETS folder
 	local_datasets_path = Path(ULTRAFEEDBACK_PROCESSED_PATH).joinpath("preprocessed")
 	local_datasets_path.mkdir(parents=True, exist_ok=True)
-	final_output = local_datasets_path / output_path
+	final_output = local_datasets_path
 	hf_dataset.save_to_disk(final_output)
 	
 	return len(rows)
@@ -97,7 +95,7 @@ def ultrafeedback_processor(
 if __name__ == "__main__":
     ultrafeedback_processor()
     # Show the rows with different principles for the same prompt upto 100 rows:
-    processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
+    """processed_dataset = load_from_disk(os.path.join(LOCAL_DATASET_PATH, "ultrafeedback_pairs"))
 
     count = 0
     per_principle_count = {}
@@ -135,4 +133,4 @@ if __name__ == "__main__":
     print("Total cases where responses have different principles for the same prompt:", count)
     print("Count of different principles across all pairs:", per_principle_count)
     print("Count of same principles across all pairs:", per_principle_count_same_principle)
-    print("Total rows processed:", i + 1)
+    print("Total rows processed:", i + 1)"""
