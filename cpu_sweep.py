@@ -113,9 +113,14 @@ def main(default_config_file: str, dataset: str, rs: np.random.RandomState, num_
     subprocess_env["WANDB_RUN_ID"] = run_id
     subprocess_env["WANDB_RESUME"] = "allow"
 
-    
+    if dataset == "ultra":
+        discordance_epsilon = 0.25
+    elif dataset == "pku":
+        discordance_epsilon = 0.5
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset}")
     completed = subprocess.run(
-        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}", f"--do_save={False}", f"--do_checkpointing={False}", f"--num_train_epochs={num_train_epochs}", f"--seed={rs.randint(0, 1000000)}"],
+        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}", f"--discordance_epsilon={discordance_epsilon}", f"--do_save={False}", f"--do_checkpointing={False}", f"--num_train_epochs={num_train_epochs}", f"--seed={rs.randint(0, 1000000)}"],
         env=subprocess_env,
         check=False,
     )

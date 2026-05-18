@@ -166,7 +166,8 @@ class ScriptArguments:
     model_name: Optional[str] = field(
         # default="mistralai/Mistral-7B-Instruct-v0.2",
         # default="meta-llama/Llama-3.2-1B",
-        default="HuggingFaceTB/SmolLM-135M-Instruct",
+        # default="HuggingFaceTB/SmolLM-135M-Instruct",
+        default="RLHFlow/ArmoRM-Llama3-8B-v0.1",
         metadata={
             "help": "The model that you want to train from the Hugging Face hub. E.g. gpt2, gpt2-xl, bert, etc."
         },
