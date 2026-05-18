@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from functools import partial
-from typing import Any, Callable, Dict, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional, Unpack
 
 import numpy as np
 import torch as th
@@ -18,7 +18,7 @@ from transformers.utils import logging
 from transformers.cache_utils import Cache
 
 from vsllib.training_utils import MORMTrainingVariables
-from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, SCORE_DIFF_EPSILON, VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MOLossFunctionsCategories
+from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, SCORE_DIFF_EPSILON, VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MOLossFunctionsCategories, MOLossManagement
 
 logger = logging.get_logger(__name__)
 
@@ -88,10 +88,15 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
     has_no_defaults_at_init = True
 
+    @property
+    def loss_management(self) -> MOLossManagement:
+        loss_func_enum = MOLossFunctions(self.loss_func_type)
+        return MOLossManagement(loss_func_enum, self.loss_func_type_kwargs)
+
     def __init__(
         self,
         # This will be set properly in the model init based on the tokenizer
-        pad_token_id: int|str = "UNKNOWN",
+        pad_token_id: int = "UNKNOWN",
         num_values: int = 3,
         hidden_sizes: list[int] = [1024, 1024, 1024],
         value_layer_dropout: float = 0.1,
@@ -121,11 +126,11 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         base_model_trust_remote_code: bool = True,
         base_model_num_labels: int = 1,
         use_base_model_heads: bool = False,
-        base_model_reward_heads_module_name: Optional[str] = None,
-        base_model_value_system_module_name: Optional[str] = None,
-        base_model_reward_head_indices: Optional[list] = None,
-        loss_func_type: str = MOLossFunctions.DEFAULT.value,
-        loss_func_kwargs: Optional[dict] = None,
+        base_model_reward_heads_module_name: str = None,
+        base_model_value_system_module_name: str = None,
+        base_model_reward_head_indices: list = None,
+        loss_func_type: str = MOLossFunctions.DEFAULT,
+        loss_func_kwargs: dict = None,
         lr_grounding: Optional[float] = None,
         lr_value_system: Optional[float] = None,
         lr_lambda: Optional[float] = None,
@@ -195,33 +200,31 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
             self.loss_func_type = loss_func_type
         self.loss_func_type_kwargs = loss_func_kwargs if loss_func_kwargs is not None else {}
 
-        loss_func_enum = MOLossFunctions(self.loss_func_type)
+        loss_manage = self.loss_management # requires self. loss_functype and loss_functypekwargs.
 
-        if loss_func_enum not in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS:
+        if not loss_manage.should_apply_grad_on_grounding_parameters():
             self.lr_grounding = 0.0
         else:
             assert lr_grounding is not None and lr_grounding > 0.0, f"Loss function type {loss_func_type} requires applying gradients on grounding parameters, but lr_grounding is set to {lr_grounding}. Please set lr_grounding to a positive value to enable optimization of grounding parameters."
             self.lr_grounding = lr_grounding
 
-        if loss_func_enum not in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+        if not loss_manage.should_apply_grad_on_value_system_weights():
             self.lr_value_system = 0.0
         else:
             assert lr_value_system is not None and lr_value_system > 0.0, f"Loss function type {loss_func_type} requires applying gradients on value system parameters, but lr_value_system is set to {lr_value_system}. Please set lr_value_system to a positive value to enable optimization of value system parameters."
             self.lr_value_system = lr_value_system
+        
 
-        if loss_func_enum not in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS:
+        self.lambda_decay = lambda_decay
+        if not loss_manage.should_apply_grad_on_lagrange_multipliers():
             self.lr_lambda = 0.0
-        elif loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS and len(self.loss_func_type_kwargs.get('value_indices', [])) <= 1:
-            self.lr_lambda = 0.0
+            self.lambda_decay = 0.0
         else:
             if lr_lambda is None:
                 lr_lambda = lr_value_system
             assert lr_lambda is not None and lr_lambda > 0.0, f"Loss function type {loss_func_type} requires applying gradients on Lagrange multipliers, but lr_lambda is set to {lr_lambda}. Please set lr_lambda to a positive value to enable optimization of Lagrange multipliers."
             self.lr_lambda = lr_lambda
 
-        self.lambda_decay = lambda_decay
-        if loss_func_enum not in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS:
-            self.lambda_decay = 0.0
         self.base_model_reward_head_indices = base_model_reward_head_indices if base_model_reward_head_indices is not None else "use_base_model_value_system_module_name"
 
         
@@ -689,6 +692,8 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
     grounding_mask = missing_mask[..., 0:-1] if missing_mask is not None else None
     vs_mask = missing_mask[..., -1] if missing_mask is not None else None
 
+    epoch = kwargs.get('epoch', None)
+
     rew_sum = others.get('rew_sum', None)
     if rew_sum is not None:
         grounding_rew_sum = rew_sum[..., 0:-1]
@@ -707,16 +712,16 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
         # We want to compute metrics at every step, even if not used for lagrange updates, for better monitoring and analysis.
         use_metrics = use_metrics or config.gather_train_metrics
 
-    if MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES:
-        
+    if config.loss_management.requires_grad_for_all_grounding_losses(epoch=epoch):
         gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                             check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, 
                                             rew_center_coefficient=config.rew_center_coefficient, 
                                             discordance_epsilon=config.discordance_epsilon, 
                                             activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
 
-    elif MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES:
+    elif config.loss_management.requires_grad_for_only_some_grounding_losses(epoch=epoch):
         # gr_loss = grounding_loss(rewards_1[...,0:-1], rewards_2[...,0:-1], scores1=labels_1[...,0:-1], scores2=labels_2[...,0:-1], reward_diff_threshold=config.reward_diff_threshold, assume_qualitative_labels=config.assume_qualitative_labels, check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient)
+        print("GR PARTIAL GRAD")
         value_indices = config.loss_func_type_kwargs.get(
             'value_indices', config.base_model_reward_head_indices)
         if value_indices is None:
@@ -736,7 +741,6 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
             activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss
         )
     else:
-        assert MOLossFunctions(config.loss_func_type) not in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES, f"Unexpected loss function type {config.loss_func_type} that does not fit into any grounding loss category"
         with th.no_grad():
             gr_loss = grounding_loss_logits(logits[..., 0:-1], labels[..., 0:-1], rew_sum=grounding_rew_sum, missing_mask=grounding_mask,
                                         check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
@@ -747,7 +751,7 @@ def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceC
                                               check_undefined_label=config.check_undefined_label, return_metrics=use_metrics, rew_center_coefficient=config.rew_center_coefficient, discordance_epsilon=config.discordance_epsilon, 
                                               activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
 
-    if MOLossFunctions(config.loss_func_type) in MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS:
+    if config.loss_management.requires_grad_for_value_system_loss(epoch=epoch):
         vs_loss = value_system_loss_logits(logits[..., -1], labels[..., -1], rew_sum=vs_rew_sum, missing_mask=vs_mask,
                                            check_undefined_label=config.check_undefined_label, 
                                            return_metrics=use_metrics, 
@@ -863,6 +867,7 @@ class MORMForSequenceClassification(PreTrainedModel):
     config_class = MORMForSequenceClassificationConfig
     base_model_prefix = "full_model"
     supports_gradient_checkpointing = True
+    config : MORMForSequenceClassificationConfig
 
     @staticmethod
     def _resolve_torch_dtype(dtype_value: Any) -> th.dtype:
@@ -930,25 +935,23 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:
         # Override parameters to only return reward head and value system parameters for optimization.
-        loss_func_enum = MOLossFunctions(self.config.loss_func_type)
-        
         # Condition 1: Base model heads
-        if self.use_base_model_heads and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS):
+        if self.use_base_model_heads and self.config.loss_management.should_apply_grad_on_grounding_or_value_system_params():
             yield from self.full_model.parameters(recurse=recurse)
 
         # Condition 2: Reward heads
-        if self.reward_heads is not None and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+        if self.reward_heads is not None and self.config.loss_management.should_apply_grad_on_grounding_parameters():
             
             yield from self.reward_heads.parameters(recurse=recurse)
             
         # Condition 3: Value system layer
-        if self.value_system_layer is not None and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS):
+        if self.value_system_layer is not None and self.config.loss_management.should_apply_grad_on_value_system_weights():
             
             yield from self.value_system_layer.parameters(recurse=recurse)
         # yield from self.training_variables.parameters(recurse=recurse)
         
         # Condition 4: Ideal grounding model
-        if self.use_ideal_grounding_model and (loss_func_enum in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS):
+        if self.use_ideal_grounding_model and self.config.loss_management.should_apply_grad_on_grounding_parameters():
             
             yield from self.reward_heads_ideal.parameters(recurse=recurse)
 
@@ -1131,8 +1134,7 @@ class MORMForSequenceClassification(PreTrainedModel):
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
         training_variables_dtype = th.float32
-
-        self.training_variables = MORMTrainingVariables(n_values=config.num_values, 
+        self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
                                                         device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
                                                         gradient_accumulation_steps=config.gradient_accumulation_steps,
                                                         update_tendencies_every_n_steps=config.update_tendencies_every_n_steps,
@@ -1157,7 +1159,7 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def _set_train_mode(self, train_mode: bool = True) -> None:
         # Freeze pretrained weights and train only the custom reward/value-system heads.
-        possibly_change_train_mode_in_base_model = self.use_base_model_heads and (MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS)
+        possibly_change_train_mode_in_base_model = self.use_base_model_heads and self.config.loss_management.should_apply_grad_on_grounding_or_value_system_params()
         train_mode_base_model = False
         if possibly_change_train_mode_in_base_model:
             train_mode_base_model = train_mode
@@ -1181,7 +1183,7 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         params = []
-        if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS:
+        if self.config.loss_management.should_apply_grad_on_grounding_parameters():
             if self.reward_heads is not None:
                 params.extend(self.reward_heads.parameters(recurse=recurse))
             elif self.use_base_model_heads:
@@ -1191,7 +1193,7 @@ class MORMForSequenceClassification(PreTrainedModel):
 
     def value_system_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         params = []
-        if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+        if self.config.loss_management.should_apply_grad_on_value_system_weights():
             if self.value_system_layer is not None:
                 params.extend(
                     self.value_system_layer.parameters(recurse=recurse))
@@ -1207,7 +1209,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         else:
             reward_heads = self.reward_heads
 
-        if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS:
+        if self.config.loss_management.should_apply_grad_on_grounding_parameters():
             rewards = reward_heads(hidden_state)
         else:
             #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
@@ -1215,7 +1217,7 @@ class MORMForSequenceClassification(PreTrainedModel):
                 rewards = reward_heads(hidden_state)
 
         if self.value_system_layer is not None:
-            if MOLossFunctions(self.config.loss_func_type) in MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS:
+            if self.config.loss_management.should_apply_grad_on_value_system_weights():
                 vs_reward = self.value_system_layer.forward(rewards)
             else:
                 #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
@@ -1303,7 +1305,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         labels: th.LongTensor | None = None,
         use_cache: bool | None = None,
         score_mode = "normal",
-        **kwargs: Dict[str, Any],
+        **kwargs: Unpack[Dict[str, Any]],
     ) -> SequenceClassifierOutputWithPast:
         transformer_outputs: BaseModelOutputWithPast = getattr(self, self.base_model_prefix)(
             input_ids,

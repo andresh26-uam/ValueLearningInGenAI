@@ -1,47 +1,60 @@
 #!/bin/bash
-GPUS="--gpus=L40S:1"
+
+GPUS="L40S:1"
+GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=True
 if [[ "$CPU" == "True" ]]; then
+  GPUDIRECTIVE=""
   GPUS=""
   SCRIPT=cpu_from_json.sh
 else
   SCRIPT=sbatch_from_json.sh
 fi
-DATASET=pku
-CONFIG=run_configs/llama_linear.json
+DATASET=ultra
+CONFIG=run_configs/llama_grounding_linear.json
 
+EVAL_EVERY_STEPS=""
 if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
-  NAME=LlamaBTRM
+  NAME=LlamaBTRMv2
+elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
+  NAME=LlamaSEQ-RMv2
 elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
-  NAME=LlamaVSLRM_NONORMAL_SMOOTHER
+  NAME=LlamaVSLRMv2
 elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
-  NAME=LlamaGRRM
+  NAME=LlamaGRRMv2
   elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
-  NAME=LlamaVSL-NL-RM
+  NAME=LlamaVSL-NL-RMv2
 elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
-  NAME=SmolBTRM
+  NAME=SmolBTRMv2
 elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
-  NAME=SmolVSLRM
+  NAME=SmolVSLRMv2
 else
   NAME=test
 fi
 if [[ "$DATASET" == "ultra" ]]; then
   DISCORDANCE_EPSILON=0.25
   NUM_TRAIN_EPOCHS=10
+  if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
+    NUM_TRAIN_EPOCHS=15
+    EVAL_EVERY_STEPS="--eval_every_steps=200"
+  fi
 elif [[ "$DATASET" == "pku" ]]; then
   DISCORDANCE_EPSILON=0.5
   NUM_TRAIN_EPOCHS=100
+  if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
+    NUM_TRAIN_EPOCHS=150
+    EVAL_EVERY_STEPS="--eval_every_steps=200"
+  fi
 else
   echo "Unknown dataset: $DATASET" >&2
   exit 1
 fi
 
-echo "Script: $SCRIPT"
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUS 
+  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
 done
 

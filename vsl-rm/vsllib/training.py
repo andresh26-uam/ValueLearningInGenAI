@@ -8,7 +8,7 @@ from transformers.trainer import *
 
 from transformers.optimization import get_scheduler
 
-from transformers.trainer_utils import SchedulerType
+from transformers.trainer_utils import SchedulerType, _is_peft_model
 from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
@@ -221,8 +221,8 @@ class MORewardTrainer(Trainer):
                 logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
 
             training_variables.record_metrics(result, metric_type='validation')
-            training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False), 
-                                                     vs_loss_detached=th.tensor(loss_vs, requires_grad=False), gr_loss_ideal_detached=None, loss_type="validation")
+            training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False, device=training_variables.lagrange_multipliers.device, dtype=training_variables.lagrange_multipliers.dtype) if loss_gr is not None else None, 
+                                                     vs_loss_detached=th.tensor(loss_vs, requires_grad=False, device=training_variables.lagrange_multipliers.device, dtype=training_variables.lagrange_multipliers.dtype), gr_loss_ideal_detached=None, loss_type="validation")
             
             return result
 
@@ -232,6 +232,7 @@ class MORewardTrainer(Trainer):
         model: nn.Module,
         inputs: dict[str, torch.Tensor | Any],
         num_items_in_batch: torch.Tensor | int | None = None,
+        epoch=None,
     ) -> torch.Tensor:
         """
         Taken from the library. It has changes to handle multiple losses.
@@ -257,7 +258,7 @@ class MORewardTrainer(Trainer):
             with self.compute_loss_context_manager():
 
                 loss = self.compute_loss(
-                    model, inputs, num_items_in_batch=num_items_in_batch)
+                    model, inputs, num_items_in_batch=num_items_in_batch,epoch=epoch)
 
             del inputs
             if (
@@ -283,11 +284,178 @@ class MORewardTrainer(Trainer):
             if self.accelerator.distributed_type == DistributedType.DEEPSPEED:
                 kwargs["scale_wrt_gas"] = False
 
-            loss_single = self._gradients(loss=loss, **kwargs)
+            loss_single = self._gradients(loss=loss, epoch = epoch, **kwargs)
 
             return loss_single.detach()
 
-    def _gradients(self, loss: th.Tensor, **kwargs):
+    def _run_epoch(
+        self,
+        model,
+        epoch,
+        train_dataloader,
+        steps_in_epoch,
+        num_update_steps_per_epoch,
+        trial,
+        ignore_keys_for_eval,
+        start_time,
+        resume_from_checkpoint,
+        epochs_trained,
+        steps_trained_in_current_epoch,
+    ):
+        """Run one full pass over the dataloader."""
+
+        step = -1
+        grad_norm = None
+        learning_rate = None
+        rng_to_sync = False
+
+        # Handle resumption from checkpoint: skip already-trained batches in the resumed epoch
+        num_update_steps_trained = 0
+        if epoch == epochs_trained and resume_from_checkpoint is not None:
+            if steps_trained_in_current_epoch > 0 and not self.args.ignore_data_skip:
+                train_dataloader = skip_first_batches(train_dataloader, steps_trained_in_current_epoch)
+                step = steps_trained_in_current_epoch - 1
+                num_update_steps_trained = steps_trained_in_current_epoch // self.args.gradient_accumulation_steps
+                rng_to_sync = True
+            elif steps_trained_in_current_epoch == 0:
+                self._load_rng_state(resume_from_checkpoint)
+
+        if hasattr(train_dataloader, "set_epoch"):
+            train_dataloader.set_epoch(epoch)
+        epoch_iterator = iter(train_dataloader)
+
+        # We chunkify the epoch iterator into gradient accumulation steps `n` batches
+        remainder = steps_in_epoch % self.args.gradient_accumulation_steps
+        if remainder == 0:
+            remainder = self.args.gradient_accumulation_steps
+
+        # Outer loop: one iteration per optimizer step. Each iteration prefetches
+        # `gradient_accumulation_steps` batches (fewer for the last step if the epoch
+        # doesn't divide evenly).
+        for update_step in range(num_update_steps_trained, num_update_steps_per_epoch):
+            num_batches = (
+                self.args.gradient_accumulation_steps if update_step != (num_update_steps_per_epoch - 1) else remainder
+            )
+            batch_samples, num_items_in_batch = self.get_batch_samples(epoch_iterator, num_batches, self.args.device)
+
+            # This is used to correctly scale the loss when the last accumulation step has fewer batches.
+            # Not used if `num_items_in_batch` is not None.
+            self.current_gradient_accumulation_steps = len(batch_samples)
+
+            # need to sync after if we skipped the batches in `get_batch_samples` for shuffle order reason
+            if rng_to_sync:
+                self._load_rng_state(resume_from_checkpoint)
+                rng_to_sync = False
+
+            # Inner loop: forward + backward for each micro-batch. Gradients are
+            # accumulated without syncing until the last micro-batch, then we clip,
+            # step the optimizer, and log/save/evaluate.
+            for i, inputs in enumerate(batch_samples):
+                step += 1
+                do_sync_step = (step + 1) % self.args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
+                # Since we perform prefetching, we need to manually set sync_gradients
+                self.accelerator.gradient_state._set_sync_gradients(do_sync_step)
+
+                if step % self.args.gradient_accumulation_steps == 0:
+                    self.control = self.callback_handler.on_step_begin(self.args, self.state, self.control)
+
+                # We sync the gradients in the following cases: 1. sync_each_batch set to True 2. Using deepspeed 3. when we are at the last batch sample
+                if (
+                    self.accelerator.gradient_state.plugin_kwargs.get("sync_each_batch", False)
+                    or self.accelerator.distributed_type == DistributedType.DEEPSPEED
+                    or i == len(batch_samples) - 1
+                ):
+                    sync_context = contextlib.nullcontext
+                else:
+                    sync_context = functools.partial(self.accelerator.no_sync, model=model)
+                with sync_context():
+                    tr_loss_step = self.training_step(model, inputs, num_items_in_batch, epoch=epoch)
+
+                if (
+                    self.args.logging_nan_inf_filter
+                    and not is_torch_xla_available()
+                    and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
+                ):
+                    # if loss is nan or inf simply add the average of previous logged losses
+                    self._tr_loss += self._tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
+                else:
+                    if self._tr_loss.device != tr_loss_step.device:
+                        raise ValueError(
+                            f"Calculated loss must be on the original device: {self._tr_loss.device} but device in use is {tr_loss_step.device}"
+                        )
+                    self._tr_loss += tr_loss_step
+
+                self.current_flos += float(self.floating_point_ops(inputs))
+                self._track_num_input_tokens(inputs)
+
+                if do_sync_step:
+                    grad_norm = None
+                    if self.args.max_grad_norm > 0:
+                        grad_norm = self._clip_grad_norm(model)
+                        
+                    grad_norm = self._get_grad_norm(model, grad_norm=grad_norm)
+                    
+                    self.control = self.callback_handler.on_pre_optimizer_step(self.args, self.state, self.control)
+                    self.optimizer.step()
+                    self.control = self.callback_handler.on_optimizer_step(self.args, self.state, self.control)
+
+                    # get leaning rate before update
+                    learning_rate = self._get_learning_rate()
+
+                    if not self.accelerator.optimizer_step_was_skipped:
+                        # Delay optimizer scheduling until metrics are generated
+                        if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                            self.lr_scheduler.step()
+
+                    model.zero_grad()
+                    self.state.global_step += 1
+                    self.state.epoch = epoch + (step + 1) / steps_in_epoch
+                    self.control = self.callback_handler.on_step_end(self.args, self.state, self.control)
+                    self._maybe_log_save_evaluate(
+                        self._tr_loss,
+                        grad_norm,
+                        model,
+                        trial,
+                        epoch,
+                        ignore_keys_for_eval,
+                        start_time,
+                        learning_rate=learning_rate,
+                    )
+                else:
+                    self.control = self.callback_handler.on_substep_end(self.args, self.state, self.control)
+
+                if self.control.should_epoch_stop or self.control.should_training_stop:
+                    break
+            if self.control.should_epoch_stop or self.control.should_training_stop:
+                break
+
+        # PyTorch/XLA relies on the dataloader to insert mark_step each iteration.
+        # When we break out of the loop early, we flush the pending graph manually.
+        if is_torch_xla_available():
+            xm.mark_step()
+
+        if step < 0:
+            logger.warning(
+                "There seems not to be a single sample in your epoch_iterator, stopping training at step"
+                f" {self.state.global_step}! This is expected if you're using an IterableDataset and set"
+                f" num_steps ({self.state.max_steps}) higher than the number of available samples."
+            )
+            self.control.should_training_stop = True
+
+        self.control = self.callback_handler.on_epoch_end(self.args, self.state, self.control)
+        self._maybe_log_save_evaluate(
+            self._tr_loss,
+            grad_norm,
+            model,
+            trial,
+            epoch,
+            ignore_keys_for_eval,
+            start_time,
+            learning_rate=learning_rate,
+        )
+
+
+    def _gradients(self, loss: th.Tensor, epoch: int, **kwargs):
         # Compute gradients for grounding and value system losses separately
         # Taken from accelerate.backward.
 
@@ -339,7 +507,7 @@ class MORewardTrainer(Trainer):
                 "Optimizer must be an instance of ConstrainedOptimizer or AcceleratedOptimizer wrapping a ConstrainedOptimizer. Unregistered optimizer type: {}".format(type(optimizer)))
 
         loss_combined = constrained_optim.custom_backward(
-            loss_gr, loss_gr_ideal, loss_vs)
+            loss_gr, loss_gr_ideal, loss_vs, epoch=epoch, **kwargs)
         
         return loss_combined
 
@@ -349,6 +517,7 @@ class MORewardTrainer(Trainer):
         inputs: dict[str, torch.Tensor | Any],
         prediction_loss_only: bool,
         ignore_keys: list[str] | None = None,
+        epoch="EVAL",
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """
         Taken from the library. It has changes to handle multiple losses. Some implementations may raise errors as they were not tested
@@ -410,7 +579,7 @@ class MORewardTrainer(Trainer):
                         num_items_in_batch = self._get_num_items_in_batch(
                             [inputs], self.args.device)
                         loss, outputs = self.compute_loss(
-                            model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch
+                            model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch,epoch=epoch
                         )
                     if len(loss.shape) > 1:
                         loss = loss.detach().mean(dim=0)  # CHANGED FOR MULTILABEL LOSS!
@@ -446,6 +615,91 @@ class MORewardTrainer(Trainer):
 
         return (loss, logits, labels, others["target_probs_quantitative"], others["target_probs_qualitative"])
 
+    def compute_loss(
+        self,
+        model: nn.Module,
+        inputs: dict[str, torch.Tensor | Any],
+        return_outputs: bool = False,
+        num_items_in_batch: torch.Tensor | int | None = None,
+        epoch=None,
+    ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+        """
+        How the loss is computed by Trainer. By default, all models return the loss in the first element.
+
+        Args:
+            model (`nn.Module`):
+                The model to compute the loss for.
+            inputs (`dict[str, torch.Tensor | Any]`):
+                The input data for the model.
+            return_outputs (`bool`, *optional*, defaults to `False`):
+                Whether to return the model outputs along with the loss.
+            num_items_in_batch (Optional[torch.Tensor], *optional*):
+                The number of items in the batch. If not passed, the loss is computed
+                using the default batch size reduction logic.
+
+        Returns:
+            The loss of the model along with its output if return_outputs was set to True
+
+        Subclass and override for custom behavior. If you are not using `num_items_in_batch` when computing your loss,
+        make sure to overwrite `self.model_accepts_loss_kwargs` to `False`. Otherwise, the loss calculation might be slightly inaccurate when performing gradient accumulation.
+        """
+        pc = getattr(self.accelerator, "parallelism_config", None)
+        if pc is not None and pc.sp_backend == "deepspeed" and pc.sp_enabled and self.model.training:
+            return deepspeed_sp_compute_loss(self.accelerator, model, inputs, return_outputs, pc)
+
+        if (self.label_smoother is not None or self.compute_loss_func is not None) and "labels" in inputs:
+            labels = inputs.pop("labels")
+        else:
+            labels = None
+        if self.model_accepts_loss_kwargs:
+            kwargs = {}
+            if num_items_in_batch is not None:
+                kwargs["num_items_in_batch"] = num_items_in_batch
+            inputs = {**inputs, **kwargs}
+        outputs = model(**inputs)
+
+        # User-defined compute_loss function
+        if self.compute_loss_func is not None:
+            if labels is None:
+                logger.warning(
+                    "Trainer: `compute_loss_func` is defined but `labels=None`. "
+                    "Your custom loss function will still be called with labels=None. "
+                )
+            loss = self.compute_loss_func(
+                outputs,
+                labels,
+                num_items_in_batch=num_items_in_batch,epoch=epoch
+            )
+        # Default HF loss handling (label smoothing) if no custom loss function
+        elif labels is not None:
+            unwrapped_model = self.accelerator.unwrap_model(model)
+            model_name = (
+                unwrapped_model.base_model.model._get_name()
+                if _is_peft_model(unwrapped_model)
+                else unwrapped_model._get_name()
+            )
+            if model_name in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.values():
+                loss = self.label_smoother(outputs, labels, shift_labels=True)
+            else:
+                loss = self.label_smoother(outputs, labels)
+        else:
+            if isinstance(outputs, dict) and "loss" not in outputs:
+                raise ValueError(
+                    "The model did not return a loss from the inputs, only the following keys: "
+                    f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
+                )
+            # We don't use .loss here since the model may return tuples instead of ModelOutput.
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+
+        if (
+            self.args.average_tokens_across_devices
+            and (self.model_accepts_loss_kwargs or self.compute_loss_func)
+            and num_items_in_batch is not None
+        ):
+            loss *= self.accelerator.num_processes if self.args.n_gpu <= 1 else self.args.n_gpu
+
+        return (loss, outputs) if return_outputs else loss
+    
     def evaluation_loop(
         self,
         dataloader: DataLoader,
@@ -545,7 +799,7 @@ class MORewardTrainer(Trainer):
 
             # Prediction step
             losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
-                model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
+                model, inputs, prediction_loss_only, ignore_keys=ignore_keys, epoch="EVAL")
             main_input_name = getattr(
                 self.model, "main_input_name", "input_ids")
             inputs_decode = (
