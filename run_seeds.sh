@@ -1,14 +1,8 @@
 #!/bin/bash
 
-<<<<<<< HEAD
 GPUS="L40S:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
-CPU=True
-=======
-GPUS="A100:1"
-GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=False
->>>>>>> main
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
