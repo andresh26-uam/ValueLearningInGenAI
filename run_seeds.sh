@@ -8,23 +8,23 @@ else
   SCRIPT=sbatch_from_json.sh
 fi
 DATASET=ultra
-CONFIG=run_configs/llama_linear_firstgr_thenvs.json
+CONFIG=run_configs/llama_grounding_linear.json
 
 EVAL_EVERY_STEPS=""
 if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
-  NAME=LlamaBTRM
+  NAME=LlamaBTRMv2
 elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
-  NAME=LlamaSEQ-RM
+  NAME=LlamaSEQ-RMv2
 elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
-  NAME=LlamaVSLRM
+  NAME=LlamaVSLRMv2
 elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
-  NAME=LlamaGRRM
+  NAME=LlamaGRRMv2
   elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
-  NAME=LlamaVSL-NL-RM
+  NAME=LlamaVSL-NL-RMv2
 elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
-  NAME=SmolBTRM
+  NAME=SmolBTRMv2
 elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
-  NAME=SmolVSLRM
+  NAME=SmolVSLRMv2
 else
   NAME=test
 fi
