@@ -1,6 +1,6 @@
 #!/bin/bash
 GPUS="--gpus=L40S:1"
-CPU=False
+CPU=True
 if [[ "$CPU" == "True" ]]; then
   GPUS=""
   SCRIPT=cpu_from_json.sh
