@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from functools import partial
-from typing import Any, Callable, Dict, Literal, Optional, Unpack
+from typing import Any, Callable, Dict, Literal, Optional
 
 import numpy as np
 import torch as th
@@ -1305,7 +1305,7 @@ class MORMForSequenceClassification(PreTrainedModel):
         labels: th.LongTensor | None = None,
         use_cache: bool | None = None,
         score_mode = "normal",
-        **kwargs: Unpack[Dict[str, Any]],
+        **kwargs: Dict[str, Any],
     ) -> SequenceClassifierOutputWithPast:
         transformer_outputs: BaseModelOutputWithPast = getattr(self, self.base_model_prefix)(
             input_ids,

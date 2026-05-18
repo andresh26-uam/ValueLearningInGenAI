@@ -1,8 +1,8 @@
 #!/bin/bash
 
-GPUS="L40S:1"
+GPUS="A100:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
-CPU=True
+CPU=False
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
@@ -10,7 +10,7 @@ if [[ "$CPU" == "True" ]]; then
 else
   SCRIPT=sbatch_from_json.sh
 fi
-DATASET=ultra
+DATASET=pku
 CONFIG=run_configs/llama_grounding_linear.json
 
 EVAL_EVERY_STEPS=""
