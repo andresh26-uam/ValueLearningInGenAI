@@ -1,7 +1,10 @@
 #!/bin/bash
-GPUS="--gpus=L40S:1"
+
+GPUS="L40S:1"
+GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=True
 if [[ "$CPU" == "True" ]]; then
+  GPUDIRECTIVE=""
   GPUS=""
   SCRIPT=cpu_from_json.sh
 else
@@ -52,6 +55,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUS
+  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
 done
 
