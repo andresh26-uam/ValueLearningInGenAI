@@ -1,27 +1,28 @@
 {
-  "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
-  "loss_func_type": "EVALUATION_ONLY",
-  "use_frozen_base_model": true,
-  "max_grad_norm": 0.01,
-  "learning_rate": 0.00,
-  "grounding_learning_rate": 0.00,
-  "lagrange_learning_rate": 0.00,
-
-  "do_save": false,
-  "do_checkpointing": false,
-  "use_embeddings": false,
-  "save_embedded_dataset": false,
-  "num_train_epochs": 1,
-  "eval_every_steps": 10000000,
-  "per_device_train_batch_size": 8,
-  "per_device_eval_batch_size": 8,
-  "gradient_accumulation_steps": 5,
-  "lambda_decay": 0.0,
-  "rew_center_coefficient": 0.0,
-  "layer_normalization": "none",
-  "use_cpu": false,
-
-  "activate_discordance_epsilon_for_loss": false,
-
-  "run_name": "eval_armo"
-}
+    "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
+    "loss_func_type": "EVALUATION_ONLY",
+    "use_frozen_base_model": true,
+    "max_grad_norm": 0.01,
+    "learning_rate": 0.00,
+    "grounding_learning_rate": 0.00,
+    "lagrange_learning_rate": 0.00,
+  
+    "do_save": false,
+    "do_checkpointing": false,
+    "use_embeddings": false,
+    "save_embedded_dataset": false,
+    "num_train_epochs": 1,
+    "eval_every_steps": 10000000,
+    "per_device_train_batch_size": 8,
+    "per_device_eval_batch_size": 8,
+    "gradient_accumulation_steps": 5,
+    "lambda_decay": 0.0,
+    "rew_center_coefficient": 0.0,
+    "layer_normalization": "none",
+    "use_cpu": false,
+  
+    "activate_discordance_epsilon_for_loss": false,
+  
+    "run_name": "eval_armo"
+  }
+  

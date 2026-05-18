@@ -4,13 +4,12 @@ from pathlib import Path
 from typing import Any
 
 # IMport HF_TOKEN from .env
-import os
 from dotenv import load_dotenv
 load_dotenv()
 
-from datasets import load_dataset, load_from_disk, Dataset
+from datasets import load_dataset, Dataset
 
-from vsllib.defines import LOCAL_DATASET_PATH, ULTRAFEEDBACK_PROCESSED_PATH
+from vsllib.defines import ULTRAFEEDBACK_PROCESSED_PATH
 
 # Load HF tokens.
 def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
@@ -62,7 +61,6 @@ def _build_pair_row(sample: dict[str, Any], completion_a: dict[str, Any], comple
 
 
 def ultrafeedback_processor(
-	output_path: str = "ultrafeedback_pairs",
 	dataset_name: str = "openbmb/UltraFeedback",
 ) -> int:
 	dataset: Dataset = load_dataset(dataset_name, split="train")

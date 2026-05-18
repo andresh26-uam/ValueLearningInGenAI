@@ -49,5 +49,5 @@
     "eval_every_steps": 100,
 
 
-    "run_name": "smol_def_linear"
+    "run_name": "smol_nolag_linear"
 }

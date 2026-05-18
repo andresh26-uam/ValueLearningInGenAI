@@ -1,25 +1,43 @@
 {
-  "groups": [
-    {
-        "name": "Armo-RM",
-        "folders": [
-          "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
-          "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
-          "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
-          "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42"
-        ],
-        "metrics": {
-            "Avg. Chr.": "test_avg_coherence_e0.1",
-            "Represent.": "test_representativeness_e0.0",
-            "Prompt Follow.": "test_coherence_e0.1_0",
-            "Object.": "test_coherence_e0.1_1",
-            "Clarity": "test_coherence_e0.1_2",
-            "Inf. Rich.": "test_coherence_e0.1_3",
-            "Safety": "test_coherence_e0.1_4"
-        }
-      },
+    "groups": [
       {
-        "name": "BT-RM",
+          "name": "Armo-RM",
+          "folders": [
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaARMOEVAL_0512_133130_epo1_s42"
+          ],
+          "metrics": {
+              "Avg. Chr.": "test_avg_coherence_e0.1",
+              "Represent.": "test_representativeness_e0.0",
+              "Prompt Follow.": "test_coherence_e0.1_0",
+              "Object.": "test_coherence_e0.1_1",
+              "Clarity": "test_coherence_e0.1_2",
+              "Inf. Rich.": "test_coherence_e0.1_3",
+              "Safety": "test_coherence_e0.1_4"
+          }
+        },
+        {
+          "name": "BT-RM",
+          "folders": [
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_153954_epo100_s42/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191049_epo100_s43/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191051_epo100_s44/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191054_epo100_s45/last_checkpoint"
+          ],
+          "metrics": {
+              "Avg. Chr.": "test_avg_coherence_e0.5",
+              "Represent.": "test_representativeness_e0.5",
+              "Prompt Follow.": "test_coherence_e0.5_0",
+              "Object.": "test_coherence_e0.5_1",
+              "Clarity": "test_coherence_e0.5_2",
+              "Inf. Rich.": "test_coherence_e0.5_3",
+              "Safety": "test_coherence_e0.5_4"
+          }
+        },
+      {
+        "name": "VSL-RM",
         "folders": [
           "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_153954_epo100_s42/last_checkpoint",
           "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_L40S:1LlamaBTRM_0514_191049_epo100_s43/last_checkpoint",
@@ -53,16 +71,4 @@
         "Inf. Rich.": "test_coherence_e0.5_3",
         "Safety": "test_coherence_e0.5_4"
     }
-    }
-  ],
-  
-  "metrics": {
-    "test_coherence_0": "Prompt Follow.",
-    "test_coherence_1": "Object.",
-    "test_coherence_2": "Clarity",
-    "test_coherence_3": "Inf. Rich.",
-    "test_coherence_4": "Safety",
-    "test_avg_coherence": "Avg. Chr.",
-    "test_representativeness": "Represent."
   }
-}
