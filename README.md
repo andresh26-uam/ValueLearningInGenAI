@@ -37,6 +37,7 @@ We use SLURM commands in our available setup, but you can use this general comma
 
 Training is perfectly feasible in CPU, will assume full Float32 precision. Just add `--use_cpu` as an optional flag at the end of the previous training commands, and make sure to change to a different accelerator configuration file (e.g. `accelerate launch --config_file=accelerate_config/cpu_config.yaml vsl-rm/no_context_vsl.py...`). See the [cpu_from_json.sh](https://github.com/andresh26-uam/ValueLearningInGenAI/blob/main/cpu_from_json.sh) file for an example.
  
+Regarding the `run_configs.json` folder, the `llama_linear.json` has the configuration to run the proposed training algorithm using the Llama-based base model from [Armo-RM](https://huggingface.co/RLHFlow/ArmoRM-Llama3-8B-v0.1). There is a counterpart `smol_linear.json` that trains the proposed model using [SmolLM-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM-135M-Instruct) as base model. There are other variants used to train the baselines used in our experiments.
 
 ## Known Issues
 
