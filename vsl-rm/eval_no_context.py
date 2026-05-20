@@ -290,7 +290,7 @@ def main() -> None:
 
         model = MORMForSequenceClassification.from_pretrained(
             str(script_args.checkpoint_path),
-        )
+        ).to(device="cuda:0")
         # Read seed info:
         """seed_info = {
             "seed": self.args.seed,
@@ -402,7 +402,7 @@ def main() -> None:
         # Keep these in sync with model config if base-model reward heads are active.
         model.config.base_model_reward_heads_module_name = reward_heads_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_reward_heads_module_name
         model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
-
+        
         # Use the exact same metric and loss functions as training.
         trainer = MORewardTrainer(
             model=model,
@@ -421,6 +421,7 @@ def main() -> None:
             data_collator=dc,
         )
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
+        
         metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
         flat_metrics_test = flatten_metrics_for_csv(metrics_test)
         write_metrics_csv(flat_metrics_test, script_args.results_dir, name="test_metrics.csv")
