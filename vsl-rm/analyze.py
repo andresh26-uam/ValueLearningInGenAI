@@ -29,6 +29,7 @@ class GroupDefinition:
 class GroupMetrics:
     definition: GroupDefinition
     frame: pd.DataFrame
+    weights_frame: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass(frozen=True)
@@ -86,17 +87,37 @@ def _load_metrics_frame(folder: Path) -> pd.DataFrame:
     return numeric_frame
 
 
+def _load_value_system_weights_frame(folder: Path) -> pd.DataFrame:
+    csv_path = folder / "value_system_weights.csv"
+    if not csv_path.is_file():
+        return pd.DataFrame()
+
+    frame = pd.read_csv(csv_path)
+    if frame.empty:
+        return pd.DataFrame()
+
+    numeric_frame = frame.apply(pd.to_numeric, errors="coerce")
+    numeric_frame = numeric_frame.dropna(axis=1, how="all")
+    return numeric_frame
+
+
 def _load_group_from_folders(group: GroupDefinition) -> GroupMetrics:
     frames = []
+    weight_frames = []
     for folder in group.folders:
         resolved_folder = _resolve_metrics_folder(folder)
         if resolved_folder is None:
             raise FileNotFoundError(f"Could not locate test_metrics.csv for folder: {folder}")
         frames.append(_load_metrics_frame(resolved_folder))
+        weights_frame = _load_value_system_weights_frame(resolved_folder)
+        if not weights_frame.empty:
+            weight_frames.append(weights_frame)
 
     combined = pd.concat(frames, ignore_index=True, sort=True)
     combined = combined.select_dtypes(include=[np.number])
-    return GroupMetrics(group, combined)
+    combined_weights = pd.concat(weight_frames, ignore_index=True, sort=True) if weight_frames else pd.DataFrame()
+    combined_weights = combined_weights.select_dtypes(include=[np.number]) if not combined_weights.empty else combined_weights
+    return GroupMetrics(group, combined, combined_weights)
 
 
 def _load_groups_from_json(json_file: Path, results_root: Path) -> list[GroupDefinition]:
@@ -216,15 +237,39 @@ def _selected_metric_definitions(groups: list[GroupMetrics], metric_definitions:
     return [MetricDefinition(source=metric_name, label=metric_name) for metric_name in sorted(metric_set)]
 
 
+def _selected_summary_definitions(groups: list[GroupMetrics], metric_definitions: list[MetricDefinition]) -> list[MetricDefinition]:
+    selected_definitions = list(metric_definitions) if metric_definitions else _selected_metric_definitions(groups, metric_definitions)
+    selected_labels = {definition.label for definition in selected_definitions}
+
+    weight_columns: set[str] = set()
+    for group in groups:
+        weight_columns.update(column for column in group.weights_frame.columns if column != "__source_folder__")
+
+    for weight_column in sorted(weight_columns):
+        if weight_column not in selected_labels:
+            selected_definitions.append(MetricDefinition(source=weight_column, label=weight_column))
+
+    return selected_definitions
+
+
+def _group_column(group: GroupMetrics, source_name: str) -> Optional[pd.Series]:
+    if source_name in group.frame.columns:
+        return group.frame[source_name]
+    if source_name in group.weights_frame.columns:
+        return group.weights_frame[source_name]
+    return None
+
+
 def _normalize_group_metrics(group: GroupMetrics, metric_definitions: list[MetricDefinition]) -> GroupMetrics:
     normalized_columns: dict[str, pd.Series] = {}
     for metric in metric_definitions:
         source_name = group.definition.metric_sources.get(metric.label, metric.source)
-        if source_name in group.frame.columns:
-            normalized_columns[metric.label] = group.frame[source_name]
+        column = _group_column(group, source_name)
+        if column is not None:
+            normalized_columns[metric.label] = column
 
     normalized_frame = pd.DataFrame(normalized_columns)
-    return GroupMetrics(group.definition, normalized_frame)
+    return GroupMetrics(group.definition, normalized_frame, group.weights_frame)
 
 
 def _format_mean_std(values: pd.Series) -> str:
@@ -252,7 +297,7 @@ def _summary_table(groups: list[GroupMetrics], metric_definitions: list[MetricDe
         r"\begin{table}[p]",
         r"\centering",
         r"\small",
-        r"\caption{Average and standard deviation of each metric per group.}",
+        r"\caption{Average and standard deviation of each metric and value system weight per group.}",
         r"\label{tab:group-summary}",
         r"\resizebox{\textwidth}{!}{%",
         rf"\begin{{tabular}}{{{'l' + 'r' * len(metric_definitions)}}}",
@@ -265,8 +310,9 @@ def _summary_table(groups: list[GroupMetrics], metric_definitions: list[MetricDe
         for group in groups:
             row = [_latex_escape(group.definition.label)]
             for metric in metric_definitions:
-                if metric.label in group.frame.columns:
-                    row.append(_format_mean_std(group.frame[metric.label]))
+                column = _group_column(group, metric.label)
+                if column is not None:
+                    row.append(_format_mean_std(column))
                 else:
                     row.append("--")
             lines.append(_latex_row(row))
@@ -458,8 +504,9 @@ def main() -> None:
 
     raw_group_metrics = _collect_group_metrics(groups)
     metric_definitions = _selected_metric_definitions(raw_group_metrics, _load_metric_definitions(args.json_file.resolve()))
+    summary_definitions = _selected_summary_definitions(raw_group_metrics, metric_definitions)
     group_metrics = [_normalize_group_metrics(group, metric_definitions) for group in raw_group_metrics]
-    document = _build_document(group_metrics, metric_definitions)
+    document = _build_document(group_metrics, summary_definitions)
 
     output_path = args.output_tex
     if output_path is None:

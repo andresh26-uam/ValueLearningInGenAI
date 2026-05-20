@@ -107,6 +107,12 @@ def _resolve_nested_checkpoint_path(start_path: Path, *, allow_finish: bool) -> 
             print(f"No subfolders found in {current_path}.")
             return None
 
+        # Auto-select if only one checkpoint available
+        if len(subdirs) == 1:
+            print(f"Only one checkpoint available: {subdirs[0]}. Auto-selecting.")
+            current_path = current_path / subdirs[0]
+            continue
+
         for i, item in enumerate(subdirs):
             print(f"  - ({i}) {item}")
 
@@ -126,14 +132,42 @@ def _resolve_nested_checkpoint_path(start_path: Path, *, allow_finish: bool) -> 
         print("trying...")
 
 
-def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool) -> Optional[Path]:
-    available_runs = [item for item in os.listdir(output_path) if os.path.isdir(os.path.join(output_path, item)) and len(os.listdir(os.path.join(output_path, item))) > 0]
+def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool, dataset: Optional[str] = None, already_selected: Optional[List[Path]] = None) -> Optional[Path]:
+    already_selected = already_selected or []
+    
+    # Extract top-level checkpoint names from already selected paths
+    already_selected_names = set()
+    for p in already_selected:
+        try:
+            # Get the relative path from output_path and extract the top-level name
+            rel_path = p.relative_to(output_path)
+            top_level_name = rel_path.parts[0]
+            already_selected_names.add(top_level_name)
+        except ValueError:
+            # If p is not relative to output_path, use the name
+            already_selected_names.add(p.name)
+    
+    all_runs = [item for item in os.listdir(output_path) if os.path.isdir(os.path.join(output_path, item)) and len(os.listdir(os.path.join(output_path, item))) > 0]
+    
+    # Filter: exclude already selected and those not matching dataset
+    available_runs = []
+    if isinstance(dataset, Enum):
+        dataset_str = dataset.value.lower()
+    else:   
+        dataset_str = dataset.lower() if dataset else None
+    for item in all_runs:
+        if item in already_selected_names:
+            continue
+        if dataset_str and dataset_str not in item.lower():
+            continue
+        available_runs.append(item)
+    
     if not available_runs:
-        print(f"No available runs found in {output_path}.")
+        print(f"No available runs found in {output_path}" + (f" matching dataset '{dataset}'" if dataset else "") + ".")
         return None
 
     while True:
-        print(f"Available runs in {output_path}:")
+        print(f"Available runs in {output_path}" + (f" (matching dataset '{dataset}')" if dataset else "") + ":")
         for i, item in enumerate(available_runs):
             print(f"  - ({i}) {item}")
 
@@ -205,6 +239,8 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
         prompted_path = _prompt_for_checkpoint_path(
             output_path,
             allow_finish=len(resolved_checkpoint_paths) > 0,
+            dataset=script_args.dataset,
+            already_selected=resolved_checkpoint_paths,
         )
         if prompted_path is not None:
             resolved_checkpoint_paths.append(prompted_path)
@@ -213,6 +249,8 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
         prompted_path = _prompt_for_checkpoint_path(
             output_path,
             allow_finish=len(resolved_checkpoint_paths) > 0,
+            dataset=script_args.dataset,
+            already_selected=resolved_checkpoint_paths,
         )
         if prompted_path is None:
             if len(resolved_checkpoint_paths) == 0:
@@ -263,7 +301,7 @@ def load_training_args_from_checkpoint(checkpoint_path: str, default_batch_size:
     return default_batch_size, default_batch_size
 
 
-def extract_and_save_value_system_weights(model, checkpoint_path: str, results_dir: Path, value_keys: List[str]) -> None:
+def extract_and_save_value_system_weights(model, results_dir: Path) -> None:
     """
     Extract value system weights from model and save to CSV.
     """
@@ -282,7 +320,7 @@ def extract_and_save_value_system_weights(model, checkpoint_path: str, results_d
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         # Write header
-        writer.writerow([f"value_{i}" if i >= len(value_keys) else value_keys[i] for i in range(len(weights))])
+        writer.writerow([f"value_{i}" for i in range(len(weights))])
         # Write weights row
         writer.writerow(weights.tolist())
     
@@ -359,6 +397,20 @@ def main() -> None:
 
         model.eval()
 
+         # Extract and save value system weights if requested
+        if bool(script_args.weights_only):
+            results_path = Path(script_args.results_dir)
+            extract_and_save_value_system_weights(
+                model,
+                results_path
+            )
+            print(f"Weight extraction complete for checkpoint: {script_args.checkpoint_path}")
+            model = model.to(device="cpu")
+            embed_model = embed_model.to(device="cpu") if embed_model is not None else None
+            del dataset, model, tokenizer, dc, embed_model
+            torch.cuda.empty_cache()
+            continue
+
         dc = MORewardDataCollatorWithPadding(
             tokenizer=tokenizer,
             max_length=int(script_args.max_length),
@@ -393,21 +445,7 @@ def main() -> None:
                 f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
             )
 
-        # Extract and save value system weights if requested
-        if bool(script_args.weights_only):
-            results_path = Path(script_args.results_dir)
-            extract_and_save_value_system_weights(
-                model,
-                str(script_args.checkpoint_path),
-                results_path,
-                dataset.value_keys
-            )
-            print(f"Weight extraction complete for checkpoint: {script_args.checkpoint_path}")
-            model = model.to(device="cpu")
-            embed_model = embed_model.to(device="cpu") if embed_model is not None else None
-            del dataset, model, tokenizer, dc, embed_model
-            torch.cuda.empty_cache()
-            continue
+       
 
         model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
         reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
