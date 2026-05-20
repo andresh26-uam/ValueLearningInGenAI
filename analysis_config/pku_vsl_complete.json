@@ -21,7 +21,10 @@
         {
           "name": "BT-RM",
           "folders": [
-            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaBTRMv2_0518_152659_epo100_s42/last_checkpoint"
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaBTRMv2_0518_152659_epo100_s42/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaBTRMv2_0520_162938_epo100_s43/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaBTRMv2_0520_162938_epo100_s44/last_checkpoint",
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaBTRMv2_0520_162938_epo100_s45/last_checkpoint"
           ],
           "metrics": {
               "Avg. Chr.": "test_avg_coherence_e0.5",
@@ -36,7 +39,10 @@
       {
         "name": "VSL-RM",
         "folders": [
-          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaVSLRMv2_0518_152659_epo100_s42/last_checkpoint"
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaVSLRMv2_0518_152659_epo100_s42/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaVSLRMv2_0520_090234_epo100_s43/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaVSLRMv2_0520_090233_epo100_s44/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaVSLRMv2_0520_090233_epo100_s45/last_checkpoint"
         ],
         "metrics": {
           "Avg. Chr.": "test_avg_coherence_e0.5",
@@ -51,8 +57,8 @@
         "name": "SEQ-RM",
         "folders": [
           "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaSEQ-RMv2_0518_152659_epo150_s42/last_checkpoint",
-
-
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaSEQ-RMv2_0519_163416_epo150_s43/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_H100:1LlamaSEQ-RMv2_0519_163416_epo150_s44/last_checkpoint",
           "no_context_vsl-ArmoRM-Llama3-8B-v0.1/pku_A100:1LlamaSEQ-RMv2_0519_162013_epo150_s45/last_checkpoint"
         ],
         "metrics": {
