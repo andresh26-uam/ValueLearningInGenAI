@@ -70,6 +70,10 @@ class EvalArguments(ScriptArguments):
         default=False,
         metadata={"help": "Whether to push the results to Hugging Face Hub. Requires HF_CLI_TOKEN env variable to be set."},
     )
+    weights_only: bool = field(
+        default=False,
+        metadata={"help": "If True, only extract and save value system weights without running full evaluation."},
+    )
 
 
 def _is_valid_checkpoint_dir(path: Path) -> bool:
@@ -259,6 +263,32 @@ def load_training_args_from_checkpoint(checkpoint_path: str, default_batch_size:
     return default_batch_size, default_batch_size
 
 
+def extract_and_save_value_system_weights(model, checkpoint_path: str, results_dir: Path, value_keys: List[str]) -> None:
+    """
+    Extract value system weights from model and save to CSV.
+    """
+    os.makedirs(results_dir, exist_ok=True)
+    
+    weights = model.value_system_layer.get_weights()
+    
+    # Convert weights to numpy if needed
+    if isinstance(weights, torch.Tensor):
+        weights = weights.cpu().detach().numpy()
+    
+    weights = np.asarray(weights).flatten()
+    
+    # Create CSV with weights for each value dimension
+    csv_path = results_dir / "value_system_weights.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        # Write header
+        writer.writerow([f"value_{i}" if i >= len(value_keys) else value_keys[i] for i in range(len(weights))])
+        # Write weights row
+        writer.writerow(weights.tolist())
+    
+    print(f"Value system weights saved to: {csv_path.resolve()}")
+
+
 
 
 
@@ -362,6 +392,22 @@ def main() -> None:
             raise ValueError(
                 f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
             )
+
+        # Extract and save value system weights if requested
+        if bool(script_args.weights_only):
+            results_path = Path(script_args.results_dir)
+            extract_and_save_value_system_weights(
+                model,
+                str(script_args.checkpoint_path),
+                results_path,
+                dataset.value_keys
+            )
+            print(f"Weight extraction complete for checkpoint: {script_args.checkpoint_path}")
+            model = model.to(device="cpu")
+            embed_model = embed_model.to(device="cpu") if embed_model is not None else None
+            del dataset, model, tokenizer, dc, embed_model
+            torch.cuda.empty_cache()
+            continue
 
         model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
         reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
