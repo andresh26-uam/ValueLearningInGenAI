@@ -398,15 +398,17 @@ def main() -> None:
         model.eval()
 
          # Extract and save value system weights if requested
+        
+        results_path = Path(script_args.results_dir)
+        extract_and_save_value_system_weights(
+            model,
+            results_path
+        )
+        print(f"Weight extraction complete for checkpoint: {script_args.checkpoint_path}")
+        model = model.to(device="cpu")
+        embed_model = embed_model.to(device="cpu") if embed_model is not None else None
+        
         if bool(script_args.weights_only):
-            results_path = Path(script_args.results_dir)
-            extract_and_save_value_system_weights(
-                model,
-                results_path
-            )
-            print(f"Weight extraction complete for checkpoint: {script_args.checkpoint_path}")
-            model = model.to(device="cpu")
-            embed_model = embed_model.to(device="cpu") if embed_model is not None else None
             del dataset, model, tokenizer, dc, embed_model
             torch.cuda.empty_cache()
             continue
