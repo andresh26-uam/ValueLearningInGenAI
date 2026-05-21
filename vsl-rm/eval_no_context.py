@@ -396,6 +396,7 @@ def main() -> None:
             
 
         model.eval()
+        embed_model = None
 
          # Extract and save value system weights if requested
         
