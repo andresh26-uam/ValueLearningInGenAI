@@ -1,6 +1,6 @@
 #!/bin/bash
 
-GPUS="L40S:1"
+GPUS="H100:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=False
 if [[ "$CPU" == "True" ]]; then
@@ -10,8 +10,8 @@ if [[ "$CPU" == "True" ]]; then
 else
   SCRIPT=sbatch_from_json.sh
 fi
-DATASET=ultra
-CONFIG=run_configs/llama_grounding_linear.json
+DATASET=pku
+CONFIG=run_configs/llama_linear_firstgr_thenvs.json
 
 EVAL_EVERY_STEPS=""
 if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
@@ -54,7 +54,7 @@ echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
-for seed in 42; do
+for seed in 46; do
   bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
 done
 

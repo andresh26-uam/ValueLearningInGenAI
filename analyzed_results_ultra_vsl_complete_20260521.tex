@@ -1,0 +1,113 @@
+\documentclass{article}
+
+\usepackage{booktabs}
+
+\usepackage{longtable}
+
+\usepackage{array}
+
+\usepackage{makecell}
+
+\usepackage{graphicx}
+
+\usepackage[margin=1in]{geometry}
+
+\begin{document}
+
+\title{Analyzed Results}
+
+\date{}
+
+\maketitle
+
+\section*{Summary}
+
+\begin{table}[p]
+\centering
+\small
+\caption{Average and standard deviation of each metric and value system weight per group.}
+\label{tab:group-summary}
+\begin{tabular}{lrrrrrr}
+\toprule
+Group & Helpfulness & Honesty & Truthfulness & Instruct. Follow. & Avg. Chr. & Represent. \\
+\midrule
+Armo-RM & \makecell[r]{0.826 \\ $\pm$0.0000} & \makecell[r]{0.814 \\ $\pm$0.0000} & \makecell[r]{0.840 \\ $\pm$0.0000} & \makecell[r]{0.824 \\ $\pm$0.0000} & \makecell[r]{0.826 \\ $\pm$0.0000} & \makecell[r]{0.754 \\ $\pm$0.0000} \\
+BT-RM & \makecell[r]{0.768 \\ $\pm$0.0043} & \makecell[r]{0.780 \\ $\pm$0.0024} & \makecell[r]{0.756 \\ $\pm$0.0110} & \makecell[r]{0.796 \\ $\pm$0.0029} & \makecell[r]{0.775 \\ $\pm$0.0024} & \makecell[r]{0.768 \\ $\pm$0.0002} \\
+VSL-RM & \makecell[r]{0.812 \\ $\pm$0.0005} & \makecell[r]{0.793 \\ $\pm$0.0002} & \makecell[r]{0.786 \\ $\pm$0.0007} & \makecell[r]{0.815 \\ $\pm$0.0003} & \makecell[r]{0.802 \\ $\pm$0.0002} & \makecell[r]{0.760 \\ $\pm$0.0003} \\
+SEQ-RM & \makecell[r]{0.813 \\ $\pm$0.0003} & \makecell[r]{0.793 \\ $\pm$0.0003} & \makecell[r]{0.788 \\ $\pm$0.0008} & \makecell[r]{0.815 \\ $\pm$0.0003} & \makecell[r]{0.802 \\ $\pm$0.0002} & \makecell[r]{0.758 \\ $\pm$0.0002} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Value System Weights}
+
+\begin{table}[p]
+\centering
+\small
+\caption{Average and standard deviation of value system weights per group.}
+\label{tab:group-weights}
+\begin{tabular}{lrrrr}
+\toprule
+Group & value\_0 & value\_1 & value\_2 & value\_3 \\
+\midrule
+Armo-RM & -- & -- & -- & -- \\
+BT-RM & \makecell[r]{0.255 \\ $\pm$0.005} & \makecell[r]{0.246 \\ $\pm$0.007} & \makecell[r]{0.250 \\ $\pm$0.005} & \makecell[r]{0.249 \\ $\pm$0.006} \\
+VSL-RM & \makecell[r]{0.096 \\ $\pm$0.002} & \makecell[r]{0.347 \\ $\pm$0.008} & \makecell[r]{0.408 \\ $\pm$0.007} & \makecell[r]{0.147 \\ $\pm$0.003} \\
+SEQ-RM & \makecell[r]{0.050 \\ $\pm$0.009} & \makecell[r]{0.477 \\ $\pm$0.010} & \makecell[r]{0.316 \\ $\pm$0.006} & \makecell[r]{0.158 \\ $\pm$0.006} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section*{Pairwise statistical tests}
+
+\begin{longtable}{llllrrl}
+\caption{Pairwise one-tailed Welch t-tests with data-adaptive direction per metric: test $H_1: \mu_{A} > \mu_{B}$ when Group A's sample mean exceeds Group B's, otherwise test $H_1: \mu_{A} < \mu_{B}$.}\label{tab:pairwise-tests}\\
+\toprule
+Group A & Group B & Metric & Test & $t$ & One-tailed $p$-value & Sig. \\
+\midrule
+\endfirsthead
+\toprule
+Group A & Group B & Metric & Test & $t$ & One-tailed $p$-value & Sig. \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+Armo-RM & BT-RM & Helpfulness & Welch t-test (A>B) & 26.58 & 0.0001 & *** \\
+Armo-RM & BT-RM & Honesty & Welch t-test (A>B) & 28.02 & 0.0000 & *** \\
+Armo-RM & BT-RM & Truthfulness & Welch t-test (A>B) & 15.23 & 0.0003 & *** \\
+Armo-RM & BT-RM & Instruct. Follow. & Welch t-test (A>B) & 19.59 & 0.0001 & *** \\
+Armo-RM & BT-RM & Avg. Chr. & Welch t-test (A>B) & 42.68 & 0.0000 & *** \\
+Armo-RM & BT-RM & Represent. & Welch t-test (A<B) & -176.14 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Helpfulness & Welch t-test (A>B) & 53.61 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Honesty & Welch t-test (A>B) & 191.58 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Truthfulness & Welch t-test (A>B) & 145.91 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Instruct. Follow. & Welch t-test (A>B) & 66.08 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Avg. Chr. & Welch t-test (A>B) & 197.90 & 0.0000 & *** \\
+Armo-RM & VSL-RM & Represent. & Welch t-test (A<B) & -48.25 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Helpfulness & Welch t-test (A>B) & 94.37 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Honesty & Welch t-test (A>B) & 143.35 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Truthfulness & Welch t-test (A>B) & 138.88 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Instruct. Follow. & Welch t-test (A>B) & 54.59 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Avg. Chr. & Welch t-test (A>B) & 296.90 & 0.0000 & *** \\
+Armo-RM & SEQ-RM & Represent. & Welch t-test (A<B) & -53.37 & 0.0000 & *** \\
+BT-RM & VSL-RM & Helpfulness & Welch t-test (A<B) & -20.26 & 0.0001 & *** \\
+BT-RM & VSL-RM & Honesty & Welch t-test (A<B) & -10.71 & 0.0008 & *** \\
+BT-RM & VSL-RM & Truthfulness & Welch t-test (A<B) & -5.51 & 0.0057 & ** \\
+BT-RM & VSL-RM & Instruct. Follow. & Welch t-test (A<B) & -13.15 & 0.0004 & *** \\
+BT-RM & VSL-RM & Avg. Chr. & Welch t-test (A<B) & -22.20 & 0.0001 & *** \\
+BT-RM & VSL-RM & Represent. & Welch t-test (A>B) & 51.92 & 0.0000 & *** \\
+BT-RM & SEQ-RM & Helpfulness & Welch t-test (A<B) & -20.58 & 0.0001 & *** \\
+BT-RM & SEQ-RM & Honesty & Welch t-test (A<B) & -10.76 & 0.0008 & *** \\
+BT-RM & SEQ-RM & Truthfulness & Welch t-test (A<B) & -5.78 & 0.0050 & ** \\
+BT-RM & SEQ-RM & Instruct. Follow. & Welch t-test (A<B) & -13.31 & 0.0004 & *** \\
+BT-RM & SEQ-RM & Avg. Chr. & Welch t-test (A<B) & -22.76 & 0.0001 & *** \\
+BT-RM & SEQ-RM & Represent. & Welch t-test (A>B) & 87.60 & 0.0000 & *** \\
+VSL-RM & SEQ-RM & Helpfulness & Welch t-test (A<B) & -1.78 & 0.0695 & ns \\
+VSL-RM & SEQ-RM & Honesty & Welch t-test (A<B) & -0.60 & 0.2857 & ns \\
+VSL-RM & SEQ-RM & Truthfulness & Welch t-test (A<B) & -2.87 & 0.0142 & * \\
+VSL-RM & SEQ-RM & Instruct. Follow. & Welch t-test (A<B) & -1.19 & 0.1406 & ns \\
+VSL-RM & SEQ-RM & Avg. Chr. & Welch t-test (A<B) & -4.06 & 0.0046 & ** \\
+VSL-RM & SEQ-RM & Represent. & Welch t-test (A>B) & 13.15 & 0.0000 & *** \\
+\end{longtable}
+
+\end{document}

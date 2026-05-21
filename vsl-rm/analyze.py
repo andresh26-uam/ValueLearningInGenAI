@@ -237,19 +237,12 @@ def _selected_metric_definitions(groups: list[GroupMetrics], metric_definitions:
     return [MetricDefinition(source=metric_name, label=metric_name) for metric_name in sorted(metric_set)]
 
 
-def _selected_summary_definitions(groups: list[GroupMetrics], metric_definitions: list[MetricDefinition]) -> list[MetricDefinition]:
-    selected_definitions = list(metric_definitions) if metric_definitions else _selected_metric_definitions(groups, metric_definitions)
-    selected_labels = {definition.label for definition in selected_definitions}
-
+def _selected_weight_definitions(groups: list[GroupMetrics]) -> list[MetricDefinition]:
     weight_columns: set[str] = set()
     for group in groups:
         weight_columns.update(column for column in group.weights_frame.columns if column != "__source_folder__")
 
-    for weight_column in sorted(weight_columns):
-        if weight_column not in selected_labels:
-            selected_definitions.append(MetricDefinition(source=weight_column, label=weight_column))
-
-    return selected_definitions
+    return [MetricDefinition(source=weight_column, label=weight_column) for weight_column in sorted(weight_columns)]
 
 
 def _group_column(group: GroupMetrics, source_name: str) -> Optional[pd.Series]:
@@ -281,6 +274,15 @@ def _format_mean_std(values: pd.Series) -> str:
     return f"\\makecell[r]{{{mean:.3f} \\\\ $\\pm${std:.4f}}}"
 
 
+def _format_mean_std_weights(values: pd.Series) -> str:
+    clean = values.dropna()
+    if clean.empty:
+        return "--"
+    mean = clean.mean()
+    std = clean.std(ddof=1) if len(clean) > 1 else 0.0
+    return f"\\makecell[r]{{{mean:.3f} \\\\ $\\pm${std:.3f}}}"
+
+
 def _format_number(
     value: float | int | np.floating | np.integer | None,
     decimals: int = 4,
@@ -292,17 +294,15 @@ def _format_number(
 
 def _summary_table(groups: list[GroupMetrics], metric_definitions: list[MetricDefinition]) -> str:
     metric_labels = [_latex_escape(metric.label) for metric in metric_definitions]
-    centered_headers = [f"\\multicolumn{{1}}{{c}}{{{label}}}" for label in metric_labels]
     lines = [
         r"\begin{table}[p]",
         r"\centering",
         r"\small",
         r"\caption{Average and standard deviation of each metric and value system weight per group.}",
         r"\label{tab:group-summary}",
-        r"\resizebox{\textwidth}{!}{%",
         rf"\begin{{tabular}}{{{'l' + 'r' * len(metric_definitions)}}}",
         r"\toprule",
-        _latex_row(["Group"] + centered_headers),
+        _latex_row(["Group"] + metric_labels),
         r"\midrule",
     ]
 
@@ -321,8 +321,42 @@ def _summary_table(groups: list[GroupMetrics], metric_definitions: list[MetricDe
 
     lines.extend([
         r"\bottomrule",
-        r"\end{tabular}%",
-        r"}",
+        r"\end{tabular}",
+        r"\end{table}",
+    ])
+    return "\n".join(lines)
+
+
+def _weights_table(groups: list[GroupMetrics], weight_definitions: list[MetricDefinition]) -> str:
+    weight_labels = [_latex_escape(weight.label) for weight in weight_definitions]
+    lines = [
+        r"\begin{table}[p]",
+        r"\centering",
+        r"\small",
+        r"\caption{Average and standard deviation of value system weights per group.}",
+        r"\label{tab:group-weights}",
+        rf"\begin{{tabular}}{{{'l' + 'r' * len(weight_definitions)}}}",
+        r"\toprule",
+        _latex_row(["Group"] + weight_labels),
+        r"\midrule",
+    ]
+
+    if groups:
+        for group in groups:
+            row = [_latex_escape(group.definition.label)]
+            for weight in weight_definitions:
+                column = _group_column(group, weight.label)
+                if column is not None:
+                    row.append(_format_mean_std_weights(column))
+                else:
+                    row.append("--")
+            lines.append(_latex_row(row))
+    else:
+        lines.append(r"\multicolumn{1}{l}{No data available} \\")
+
+    lines.extend([
+        r"\bottomrule",
+        r"\end{tabular}",
         r"\end{table}",
     ])
     return "\n".join(lines)
@@ -432,10 +466,16 @@ def _pairwise_table(groups: list[GroupMetrics], metric_definitions: list[MetricD
     return "\n".join(lines)
 
 
-def _build_document(groups: list[GroupMetrics], metric_definitions: list[MetricDefinition]) -> str:
+def _build_document(
+    groups: list[GroupMetrics],
+    metric_definitions: list[MetricDefinition],
+    weight_definitions: list[MetricDefinition],
+) -> str:
     sections = [
         r"\section*{Summary}",
         _summary_table(groups, metric_definitions),
+        r"\section*{Value System Weights}",
+        _weights_table(groups, weight_definitions),
     ]
 
     if len(groups) > 1:
@@ -497,20 +537,21 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
     results_root = args.results_root.resolve()
+    json_file = args.json_file.resolve()
 
-    groups = _load_groups_from_json(args.json_file.resolve(), results_root)
+    groups = _load_groups_from_json(json_file, results_root)
     if not groups:
         raise SystemExit("No groups were defined in the JSON file.")
 
     raw_group_metrics = _collect_group_metrics(groups)
-    metric_definitions = _selected_metric_definitions(raw_group_metrics, _load_metric_definitions(args.json_file.resolve()))
-    summary_definitions = _selected_summary_definitions(raw_group_metrics, metric_definitions)
+    metric_definitions = _selected_metric_definitions(raw_group_metrics, _load_metric_definitions(json_file))
+    weight_definitions = _selected_weight_definitions(raw_group_metrics)
     group_metrics = [_normalize_group_metrics(group, metric_definitions) for group in raw_group_metrics]
-    document = _build_document(group_metrics, summary_definitions)
+    document = _build_document(group_metrics, metric_definitions, weight_definitions)
 
     output_path = args.output_tex
     if output_path is None:
-        output_path = Path.cwd() / f"analyzed_results_{datetime.now().strftime('%Y%m%d')}.tex"
+        output_path = Path.cwd() / f"analyzed_results_{json_file.stem}_{datetime.now().strftime('%Y%m%d')}.tex"
     _write_output(document, output_path)
 
 
