@@ -11,7 +11,7 @@ from wandb.apis.public import Runs
 # Project is specified by <entity/project-name>
 
 GROUP = "VSLRMVSBTRM_PKUlong"
-runs: Runs = api.runs("andres-hsn/huggingface", include_sweeps=False, filters={"state": "finished", "group": GROUP})
+runs: Runs = api.runs("<blinded>", include_sweeps=False, filters={"state": "finished", "group": GROUP})
 hist_list = [] 
 
 
