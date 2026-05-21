@@ -397,7 +397,8 @@ def main() -> None:
 
         model.eval()
         embed_model = None
-
+        dataset = None
+        dc = None
          # Extract and save value system weights if requested
         
         results_path = Path(script_args.results_dir)
@@ -410,7 +411,7 @@ def main() -> None:
         embed_model = embed_model.to(device="cpu") if embed_model is not None else None
         
         if bool(script_args.weights_only):
-            del dataset, model, tokenizer, dc, embed_model
+            del model, tokenizer, dc, embed_model, dataset
             torch.cuda.empty_cache()
             continue
 
