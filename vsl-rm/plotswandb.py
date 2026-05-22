@@ -57,7 +57,7 @@ else:
     colors = {'VSL-RM': 'tab:blue', 'BT-RM': 'tab:red', 'SEQ-RM': 'tab:green'}
     line_styles = {
         'eval/representativeness': '-',
-        'eval/avg_coherence': '--',
+        'eval/avg_coherence': ':',
     }
 
     # First pass: collect all aggregated data and find max epoch
