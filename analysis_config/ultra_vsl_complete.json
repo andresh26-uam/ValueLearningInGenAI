@@ -1,0 +1,80 @@
+{
+    "groups": [
+      {
+          "name": "Armo-RM",
+          "folders": [
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42",
+            "RLHFlow/ArmoRM-Llama3-8B-v0.1/ultra_L40S:1LlamaARMOEVAL_0510_114656_epo1_s42"
+          ],
+          "metrics": {
+              "Avg. Chr.": "test_avg_coherence_e0.1",
+              "Represent.": "test_representativeness_e0.01",
+              "Helpfulness": "test_coherence_e0.1_0",
+              "Honesty": "test_coherence_e0.1_1",
+              "Truthfulness": "test_coherence_e0.1_2",
+              "Instruct. Follow.": "test_coherence_e0.1_3"
+          }
+        },
+        {
+          "name": "BT-RM",
+          "folders": [
+              "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_--gpus=L40S:1LlamaBTRMv2_0517_234621_epo10_s42/last_checkpoint",
+              "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaBTRMv2_0519_163320_epo10_s43/last_checkpoint",
+              "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaBTRMv2_0519_163320_epo10_s44/last_checkpoint",
+              "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_A100:1LlamaBTRMv2_0520_090329_epo10_s45/last_checkpoint"
+          ],
+          "metrics": {
+              "Avg. Chr.": "test_avg_coherence_e0.25",
+              "Represent.": "test_representativeness_e0.25",
+              "Helpfulness": "test_coherence_e0.25_0",
+              "Honesty": "test_coherence_e0.25_1",
+              "Truthfulness": "test_coherence_e0.25_2",
+              "Instruct. Follow.": "test_coherence_e0.25_3"
+          }
+        },
+      {
+        "name": "VSL-RM",
+        "folders": [
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_--gpus=L40S:1LlamaVSLRMv2_0517_234457_epo10_s42/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_A100:1LlamaVSLRMv2_0518_133545_epo10_s43/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaVSLRMv2_0519_001903_epo10_s44/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaVSLRMv2_0519_001903_epo10_s45/last_checkpoint"
+        ],
+        "metrics": {
+          "AvgChr. ultrafeedback": "test_avg_coherence_e0.25",
+          "Representativeness": "test_representativeness_e0.25",
+          "Helpfulness": "test_coherence_e0.25_0",
+          "Honesty": "test_coherence_e0.25_1",
+          "Truthfulness": "test_coherence_e0.25_2",
+          "Instruct. Follow.": "test_coherence_e0.25_3"
+        }
+      },
+      {
+        "name": "SEQ-RM",
+        "folders": [
+            "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_--gpus=L40S:1LlamaSEQ-RMv2_0517_234444_epo15_s42/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaSEQ-RMv2_0519_001902_epo15_s43/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_H100:1LlamaSEQ-RMv2_0519_001902_epo15_s44/last_checkpoint",
+          "no_context_vsl-ArmoRM-Llama3-8B-v0.1/ultra_A100:1LlamaSEQ-RMv2_0519_162030_epo15_s45/last_checkpoint" 
+        ],
+        "metrics": {
+          "AvgChr. ultrafeedback": "test_avg_coherence_e0.25",
+          "Representativeness": "test_representativeness_e0.25",
+          "Helpfulness": "test_coherence_e0.25_0",
+          "Honesty": "test_coherence_e0.25_1",
+          "Truthfulness": "test_coherence_e0.25_2",
+          "Instruct. Follow.": "test_coherence_e0.25_3"
+        }
+      }
+    ],
+    "metrics": {
+      "test_coherence_0": "Helpfulness",
+      "test_coherence_1": "Honesty",
+      "test_coherence_2": "Truthfulness",
+      "test_coherence_3": "Instruct. Follow.",
+      "test_avg_coherence": "Avg. Chr.",
+      "test_representativeness": "Represent."
+    }
+  }

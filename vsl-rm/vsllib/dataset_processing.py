@@ -149,25 +149,32 @@ class PairwisePreferenceDataset():
         processed_dataset_path = os.path.join(path, f"preprocessed")
         os.makedirs(processed_dataset_path, exist_ok=True)
         
+        embedded_or_tokenized_dataset_output_path = None
         if model_reference is not None:
             embedded_or_tokenized_dataset_output_path = os.path.join(path, f"{model_reference.config._name_or_path.replace('/', '_')}")
             os.makedirs(embedded_or_tokenized_dataset_output_path, exist_ok=True)
-
+        else:
+            embedded_or_tokenized_dataset_output_path = os.path.join(path, f"only_tokenized")
+            os.makedirs(embedded_or_tokenized_dataset_output_path, exist_ok=True)
         """if recalculate_embeddings :
             shutil.rmtree(embedded_or_tokenized_dataset_output_path, ignore_errors=True)"""
 
         if from_disk:
 
-            try:
-                self.data = load_from_disk(embedded_or_tokenized_dataset_output_path)
-                print(f"Loaded embedded/tokenized dataset from {embedded_or_tokenized_dataset_output_path}")
-            except FileNotFoundError:
-                print(f"Embedded/Tonkenized dataset not found at {embedded_or_tokenized_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
+            if embedded_or_tokenized_dataset_output_path is None:
                 self.data = load_from_disk(processed_dataset_path)
-                print(f"Copying dataset to {embedded_or_tokenized_dataset_output_path} for processing.")
-                output_path = Path(embedded_or_tokenized_dataset_output_path)
-                self.data = save_dataset(self.data, output_path)
-                print(f"Saved embedded dataset to {output_path}")
+                print(f"Loaded dataset from {processed_dataset_path}")
+            else:
+                try:
+                    self.data = load_from_disk(embedded_or_tokenized_dataset_output_path)
+                    print(f"Loaded embedded/tokenized dataset from {embedded_or_tokenized_dataset_output_path}")
+                except FileNotFoundError:
+                    print(f"Embedded/Tonkenized dataset not found at {embedded_or_tokenized_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
+                    self.data = load_from_disk(processed_dataset_path)
+                    print(f"Copying dataset to {embedded_or_tokenized_dataset_output_path} for processing.")
+                    output_path = Path(embedded_or_tokenized_dataset_output_path)
+                    self.data = save_dataset(self.data, output_path)
+                    print(f"Saved embedded dataset to {output_path}")
         else:
             self.data = load_dataset(path)
             check_format(self.data) # This might be tricky. Might need code to join the splits, then get the indices.
@@ -198,6 +205,8 @@ class PairwisePreferenceDataset():
     
         
         if recalculate_embeddings:
+            if model_reference is None:
+                raise ValueError("recalculate_embeddings=True requires model_reference to be provided")
             batch_size = 32
             #self.data = self.data.select(range(min(1000, len(self.data))))
             with th.no_grad():

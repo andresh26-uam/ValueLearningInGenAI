@@ -4,8 +4,8 @@
 
 # Pass GPU resources at submission time, e.g.:
 # sbatch --gpus=L40S:2 sbatch_script.sh <train_script.py> [script args ...]
-#SBATCH --gpus=L40S:2
-#SBATCH --mem-per-gpu=24G
+
+#SBATCH --mem-per-gpu=40G
 #SBATCH --time=100:00:00
 set -euo pipefail
 

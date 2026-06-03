@@ -1,5 +1,5 @@
 {
-    "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
+    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
     "dataset": "ultra",
     "gather_train_metrics": true,
 
@@ -11,7 +11,7 @@
     "per_device_train_batch_size": 32,
     "per_device_eval_batch_size": 32,
     "gradient_accumulation_steps": 4,
-    "lambda_decay": 0.0,
+    "lambda_decay": 0.005,
 
     "activate_discordance_epsilon_for_loss": true,
 
@@ -26,9 +26,9 @@
 
     "rew_center_coefficient": 0.01,
     "layer_normalization": "none",
-    "learning_rate": 0.0005,
+    "learning_rate": 0.0001,
     "grounding_learning_rate": 0.0001,
-    "lagrange_learning_rate": 0.00,
+    "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,
     "max_grad_norm": 0.1,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
@@ -37,7 +37,7 @@
     "zero_constraint": true,
     "use_ideal_grounding_model": false,
     "loss_func_type": "FIRST_GROUNDING_THEN_VALUE_SYSTEM",
-    "loss_func_type_kwargs": {"n_epochs_for_grounding": 0.667},
+    "loss_func_type_kwargs": {"n_epochs_for_grounding": 10},
     "weight_decay": 0.003,
     "bf16": true,
     "num_train_epochs": 100,
@@ -48,5 +48,5 @@
     "save_every_steps": 10000,
     "eval_every_steps": 100,
 
-    "run_name": "llama_def_linear"
+    "run_name": "smol_def_linear"
 }
