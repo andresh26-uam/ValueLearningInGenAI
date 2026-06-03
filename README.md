@@ -33,9 +33,9 @@ We need to preprocess the datasets before training, and calculate the last hidde
 We use SLURM commands in our available setup, but you can use this general command instead. Have the environment variable PYTHONOPTIMIZE=1 to avoid assertions and substantially decrease runtime.
 
 - `PYTHONOPTIMIZE=1 accelerate launch vsl-rm/no_context_vsl.py --config_file=<select_one_from_run_configs_folder> --dataset=<ultra_or_pku> --run_name=<your_own_wandb_run_name> <optional_flags>` 
-    -  Complete example: `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear.rlhf" --dataset=pku --run_name="Test" --num_train_epochs=10` 
+    -  Complete example: `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear.json" --dataset=pku --run_name="Test" --num_train_epochs=10` 
 
-Training is perfectly feasible in CPU, will assume full Float32 precision. Just add `--use_cpu` as an optional flag at the end of the previous training commands, and make sure to change to a different accelerator configuration file (e.g. `accelerate launch --config_file=accelerate_config/cpu_config.yaml vsl-rm/no_context_vsl.py...`). See the [cpu_from_json.sh](https://github.com/andresh26-uam/ValueLearningInGenAI/blob/main/cpu_from_json.sh) file for an example.
+Training is perfectly feasible in CPU, will assume full Float32 precision. Just add `--use_cpu` as an optional flag at the end of the previous training commands, and make sure to change to a different accelerator configuration file (e.g. `accelerate launch --config_file=accelerate_config/cpu_config.yaml vsl-rm/no_context_vsl.py...`). See the `cpu_from_json.sh` file for an example.
  
 Regarding the `run_configs.json` folder, the `llama_linear.json` has the configuration to run the proposed training algorithm using the Llama-based base model from [Armo-RM](https://huggingface.co/RLHFlow/ArmoRM-Llama3-8B-v0.1). There is a counterpart `smol_linear.json` that trains the proposed model using [SmolLM-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM-135M-Instruct) as base model. There are other variants used to train the baselines used in our experiments.
 
@@ -46,3 +46,28 @@ Depending on your Transformers library version, you might get this error when ru
 `ImportError: cannot import name 'LLAMA_INPUTS_DOCSTRING' from 'transformers.models.llama.modeling_llama'`
 
 To solve this, I think it is best to just remove the import statement in the model's file, as well as its use in a function decorator (that justs adds a docstring).
+
+
+## Reproducing the paper results
+
+You need to execute the following commands, from the base folder of the repository, each with seeds 42,43,44,45. You need to use wandb to save the validation dataset plots later.
+
+* VSL-RM (ULTRAFEEDBACK): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear.json" --dataset=ultra --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+* VSL-RM (PKU-AlignAnything): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear.json" --dataset=pku --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+* BT-RM (ULTRAFEEDBACK): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_rlhf_linear.json" --dataset=ultra --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+* BT-RM (PKU-AlignAnything): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_rlhf_linear.json" --dataset=pku --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+* Seq-RM (ULTRAFEEDBACK): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear_firstgr_thenvs.json" --dataset=ultra --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+* Seq-RM (PKU-AlignAnything): `accelerate launch vsl-rm/no_context_vsl.py  --config_file="run_configs/llama_linear_firstgr_thenvs.json" --dataset=pku --run_name="VSLRMULTRA" --num_train_epochs=10 --seed=42`
+
+
+Then, to evaluate with the test dataset, call: `accelerate launch eval_no_context.py --model_name=ArmoRM-Llama3-8B-v0.1 --dataset=pku` and `accelerate launch eval_no_context.py --model_name=ArmoRM-Llama3-8B-v0.1 --dataset=ultra`. These are interactive programs, you need to select the saved model to evaluate with the previous `no_context_vsl.py` script.
+
+Next, to obtain the plots, you need to manually group together the runs for each dataset in your wandb dashboard. Then, use modify the script `vsl-rm/plotswandb.py` defining the GROUP constant with the group name you used and execute it with `python vsl-rm/plotswandb`.
+
+
+Lastly, you can obtain the tables using `python vsl-rm/analyze.py --json_file=analysis_config/pku_vsl_complete.json` and `python vsl-rm/analyze.py --json_file=analysis_config/ultra_vsl_complete.json`. However, you need to manually annotate the exact checkpoint file names in the JSON files before executing. 
