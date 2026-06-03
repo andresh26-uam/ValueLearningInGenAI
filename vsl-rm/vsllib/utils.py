@@ -269,7 +269,7 @@ class ScriptArguments:
     )
 
 
-def argument_parser(script_args: ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
+def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
 
     if script_args.config_file:
         config_path = os.path.abspath(script_args.config_file)
@@ -280,7 +280,7 @@ def argument_parser(script_args: ScriptArguments) -> Tuple[ScriptArguments, Dict
             raise ValueError(
                 f"Expected JSON object in config file, got {type(config_data).__name__}")
 
-        valid_fields = set(ScriptArguments.__dataclass_fields__.keys())
+        valid_fields = set(class_source.__dataclass_fields__.keys())
         unknown_keys = set(config_data.keys()) - valid_fields
         if unknown_keys:
             raise ValueError(
@@ -302,7 +302,7 @@ def argument_parser(script_args: ScriptArguments) -> Tuple[ScriptArguments, Dict
         for key in cli_override_keys:
             merged_args[key] = getattr(script_args, key)
 
-        script_args = ScriptArguments(**merged_args)
+        script_args = class_source(**merged_args)
 
     # Parsing enum values
     script_args.dataset = SupportedDatasets(script_args.dataset)

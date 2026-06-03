@@ -243,7 +243,8 @@ def parse_loss_function(config: MORMForSequenceClassificationConfig) -> LossFunc
 def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True, discordance_epsilon=MIN_EPSILON) -> th.Tensor:
 
     logits, targets, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold=threshold,
-                                                                            assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label, missing_mask=missing_mask, assume_torch=assume_torch)
+                                                                            assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label, 
+                                                                            assume_torch=assume_torch)
     return accuracy_logits(logits, targets, missing_mask=others.get("missing_mask", missing_mask), assume_torch=assume_torch, discordance_epsilon=discordance_epsilon)
 
 
