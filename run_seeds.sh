@@ -2,7 +2,7 @@
 
 GPUS="H100:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
-CPU=False
+CPU=True
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
@@ -11,7 +11,7 @@ else
   SCRIPT=sbatch_from_json.sh
 fi
 DATASET=pku
-CONFIG=run_configs/llama_linear_firstgr_thenvs.json
+CONFIG=run_configs/smol_ctx_linear.json
 
 EVAL_EVERY_STEPS=""
 if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
@@ -28,6 +28,8 @@ elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
   NAME=SmolBTRMv2
 elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
+  elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
+  NAME=SmolCtxVSLRMv2
 else
   NAME=test
 fi
@@ -54,7 +56,7 @@ echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
-for seed in 46; do
+for seed in 42; do
   bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
 done
 

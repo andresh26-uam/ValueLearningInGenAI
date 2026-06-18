@@ -34,8 +34,8 @@ for candidate in (
 from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, seed_everything
 from vsllib.dataset_processing import PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollatorWithPadding
-from vsllib.training import ConstrainedOptimizer, MORewardTrainer
-from vsllib.reward_models import MORMForSequenceClassification, MORMForClassificationConfig, mo_compute_loss_func
+from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, CtxMORewardTrainer
+from vsllib.reward_models import CtxMORMForSequenceClassification, CtxMORMForSequenceClassificationConfig, MORMForSequenceClassification, MORMForClassificationConfig, mo_compute_loss_func
 from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 
@@ -76,6 +76,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
                                             use_embeddings=script_args.use_embeddings,
                                             model_reference=base_model,
                                             collator=dc,
+                                            use_context=True,
                                             split_seed=int(training_args.data_seed),
                                             eval_proportion_or_indices=eval_proportion_or_indices,
                                             test_proportion_or_indices=test_proportion_or_indices,
@@ -110,7 +111,9 @@ def main_fun(script_args, training_args, tokenizer) -> None:
                 assert num_values_to_use == len(
                     reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
 
-        mo_config = MORMForClassificationConfig(
+        mo_config = CtxMORMForSequenceClassificationConfig(
+            max_contexts=script_args.max_contexts,
+            max_value_systems=script_args.max_value_systems,
             activate_discordance_epsilon_for_loss=script_args.activate_discordance_epsilon_for_loss,
             check_undefined_label=HAS_UNDEFINED_LABELS[script_args.dataset],
             pad_token_id=pad_token_id,
@@ -148,7 +151,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
             lr_lambda=script_args.lagrange_learning_rate,
         )
 
-        mo_model = MORMForSequenceClassification(
+        mo_model = CtxMORMForSequenceClassification(
             config=mo_config, base_model=model)
 
         sub_optimizer_cls, sub_optimizer_kwargs = Trainer.get_optimizer_cls_and_kwargs(
@@ -163,12 +166,12 @@ def main_fun(script_args, training_args, tokenizer) -> None:
 
         pprint(vars(script_args))
         # exit(0)
-        trainer: Trainer = MORewardTrainer(
+        trainer: Trainer = CtxMORewardTrainer(
             model=mo_model,
             args=training_args,
             train_dataset=dataset.train_dataset if not script_args.use_frozen_base_model else dataset.train_dataset.select(list(range(min(len(dataset.train_dataset), training_args.per_device_train_batch_size * mo_config.gradient_accumulation_steps*2)))),  # TODO: RESET THIS!!
             eval_dataset=dataset.eval_dataset,
-            compute_metrics=partial(MORewardTrainer.compute_metrics,
+            compute_metrics=partial(CtxMORewardTrainer.compute_metrics,
                                     config=mo_config, training_variables=mo_model.training_variables),
             compute_loss_func=partial(
                 mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
@@ -279,13 +282,13 @@ if __name__ == "__main__":
         lr_scheduler_type=script_args.lr_scheduler_type,
         warmup_steps=0,
         label_names=["labels"],
-        report_to="wandb" if is_main_accelerate_process else "none",
+        report_to="none", #"wandb" if is_main_accelerate_process else "none",
         max_grad_norm=script_args.max_grad_norm,
         run_name=script_args.run_name,
         use_cpu=script_args.use_cpu,
     )
 
-    trainer: MORewardTrainer = main_fun(script_args, training_args, tokenizer)
+    trainer: CtxMORewardTrainer = main_fun(script_args, training_args, tokenizer)
     
     @accelerate_state.on_main_process
     def saving():
@@ -294,7 +297,7 @@ if __name__ == "__main__":
 
                 save_location = trainer.save_with_seed(checkpoint_name="last_checkpoint")
 
-                mo_model = MORMForSequenceClassification.from_pretrained(save_location)
+                mo_model = CtxMORMForSequenceClassification.from_pretrained(save_location)
                 
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)

@@ -1,6 +1,9 @@
 
 import dis
+import math
+from turtle import forward
 
+import accelerate
 from sympy import use
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
@@ -8,7 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from functools import partial
-from typing import Any, Callable, Dict, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional, Tuple
 
 import numpy as np
 import torch as th
@@ -21,6 +24,39 @@ from vsllib.training_utils import MORMTrainingVariables
 from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, SCORE_DIFF_EPSILON, VALUE_LAYER_ACTIVATIONS, MOLossFunctions, MOLossFunctionsCategories, MOLossManagement
 
 logger = logging.get_logger(__name__)
+
+
+def construct_layers(input_dim, hidden_sizes, intermediate_activation, dropout, device, dtype, n_outputs, final_activation, final_activation_kwargs):
+    layers=[]
+    try:
+        intermediate_activation = VALUE_LAYER_ACTIVATIONS[
+            intermediate_activation]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported intermediate activation: {intermediate_activation}")
+
+    if intermediate_activation is None:
+        raise ValueError(
+            f"Unsupported intermediate activation: {intermediate_activation}")
+    for hidden_size in hidden_sizes:
+        layers.append(nn.Linear(input_dim, hidden_size,
+                      dtype=dtype, device=device))
+
+        layers.append(intermediate_activation())
+        if dropout > 0.0:
+            layers.append(nn.Dropout(dropout))
+        final_size = hidden_size
+    layers.append(nn.Linear(final_size, n_outputs,
+                  dtype=dtype, device=device))
+
+    try:
+        final_activation = VALUE_LAYER_ACTIVATIONS[final_activation]
+    except KeyError:
+        raise ValueError(
+            f"Unsupported final activation: {final_activation}")
+    if final_activation is not None:
+        layers.append(final_activation(**final_activation_kwargs))
+    return layers
 
 class LinearAlignmentLayer(th.nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = False, device=None, dtype=None, data=None, n_values=None) -> None:
@@ -84,7 +120,46 @@ class ConvexAlignmentLayer(LinearAlignmentLayer):
         return th.nn.functional.softmax(self.weight, dim=1, dtype=self.weight.dtype)
 
 
-class MORMForSequenceClassificationConfig(PretrainedConfig):
+        
+
+
+class ContextDependentAlignmentLayer(th.nn.Module):
+
+
+    @property
+    def context_to_vs_probabilities(self) -> th.Tensor:
+        return th.nn.functional.softmax(self.context_to_vs_logprobabilities, dim=1, dtype=self.context_to_vs_logprobabilities.dtype)
+    def __init__(self, *args: Any, input_size: int, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0.0, device: th.device = None, dtype: th.dtype = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.num_values = num_values
+        self.num_contexts = num_contexts
+        self.num_value_systems = num_value_systems
+
+        self.context_probabilities = GaussianMixtureContextProbability(
+            input_size=input_size,
+            num_contexts=num_contexts,
+            device=device,
+            dtype=dtype,
+        )
+        self.context_to_vs_logprobabilities = nn.Parameter(
+            th.rand(self.num_contexts, self.num_value_systems, device=device, dtype=dtype),
+            requires_grad=True,
+        )
+
+    def set_context_centroids(self, centroids: th.Tensor) -> None:
+        self.context_probabilities.set_centroids(centroids)
+
+    @th.compile
+    def get_value_system(self, weights: th.Tensor) -> th.Tensor:
+        return th.nn.functional.softmax(weights, dim=1, dtype=weights.dtype)
+
+    def forward(self, context_embeddings: th.Tensor) -> th.Tensor:
+        context_probs = self.context_probabilities(context_embeddings)
+        vs_logits = context_probs @ self.context_to_vs_probabilities
+        return th.nn.functional.softmax(vs_logits, dim=-1)
+
+    
+class MORMForClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
     has_no_defaults_at_init = True
 
@@ -231,12 +306,23 @@ class MORMForSequenceClassificationConfig(PretrainedConfig):
         super().__init__(num_labels=num_values + 1,
                          id2label=id2label, label2id=label2id, **kwargs)
 
+class CtxMORMForSequenceClassificationConfig(MORMForClassificationConfig):
+    model_type = "morm_for_sequence_classification"
+    def __init__(self, max_contexts: int = 10, max_value_systems: int = 4,  pad_token_id: int = "UNKNOWN", 
+                 num_values: int = 3, 
+                 kmeans_max_dataset_size = 50000,
+                 hidden_sizes: list[int] = [1024, 1024, 1024], value_layer_dropout: float = 0.1, value_layer_intermediate_activation: str = "ReLU", value_layer_final_activation: str = "none", layer_normalization: Literal['LayerNorm'] | Literal['BatchNorm'] | Literal['none'] = 'LayerNorm', reward_diff_threshold: float = 50, assume_qualitative_labels: bool = True, discordance_epsilon=MIN_EPSILON, activate_discordance_epsilon_for_loss: bool = False, check_undefined_label: bool = True, grounding_loss_tendency_update_ratio: float = 0.001, update_tendencies_every_n_steps: int = 1, use_validation_for_tendencies: bool = False, rew_center_coefficient: float = 0, gradient_accumulation_steps: int = 2, use_metrics_or_losses_for_lagrange_updates: str = "metrics", use_exponential_moving_average_or_optimum_targets: str = "optimum", grad_on_only_worst_value: bool = False, zero_constraint: bool = True, lambda_decay: float = 0, gather_train_metrics: bool = False, use_ideal_grounding_model: bool = False, dtype: str = "float32", base_model_name_or_path: str | None = None, base_model_trust_remote_code: bool = True, base_model_num_labels: int = 1, use_base_model_heads: bool = False, base_model_reward_heads_module_name: str = None, base_model_value_system_module_name: str = None, base_model_reward_head_indices: list = None, loss_func_type: str = MOLossFunctions.DEFAULT, loss_func_kwargs: Dict = None, lr_grounding: float | None = None, lr_value_system: float | None = None, lr_lambda: float | None = None, **kwargs):
+        super().__init__(pad_token_id, num_values, hidden_sizes, value_layer_dropout, value_layer_intermediate_activation, value_layer_final_activation, layer_normalization, reward_diff_threshold, assume_qualitative_labels, discordance_epsilon, activate_discordance_epsilon_for_loss, check_undefined_label, grounding_loss_tendency_update_ratio, update_tendencies_every_n_steps, use_validation_for_tendencies, rew_center_coefficient, gradient_accumulation_steps, use_metrics_or_losses_for_lagrange_updates, use_exponential_moving_average_or_optimum_targets, grad_on_only_worst_value, zero_constraint, lambda_decay, gather_train_metrics, use_ideal_grounding_model, dtype, base_model_name_or_path, base_model_trust_remote_code, base_model_num_labels, use_base_model_heads, base_model_reward_heads_module_name, base_model_value_system_module_name, base_model_reward_head_indices, loss_func_type, loss_func_kwargs, lr_grounding, lr_value_system, lr_lambda, **kwargs)
+        self.max_contexts = max_contexts
+        self.max_value_systems = max_value_systems
+        self.kmeans_max_dataset_size = kmeans_max_dataset_size
+
 
 LossFuncType = Callable[[th.Tensor, th.Tensor, th.Tensor, Optional[th.Tensor],
-                         MORMForSequenceClassificationConfig, MORMTrainingVariables], th.Tensor]
+                         MORMForClassificationConfig, MORMTrainingVariables], th.Tensor]
 
 
-def parse_loss_function(config: MORMForSequenceClassificationConfig) -> LossFuncType:
+def parse_loss_function(config: MORMForClassificationConfig) -> LossFuncType:
     return mo_loss_function
 
 
@@ -442,7 +528,7 @@ def get_missing_rating_mask(x_or_probs, y=None):
     return missing_mask
 
 
-def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=True, config: MORMForSequenceClassificationConfig = None):
+def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=True, config: MORMForClassificationConfig = None):
     bsz = logits.size(0)
 
     jidx = th.arange(0, bsz, 2, device=logits.device)
@@ -685,7 +771,7 @@ def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor
                                     activate_disc_epsilon_for_loss=activate_disc_epsilon_for_loss)
 
 
-def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForSequenceClassificationConfig = None, training_variables: MORMTrainingVariables = None, **kwargs):
+def mo_loss_function(logits, labels, ideal_logits=None, config: MORMForClassificationConfig = None, training_variables: MORMTrainingVariables = None, **kwargs):
 
     logits, labels, others = rewards_and_labels_to_logits_and_targets(
         logits, labels, assume_torch=True, config=config)
@@ -810,7 +896,15 @@ def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, 
 @dataclass
 class SequenceClassifierOutputWithPastAndIdeal(SequenceClassifierOutputWithPast):
     ideal_logits: th.Tensor = None
+@dataclass
+class ClassifierOutputWithPast():
+    logits: th.Tensor
+    loss: th.Tensor
 
+@dataclass
+class ClassifierOutputWithPastAndIdeal(ClassifierOutputWithPast):
+    ideal_logits: Optional[th.Tensor] = None
+    
 
 class MultiValueRewardHead(nn.Module):
     def __init__(self, value_heads: nn.ModuleList, normalization: nn.Module, optimized_head_indices: Optional[list[int]] = None):
@@ -864,11 +958,129 @@ class MultiValueRewardHead(nn.Module):
             return_str += head_str + "\n"
         return return_str
 
-class MORMForSequenceClassification(PreTrainedModel):
-    config_class = MORMForSequenceClassificationConfig
-    base_model_prefix = "full_model"
-    supports_gradient_checkpointing = True
-    config : MORMForSequenceClassificationConfig
+class MORMForClassification(nn.Module):
+
+    
+    @property
+    def grounding_features_name(self) -> str:
+        return 'grounding_features'
+
+    @property
+    def vs_features_name(self) -> Optional[str]:
+        return 'context_features'
+
+
+    classifier_ouput_class = ClassifierOutputWithPast
+    classifier_output_class_ideal = ClassifierOutputWithPastAndIdeal
+    def __init__(self, config: MORMForClassificationConfig, input_size: int, input_size_vs_layer: Optional[int] = None):
+        super().__init__()
+        self.config = config
+        self.reward_heads: Optional[MultiValueRewardHead] = None
+        self.reward_heads_ideal: Optional[MultiValueRewardHead] = None
+        self.value_system_layer: Optional[nn.Module] = None
+        self.training_variables: Optional[MORMTrainingVariables] = None
+        self.use_ideal_grounding_model: bool = False
+        self.forward_ideal_grounding: bool = False
+
+        self.num_values = config.num_values
+        self.use_ideal_grounding_model = config.use_ideal_grounding_model
+        self.forward_ideal_grounding = self.use_ideal_grounding_model
+
+        model_device = "cuda:0" if th.cuda.is_available() else "cpu"
+        
+        self.create_reward_networks(config, input_size, model_device, input_size_vs_layer=input_size_vs_layer)
+
+        # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
+        self.create_training_variables(config, model_device)
+
+        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
+        self.zero_grad(set_to_none=True)
+
+    def _set_train_mode(self, train_mode: bool):
+        for param in self.grounding_parameters():
+            param.requires_grad = train_mode
+
+        for param in self.value_system_parameters():
+            param.requires_grad = train_mode
+        # This is set to True inside training_variables in prepare_for_optimizer_step method.
+        self.training_variables.requires_grad_(False)
+        
+    def create_training_variables(self, config: MORMForClassificationConfig, model_device: th.Device) -> None:
+        training_variables_dtype = th.float32
+        self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
+                                                        device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
+                                                        gradient_accumulation_steps=config.gradient_accumulation_steps,
+                                                        update_tendencies_every_n_steps=config.update_tendencies_every_n_steps,
+                                                        use_validation_for_tendencies=config.use_validation_for_tendencies,
+                                                        use_metrics_or_losses=config.use_metrics_or_losses_for_lagrange_updates,
+                                                        use_exponential_moving_average_or_optimum_targets=config.use_exponential_moving_average_or_optimum_targets,
+                                                        grad_on_only_worst_value=config.grad_on_only_worst_value,
+                                                        zero_constraint=config.zero_constraint,
+                                                        lambda_decay=config.lambda_decay
+                                                        )
+        self._set_train_mode(train_mode=True)
+        
+
+        self.loss_function = partial(parse_loss_function(
+            self.config), training_variables=self.training_variables, config=self.config)
+
+    def create_reward_networks(self, config: MORMForClassificationConfig, input_size: int, model_device: th.Device, input_size_vs_layer=None):
+        if len(config.hidden_sizes) > 0:
+                # This constructs one NN per value to avoid that changing one value loss parameter chagnes also affect others.
+            constructor = self.construct_reward_head
+        else:
+                # In this case, the parameters of different value dimensions do not conflict.
+            constructor = partial(
+                    self.construct_value_layer, n_outputs=self.num_values, add_normalization=config.layer_normalization != 'none')
+            
+        self.reward_heads = constructor(config, input_size=input_size, model_device=model_device)
+        if config.use_ideal_grounding_model:
+            self.reward_heads_ideal = constructor(config, input_size=input_size, model_device=model_device)
+        self.value_system_layer = ConvexAlignmentLayer(
+                config.num_values, 1, device=model_device, dtype=self.reward_heads.parameters().__next__().dtype)
+        self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
+        # self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
+        
+    def construct_value_layer(self, config: MORMForClassificationConfig, input_size: int, model_device=None, n_outputs: int = 1, add_normalization: bool = False) -> nn.Sequential:
+        
+        model_dtype = self._resolve_torch_dtype(config.dtype)
+        
+        layers = construct_layers(input_dim=input_size, 
+                                  n_outputs=n_outputs, 
+                                  hidden_sizes=config.hidden_sizes, 
+                                  intermediate_activation=config.value_layer_intermediate_activation, 
+                                  device=model_device, 
+                                  dtype=model_dtype, 
+                                  dropout=config.value_layer_dropout,
+                                  final_activation=config.value_layer_final_activation, 
+                                  final_activation_kwargs={})
+        if add_normalization:
+            layers.append(self.construct_value_normalization(config, model_device))
+        return nn.Sequential(*layers)
+
+    def construct_value_normalization(self, config: MORMForClassificationConfig, model_device=None) -> nn.Module:
+        # Normalize across value dimensions to keep reward channels on a comparable scale.
+        
+        model_dtype = self._resolve_torch_dtype(config.dtype)
+
+        if config.layer_normalization == 'LayerNorm':
+            return nn.LayerNorm(config.num_values, dtype=model_dtype, device=model_device)
+        if config.layer_normalization == 'BatchNorm':
+            return nn.BatchNorm1d(config.num_values, dtype=model_dtype, device=model_device)
+        if config.layer_normalization == 'none':
+            return nn.Identity()
+        raise ValueError(
+            f"Unsupported normalization: {config.layer_normalization}")
+
+    def construct_reward_head(self, config: MORMForClassificationConfig, input_size: int, model_device=None) -> MultiValueRewardHead:
+        value_heads = nn.ModuleList([
+            self.construct_value_layer(config, input_size, model_device)
+            for _ in range(config.num_values)
+        ])
+        normalization = self.construct_value_normalization(config, model_device)
+        return MultiValueRewardHead(value_heads=value_heads, normalization=normalization, optimized_head_indices=config.loss_func_type_kwargs.get('value_indices', None))
+
+
 
     @staticmethod
     def _resolve_torch_dtype(dtype_value: Any) -> th.dtype:
@@ -892,8 +1104,130 @@ class MORMForSequenceClassification(PreTrainedModel):
     @staticmethod
     def _module_dtype(module: nn.Module) -> th.dtype:
         return next(module.parameters()).dtype
+    
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
+        set_to_none = True
+        super().zero_grad(set_to_none)
+        if self.reward_heads is not None:
+            self.reward_heads.zero_grad(set_to_none)
+        if self.use_ideal_grounding_model:
+            self.reward_heads_ideal.zero_grad(set_to_none)
+        if self.value_system_layer is not None:
+            self.value_system_layer.zero_grad(set_to_none)
+        self.training_variables.zero_grad(set_to_none)
+    def train(self, mode: bool = True):
+        self._set_train_mode(train_mode=mode)
+        self.forward_ideal_grounding = mode and self.use_ideal_grounding_model
 
-    def _build_base_model_from_config(self, config: MORMForSequenceClassificationConfig) -> AutoModelForSequenceClassification:
+        return super().train(mode)
+    
+    def set_value_system_layer(self, layer: nn.Module):
+        self.value_system_layer = layer
+
+    def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        params = []
+        if self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            if self.reward_heads is not None:
+                params.extend(self.reward_heads.parameters(recurse=recurse))
+        return iter(params)
+
+    def value_system_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        params = []
+        if self.config.loss_management.should_apply_grad_on_value_system_weights():
+            params.extend(
+                    self.value_system_layer.parameters(recurse=recurse))
+        return iter(params)
+    
+    def score(self, grounding_features, score_mode='normal', vs_features=None) -> th.Tensor:
+        if score_mode == 'ideal' and self.use_ideal_grounding_model:
+            reward_heads = self.reward_heads_ideal
+            raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
+        else:
+            reward_heads = self.reward_heads
+
+        if self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            rewards = reward_heads(grounding_features)
+        else:
+            #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
+            with th.no_grad():
+                rewards = reward_heads(grounding_features)
+
+        if self.value_system_layer is not None:
+            if self.config.loss_management.should_apply_grad_on_value_system_weights():
+                vs_reward = self.value_system_layer.forward(rewards, hidden_state_vs=vs_features)
+            else:
+                #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
+                with th.no_grad():
+                    vs_reward = self.value_system_layer.forward(rewards, hidden_state_vs=vs_features)
+                
+            all_rewards = th.cat([rewards, vs_reward], dim=-1)
+        else:
+            all_rewards = rewards
+        return all_rewards
+    
+    
+    def base_forward(self, *args, **kwargs) -> th.Tensor:
+        grounding_features = kwargs.pop(self.grounding_features_name)
+        vs_features = kwargs.pop(self.vs_features_name, None)
+        all_rewards = self.score(grounding_features, vs_features=vs_features)
+
+        if self.forward_ideal_grounding:
+            grounding_ideal = self.reward_heads_ideal(grounding_features)
+            return self.classifier_output_class_ideal(logits=all_rewards, ideal_logits=grounding_ideal)
+        else:
+            return self.classifier_ouput_class(logits=all_rewards)
+    
+    def forward(self, *args, **kwargs):
+        """perfect_debug_forward = True #DEBUG ONLY.
+        if perfect_debug_forward: 
+            #print(kwargs.keys())
+            grfeatures = kwargs.pop(self.grounding_features_name)
+            all_rewards = self.score(grfeatures)
+            logits = kwargs.pop("labels", None)
+            missing = get_missing_rating_mask(logits)
+            logits = logits  + th.tensor([0.0], requires_grad=True) + all_rewards*0.1 - all_rewards*0.1 # Just to have a tensor that requires grad for testing.  
+            logits = logits.masked_fill(missing, float("-inf"))
+            return SequenceClassifierOutputWithPast(logits=logits)"""
+        
+        return self.base_forward(*args,**kwargs)
+        
+class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
+    config_class = MORMForClassificationConfig
+    base_model_prefix = "full_model"
+    supports_gradient_checkpointing = True
+    config : MORMForClassificationConfig
+
+    classifier_ouput_class = SequenceClassifierOutputWithPast 
+    classifier_ouput_class_ideal = SequenceClassifierOutputWithPastAndIdeal
+
+    @property
+    def grounding_features_name(self) -> str:
+        return 'embedding'
+
+    @property
+    def vs_features_name(self) -> Optional[str]:
+        return None
+    
+    def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:
+        # Condition 2: Reward heads
+        if self.reward_heads is not None and self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            
+            yield from self.reward_heads.parameters(recurse=recurse)
+            
+        # Condition 3: Value system layer
+        if self.value_system_layer is not None and self.config.loss_management.should_apply_grad_on_value_system_weights():
+            
+            yield from self.value_system_layer.parameters(recurse=recurse)
+        # yield from self.training_variables.parameters(recurse=recurse)
+        
+        # Condition 4: Ideal grounding model
+        if self.use_ideal_grounding_model and self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            
+            yield from self.reward_heads_ideal.parameters(recurse=recurse)
+        
+
+    def _build_base_model_from_config(self, config: MORMForClassificationConfig) -> AutoModelForSequenceClassification:
         """
         Build the base model from the config, ensuring that it is a AutoModelForSequenceClassification and extracting necessary information for reward head construction.
         """
@@ -940,21 +1274,9 @@ class MORMForSequenceClassification(PreTrainedModel):
         if self.use_base_model_heads and self.config.loss_management.should_apply_grad_on_grounding_or_value_system_params():
             yield from self.full_model.parameters(recurse=recurse)
 
-        # Condition 2: Reward heads
-        if self.reward_heads is not None and self.config.loss_management.should_apply_grad_on_grounding_parameters():
-            
-            yield from self.reward_heads.parameters(recurse=recurse)
-            
-        # Condition 3: Value system layer
-        if self.value_system_layer is not None and self.config.loss_management.should_apply_grad_on_value_system_weights():
-            
-            yield from self.value_system_layer.parameters(recurse=recurse)
-        # yield from self.training_variables.parameters(recurse=recurse)
-        
-        # Condition 4: Ideal grounding model
-        if self.use_ideal_grounding_model and self.config.loss_management.should_apply_grad_on_grounding_parameters():
-            
-            yield from self.reward_heads_ideal.parameters(recurse=recurse)
+        yield from super(MORMForClassification, self).parameters(recurse=recurse)
+    
+    
 
     def _select_reward_indices(self, rewards: th.Tensor) -> th.Tensor:
         indices = self.base_model_reward_head_indices
@@ -999,98 +1321,34 @@ class MORMForSequenceClassification(PreTrainedModel):
 
         return th.cat([rewards, score], dim=-1)
 
-    def _infer_base_hidden_size(self, base_model: AutoModelForSequenceClassification) -> int:
+    def _infer_model_inputs_sizes(self, base_model: AutoModelForSequenceClassification) -> Tuple[int, Optional[int]]:
         # SequenceClassification wrappers often expose the classifier head input width here.
         if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
-            return int(base_model.score.in_features)
+            return int(base_model.score.in_features), None
 
         cfg = getattr(base_model, "config", None)
         for attr in ("hidden_size", "d_model", "n_embd", "dim"):
             value = getattr(cfg, attr, None)
             if value is not None:
-                return int(value)
+                return int(value), None
 
         # Last fallback for models with custom configs but standard embedding modules.
         input_emb = base_model.get_input_embeddings() if hasattr(
             base_model, "get_input_embeddings") else None
         if input_emb is not None and hasattr(input_emb, "embedding_dim"):
-            return int(input_emb.embedding_dim)
+            return int(input_emb.embedding_dim), None
         if input_emb is not None and hasattr(input_emb, "weight"):
-            return int(input_emb.weight.shape[-1])
+            return int(input_emb.weight.shape[-1]), None
 
         raise ValueError(
             "Could not infer hidden size for reward heads. Expected one of: "
             "score.in_features, config.hidden_size/d_model/n_embd/dim, or input embedding width."
         )
 
-    def construct_value_layer(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None, n_outputs: int = 1, add_normalization: bool = False) -> nn.Sequential:
-        layers = []
-        model_device = self._module_device(base_model)
-        model_dtype = self._resolve_torch_dtype(config.dtype)
-        input_size = self._infer_base_hidden_size(base_model)
+    
 
-        try:
-            intermediate_activation = VALUE_LAYER_ACTIVATIONS[
-                config.value_layer_intermediate_activation]
-        except KeyError:
-            raise ValueError(
-                f"Unsupported intermediate activation: {config.value_layer_intermediate_activation}")
-
-        if intermediate_activation is None:
-            raise ValueError(
-                f"Unsupported intermediate activation: {config.value_layer_intermediate_activation}")
-        for hidden_size in config.hidden_sizes:
-            layers.append(nn.Linear(input_size, hidden_size,
-                          dtype=model_dtype, device=model_device))
-
-            layers.append(intermediate_activation())
-            if config.value_layer_dropout > 0.0:
-                layers.append(nn.Dropout(config.value_layer_dropout))
-            input_size = hidden_size
-        layers.append(nn.Linear(input_size, n_outputs,
-                      dtype=model_dtype, device=model_device))
-
-        try:
-            final_activation = VALUE_LAYER_ACTIVATIONS[config.value_layer_final_activation]
-        except KeyError:
-            raise ValueError(
-                f"Unsupported final activation: {config.value_layer_final_activation}")
-        if final_activation is not None:
-            layers.append(final_activation())
-        if add_normalization:
-            layers.append(self.construct_value_normalization(config, base_model))
-        return nn.Sequential(*layers)
-
-    def construct_value_normalization(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None):
-        # Normalize across value dimensions to keep reward channels on a comparable scale.
-        model_device = self._module_device(base_model)
-        model_dtype = self._resolve_torch_dtype(config.dtype)
-        if config.layer_normalization == 'LayerNorm':
-            return nn.LayerNorm(config.num_values, dtype=model_dtype, device=model_device)
-        if config.layer_normalization == 'BatchNorm':
-            return nn.BatchNorm1d(config.num_values, dtype=model_dtype, device=model_device)
-        if config.layer_normalization == 'none':
-            return nn.Identity()
-        raise ValueError(
-            f"Unsupported normalization: {config.layer_normalization}")
-
-    def construct_reward_head(self, config: MORMForSequenceClassificationConfig, base_model: BaseModelOutputWithPast = None) -> MultiValueRewardHead:
-        value_heads = nn.ModuleList([
-            self.construct_value_layer(config, base_model)
-            for _ in range(config.num_values)
-        ])
-        normalization = self.construct_value_normalization(config, base_model)
-        return MultiValueRewardHead(value_heads=value_heads, normalization=normalization, optimized_head_indices=config.loss_func_type_kwargs.get('value_indices', None))
-
-
-    def train(self, mode: bool = True):
-        self._set_train_mode(train_mode=mode)
-        self.forward_ideal_grounding = mode and self.use_ideal_grounding_model
-
-        return super().train(mode)
-
-    def __init__(self, config: MORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
-        super().__init__(config)
+    def __init__(self, config: MORMForClassificationConfig, base_model: AutoModelForSequenceClassification = None):
+        super(PreTrainedModel, self).__init__(config)
         print(f"Initializing MORMForSequenceClassification")
         if base_model is None:
             base_model = self._build_base_model_from_config(config)
@@ -1099,12 +1357,14 @@ class MORMForSequenceClassification(PreTrainedModel):
         self.supports_gradient_checkpointing = hasattr(
             self.full_model, "gradient_checkpointing_enable")
         model_device = self._module_device(self.full_model)
-        self.num_values = config.num_values
-        self.use_ideal_grounding_model = config.use_ideal_grounding_model
         self.use_base_model_heads = config.use_base_model_heads
         self.base_model_reward_head_indices = config.base_model_reward_head_indices
         self.base_model_rewards_attr_name = config.base_model_reward_heads_module_name
         self.base_model_score_attr_name = config.base_model_value_system_module_name
+        
+        self.num_values = config.num_values
+        self.use_ideal_grounding_model = config.use_ideal_grounding_model
+        self.forward_ideal_grounding = self.use_ideal_grounding_model
 
         # In base-model mode, consume reward/score attributes from base model outputs.
         if self.use_base_model_heads:
@@ -1118,45 +1378,17 @@ class MORMForSequenceClassification(PreTrainedModel):
             self.value_system_layer = None
             self.reward_heads_ideal = None
         else:
-            if len(config.hidden_sizes) > 0:
-                # This constructs one NN per value to avoid that changing one value loss parameter chagnes also affect others.
-                constructor = self.construct_reward_head
-            else:
-                # In this case, the parameters of different value dimensions do not conflict.
-                constructor = partial(
-                    self.construct_value_layer, n_outputs=self.num_values, add_normalization=config.layer_normalization != 'none')
-            
-            self.reward_heads = constructor(config, base_model)
-            if config.use_ideal_grounding_model:
-                self.reward_heads_ideal = constructor(config, base_model)
-            self.value_system_layer = ConvexAlignmentLayer(
-                config.num_values, 1, device=model_device, dtype=self.reward_heads.parameters().__next__().dtype)
-            self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
+            input_size, input_size_vs = self._infer_model_inputs_sizes(base_model)
+            self.create_reward_networks(config, input_size, model_device, input_size_vs_layer=input_size_vs)
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
-        training_variables_dtype = th.float32
-        self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
-                                                        device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
-                                                        gradient_accumulation_steps=config.gradient_accumulation_steps,
-                                                        update_tendencies_every_n_steps=config.update_tendencies_every_n_steps,
-                                                        use_validation_for_tendencies=config.use_validation_for_tendencies,
-                                                        use_metrics_or_losses=config.use_metrics_or_losses_for_lagrange_updates,
-                                                        use_exponential_moving_average_or_optimum_targets=config.use_exponential_moving_average_or_optimum_targets,
-                                                        grad_on_only_worst_value=config.grad_on_only_worst_value,
-                                                        zero_constraint=config.zero_constraint,
-                                                        lambda_decay=config.lambda_decay
-                                                        )
-        self._set_train_mode(train_mode=True)
-        self.forward_ideal_grounding = self.use_ideal_grounding_model
-
-        self.loss_function = partial(parse_loss_function(
-            self.config), training_variables=self.training_variables, config=self.config)
+        self.create_training_variables(config, model_device)
 
         self.post_init()
 
         # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
         self.zero_grad(set_to_none=True)
-        # self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
+
 
     def _set_train_mode(self, train_mode: bool = True) -> None:
         # Freeze pretrained weights and train only the custom reward/value-system heads.
@@ -1167,20 +1399,12 @@ class MORMForSequenceClassification(PreTrainedModel):
         
         self.full_model.train(train_mode_base_model)
 
-        for param in self.grounding_parameters():
-            param.requires_grad = train_mode
-
-        for param in self.value_system_parameters():
-            param.requires_grad = train_mode
-        # This is set to True inside training_variables in prepare_for_optimizer_step method.
-        self.training_variables.requires_grad_(False)
+        super(MORMForClassification, self)._set_train_mode(train_mode)
 
     @property
     def is_gradient_checkpointing(self) -> bool:
         return bool(getattr(self.full_model, "is_gradient_checkpointing", False))
 
-    def set_value_system_layer(self, layer: nn.Module):
-        self.value_system_layer = layer
 
     def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         params = []
@@ -1203,56 +1427,12 @@ class MORMForSequenceClassification(PreTrainedModel):
                 params.extend(self.full_model.parameters(recurse=recurse))
         return iter(params)
 
-    def score(self, hidden_state, reward_heads='normal') -> th.Tensor:
-        if reward_heads == 'ideal' and self.use_ideal_grounding_model:
-            reward_heads = self.reward_heads_ideal
-            raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
-        else:
-            reward_heads = self.reward_heads
+    
 
-        if self.config.loss_management.should_apply_grad_on_grounding_parameters():
-            rewards = reward_heads(hidden_state)
-        else:
-            #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
-            with th.no_grad():
-                rewards = reward_heads(hidden_state)
-
-        if self.value_system_layer is not None:
-            if self.config.loss_management.should_apply_grad_on_value_system_weights():
-                vs_reward = self.value_system_layer.forward(rewards)
-            else:
-                #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
-                with th.no_grad():
-                    vs_reward = self.value_system_layer.forward(rewards)
-                
-            all_rewards = th.cat([rewards, vs_reward], dim=-1)
-        else:
-            all_rewards = rewards
-        return all_rewards
-
-    def zero_grad(self, set_to_none: bool = True) -> None:
-        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
-        set_to_none = True
-        super().zero_grad(set_to_none)
-        if self.reward_heads is not None:
-            self.reward_heads.zero_grad(set_to_none)
-        if self.use_ideal_grounding_model:
-            self.reward_heads_ideal.zero_grad(set_to_none)
-        if self.value_system_layer is not None:
-            self.value_system_layer.zero_grad(set_to_none)
-        self.training_variables.zero_grad(set_to_none)
+    
 
     def forward(self, *args, **kwargs) -> SequenceClassifierOutputWithPast | SequenceClassifierOutputWithPastAndIdeal:
-        """perfect_debug_forward = True #DEBUG ONLY.
-        if perfect_debug_forward: 
-            #print(kwargs.keys())
-            embeddings = kwargs.pop('embedding')
-            all_rewards = self.score(embeddings)
-            logits = kwargs.pop("labels", None)
-            missing = get_missing_rating_mask(logits)
-            logits = logits  + th.tensor([0.0], requires_grad=True) + all_rewards*0.1 - all_rewards*0.1 # Just to have a tensor that requires grad for testing.  
-            logits = logits.masked_fill(missing, float("-inf"))
-            return SequenceClassifierOutputWithPast(logits=logits)"""
+        
 
         if self.use_base_model_heads:
             kwargs.pop("labels", None)
@@ -1267,25 +1447,16 @@ class MORMForSequenceClassification(PreTrainedModel):
             del base_output
             # print("LABELS SHAPE", labels.shape)
 
-            return SequenceClassifierOutputWithPast(
+            return self.classifier_ouput_class(
                 logits=pooled_logits,
                 #past_key_values=getattr(base_output, "past_key_values", None),
                 #hidden_states=getattr(base_output, "hidden_states", None),
                 #attentions=getattr(base_output, "attentions", None),
             )
 
-        if 'embedding' in kwargs:
-            # If embeddings are provided, bypass the base model and directly compute rewards from embeddings.
-            embeddings = kwargs.pop('embedding')
-            all_rewards = self.score(embeddings)
-
-            if self.forward_ideal_grounding:
-                grounding_ideal = self.reward_heads_ideal(embeddings)
-                return SequenceClassifierOutputWithPastAndIdeal(logits=all_rewards, ideal_logits=grounding_ideal)
-            else:
-                return SequenceClassifierOutputWithPast(logits=all_rewards)
+        if self.grounding_features_name in kwargs and (self.vs_features_name is None or self.vs_features_name in kwargs ):
+            return self.base_forward(*args,**kwargs)
         else:
-
             # sq = GenericForSequenceClassification.forward(self, *args, **kwargs)
             kwargs["score_mode"] = "normal"
             sq = self.generic_forward(*args, **kwargs)
@@ -1294,7 +1465,9 @@ class MORMForSequenceClassification(PreTrainedModel):
                 kwargs["score_mode"] = "ideal"
                 ideal_sq = self.generic_forward(*args, **kwargs)
                 kwargs["score_mode"] = "normal"
-                return SequenceClassifierOutputWithPastAndIdeal(logits=sq.logits, ideal_logits=ideal_sq.logits)
+                return self.classifier_ouput_class_ideal(logits=sq.logits, ideal_logits=ideal_sq.logits)
+            else:
+                return sq
 
     def generic_forward( # Same as GenericForSequenceClassification forward, (version 5.3.0 transformers)
         self,
@@ -1353,10 +1526,26 @@ class MORMForSequenceClassification(PreTrainedModel):
             loss = self.loss_function(
                 logits=logits, labels=labels, pooled_logits=pooled_logits, config=self.config, training_variables=self.training_variables) # slight change here.
 
-        return SequenceClassifierOutputWithPast(
+        return self.classifier_ouput_class(
             loss=loss,
             logits=pooled_logits,
             past_key_values=transformer_outputs.past_key_values,
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
         )
+
+from vsllib.dataset_processing import PairwisePreferenceDataset
+
+class CtxMORMForSequenceClassification(MORMForSequenceClassification):
+    config_class = CtxMORMForSequenceClassificationConfig
+    base_model_prefix = "full_model"
+    supports_gradient_checkpointing = True
+    config : CtxMORMForSequenceClassificationConfig
+
+    
+
+    def __init__(self, config: CtxMORMForSequenceClassificationConfig, base_model: AutoModelForSequenceClassification = None):
+        super().__init__(config, base_model)
+        
+
+    

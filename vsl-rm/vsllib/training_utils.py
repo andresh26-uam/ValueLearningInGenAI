@@ -18,7 +18,7 @@ import torch as th
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from vsllib.defines import MOLossFunctionsCategories, MOLossFunctions, MOLossManagement
 
-from vsllib.utils import to_float
+from vsllib.utils import convert_to_tensors, to_float
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -80,7 +80,46 @@ def norm_penalty( lags, vs_coeff, penalty_coeff) -> th.Tensor:
     
 
 
+@dataclass
+class MORewardDataCollator:
+    return_tensors: str = "pt"
+    dtype: Optional[th.dtype] = None
 
+    
+    def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        merged_features = []
+
+
+        for feature in features:
+            pair_labels = feature["labels"]
+            c = feature.get("context_features", None)
+            dic1 = {"labels": pair_labels[0],
+                }
+            dic2 = {"labels": pair_labels[1],
+                }
+            dic1["grounding_features"] = feature.get("grounding_features_1", None)
+            dic1["context_features"] = c
+            dic2["grounding_features"] = feature.get("grounding_features_2", None)
+            dic2["context_features"] = c
+            merged_features.append(
+                dic1
+            )
+                
+            merged_features.append(
+                dic2
+            )
+        batch = convert_to_tensors(merged_features,
+            return_tensors=self.return_tensors
+        )
+        
+        batch["return_loss"] = True
+        batch["grounding_features"] = batch["grounding_features"].to(dtype=self.dtype) if "grounding_features" in batch.keys() else None
+        batch["context_features"] = batch["context_features"].to(dtype=self.dtype) if "context_features" in batch.keys() else None
+        """if self.use_embeddings:
+            assert batch["embedding"] is not None, "Expected 'embedding' key in the batch when use_embeddings is True."
+            assert batch["context_embedding"] is not None, "Expected 'context_embedding' key in the batch when use_embeddings is True."
+        """
+        return batch
 
 @dataclass
 class MORewardDataCollatorWithPadding:

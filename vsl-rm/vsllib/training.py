@@ -1,6 +1,7 @@
 import enum
 from typing import Any, Dict, NamedTuple, Optional
 import numpy as np
+from sklearn.cluster import KMeans
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
@@ -8,8 +9,8 @@ from transformers.trainer import *
 
 from transformers.optimization import get_scheduler
 
-from transformers.trainer_utils import SchedulerType, _is_peft_model
-from vsllib.reward_models import MORMForSequenceClassification, MORMForSequenceClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
+from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
+from vsllib.reward_models import CtxMORMForSequenceClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
 
@@ -144,7 +145,7 @@ class MORewardTrainer(Trainer):
 
         return self.lr_scheduler
 
-    def compute_metrics(eval_pred, config: MORMForSequenceClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
+    def compute_metrics(eval_pred, config: MORMForClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
             epsilon_list = set([0.0, 0.001, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5])
             epsilon_list.add(config.discordance_epsilon)
@@ -974,3 +975,41 @@ class MORewardTrainer(Trainer):
         with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
             json.dump(seed_info, fp, indent=2, sort_keys=True)
         return checkpoint_dir
+
+
+
+from vsllib.dataset_processing import PairwisePreferenceDataset, Dataset
+
+class CtxMORewardTrainer(MORewardTrainer):
+    training_variables: MORMTrainingVariables
+    model: CtxMORMForSequenceClassification
+    accelerator: Accelerator
+    
+    def train_initialization(self, train_dataset: Dataset) -> None:
+
+        # K-means for clustering the context embeddings.
+        K = self.model.config.max_contexts
+        dataset_ctxs = np.array(train_dataset.select_columns(["context_embedding"])["context_embedding"])
+        print(dataset_ctxs.shape)
+        if dataset_ctxs.shape[0] == 0:
+            raise ValueError("No context embeddings were found in the dataset, so KMeans cannot be fitted.")
+
+        n_clusters = min(int(K), int(dataset_ctxs.shape[0]))
+        random_state = 42
+        kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state)
+        kmeans.fit(dataset_ctxs)
+
+        centroids = th.tensor(kmeans.cluster_centers_).cpu()
+        
+        self.model.set_context_centroids(centroids)
+        return centroids
+    
+    def train(self, resume_from_checkpoint: str | bool | None = None, trial: Any | Dict[str, Any] | None = None, ignore_keys_for_eval: list[str] | None = None) -> TrainOutput:
+        
+        if resume_from_checkpoint is None and self.accelerator.is_main_process:
+            kmeans_dataset_size = min(len(self.train_dataset), self.model.config.kmeans_max_dataset_size)
+            indices_ = np.random.choice(len(self.train_dataset), size=kmeans_dataset_size, replace=False)
+            self.train_initialization(self.train_dataset.select(indices_))
+
+        return super().train(resume_from_checkpoint, trial, ignore_keys_for_eval)
+

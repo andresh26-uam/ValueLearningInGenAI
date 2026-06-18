@@ -32,4 +32,4 @@ else
     python_optimize=1
 fi
 
-PYTHONOPTIMIZE="$python_optimize" accelerate launch --config_file="accelerate_config/cpu_config.yaml" vsl-rm/no_context_vsl.py --use_cpu --config_file="$config_file" "${extra_args[@]}"
+PYTHONOPTIMIZE="$python_optimize" accelerate launch --config_file="accelerate_config/cpu_config.yaml" vsl-rm/context_vsl.py --use_cpu --config_file="$config_file" "${extra_args[@]}"

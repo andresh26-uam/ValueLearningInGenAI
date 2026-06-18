@@ -11,6 +11,7 @@ from uuid import uuid4
 import numpy as np
 import torch as th
 from vsllib.defines import NO_RATING_MASK
+from vsllib.utils import convert_to_tensors
 
 # IMport HF_TOKEN from .env
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ from copy import deepcopy
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from vsllib.training_utils import MORewardDataCollatorWithPadding
+from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 
 def maybe_strip_bos_token(text: str, bos_token: Optional[str]) -> str:
     if bos_token:
@@ -127,8 +128,13 @@ def save_dataset(dataset: Dataset, path: str) -> None:
 
     return dataset
     
-class PairwisePreferenceDataset():
+
+
+class BasePairwisePreferenceDataset():
     
+    postprocessor_method = lambda x, value_keys=[], delete_other_keys=True, extra_keep_keys=[], use_context=True, **pp_kwargs: x
+    feature_extractor_method = lambda x, use_context=True, device=th.device("cuda"), **fe_kwargs: x
+
     def calculate_suggested_epsilon(self) -> float:
         suggested_epsilon = float('inf')
         for i in range(len(self.eval_dataset)):
@@ -141,38 +147,39 @@ class PairwisePreferenceDataset():
                 suggested_epsilon = min(suggested_epsilon, smallest_diff_in_pair)
         return suggested_epsilon/2.0
 
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+    def __init__(self, path: str, from_disk: bool = True, extra_keep_keys: list = None, repostprocess: bool = False, recalculate_features: bool = False, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
         
         self.data: Dataset 
+        self._cached_context_embeddings=None
         print(f"Loading dataset from {path} with from_disk={from_disk}")
 
         processed_dataset_path = os.path.join(path, f"preprocessed")
         os.makedirs(processed_dataset_path, exist_ok=True)
         
-        embedded_or_tokenized_dataset_output_path = None
+        postprocessed_dataset_output_path = None
         if model_reference is not None:
-            embedded_or_tokenized_dataset_output_path = os.path.join(path, f"{model_reference.config._name_or_path.replace('/', '_')}")
-            os.makedirs(embedded_or_tokenized_dataset_output_path, exist_ok=True)
+            postprocessed_dataset_output_path = os.path.join(path, f"{model_reference.config._name_or_path.replace('/', '_')}")
+            os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
         else:
-            embedded_or_tokenized_dataset_output_path = os.path.join(path, f"only_tokenized")
-            os.makedirs(embedded_or_tokenized_dataset_output_path, exist_ok=True)
+            postprocessed_dataset_output_path = os.path.join(path, f"only_tokenized")
+            os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
         """if recalculate_embeddings :
             shutil.rmtree(embedded_or_tokenized_dataset_output_path, ignore_errors=True)"""
 
         if from_disk:
 
-            if embedded_or_tokenized_dataset_output_path is None:
+            if postprocessed_dataset_output_path is None:
                 self.data = load_from_disk(processed_dataset_path)
                 print(f"Loaded dataset from {processed_dataset_path}")
             else:
                 try:
-                    self.data = load_from_disk(embedded_or_tokenized_dataset_output_path)
-                    print(f"Loaded embedded/tokenized dataset from {embedded_or_tokenized_dataset_output_path}")
+                    self.data = load_from_disk(postprocessed_dataset_output_path)
+                    print(f"Loaded embedded/tokenized dataset from {postprocessed_dataset_output_path}")
                 except FileNotFoundError:
-                    print(f"Embedded/Tonkenized dataset not found at {embedded_or_tokenized_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
+                    print(f"Embedded/Tonkenized dataset not found at {postprocessed_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
                     self.data = load_from_disk(processed_dataset_path)
-                    print(f"Copying dataset to {embedded_or_tokenized_dataset_output_path} for processing.")
-                    output_path = Path(embedded_or_tokenized_dataset_output_path)
+                    print(f"Copying dataset to {postprocessed_dataset_output_path} for processing.")
+                    output_path = Path(postprocessed_dataset_output_path)
                     self.data = save_dataset(self.data, output_path)
                     print(f"Saved embedded dataset to {output_path}")
         else:
@@ -180,11 +187,10 @@ class PairwisePreferenceDataset():
             check_format(self.data) # This might be tricky. Might need code to join the splits, then get the indices.
         
         
-        if ((self.data[0].get("embedding_1", None) is None) or retokenize) and use_embeddings:
+        if ((self.data[0].get("embedding_1", None) is None) or repostprocess) and use_extracted_features:
             print("RECALCULATING EMBEDDINGS WITH MODEL")
-            recalculate_embeddings = True
+            recalculate_features = True
 
-        self.max_length = tokenizer.model_max_length
         # Extract value keys from the first data item
         if self.data:
             self.value_keys = [key for key in self.data[0].keys() if key.startswith("value_") and key.endswith("_1")]
@@ -194,78 +200,25 @@ class PairwisePreferenceDataset():
         
         if self.data[0].get("labels") is None:
             print("Adding labels and tokens to dataset")
-            self.data: DatasetDict = self.data.map(lambda x: tokenize_sample(x, tokenizer, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context), 
+            self.data: DatasetDict = self.data.map(lambda x: self.postprocessor_method(x, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context, **pp_kwargs), 
                                                    num_proc=16, 
-                                                   load_from_cache_file=not retokenize)
+                                                   load_from_cache_file=not repostprocess)
             
-            self.data = save_dataset(self.data, embedded_or_tokenized_dataset_output_path)
+            self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
         assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
         assert self.data[0].get("labels", None) is not None, "Labels   are missing after tokenization step."
     
         
-        if recalculate_embeddings:
-            if model_reference is None:
-                raise ValueError("recalculate_embeddings=True requires model_reference to be provided")
-            batch_size = 32
+        if recalculate_features:
+            
             #self.data = self.data.select(range(min(1000, len(self.data))))
             with th.no_grad():
-                model_reference = model_reference.cpu()
-                def _embed_shard(dataset_shard, local_model, device):
-                    with th.no_grad():
-                        return dataset_shard.map(
-                            lambda x: embed_sample(x, local_model, tokenizer, collator, use_context=use_context, device=device),
-                            load_from_cache_file=not recalculate_embeddings,
-                            batched=True,
-                            batch_size=batch_size,
-                        )
-
-                if th.cuda.is_available() and th.cuda.device_count() > 1:
-                    n_gpus = th.cuda.device_count()
-                    print(f"Embedding map sharded across {n_gpus} GPUs")
-
-                    shards = [
-                        self.data.shard(num_shards=n_gpus, index=i, contiguous=True)
-                        for i in range(n_gpus)
-                    ]
-
-                    model_copies = [deepcopy(model_reference).to(th.device(f"cuda:{i}")).eval() for i in range(n_gpus)]
-
-                    with ThreadPoolExecutor(max_workers=n_gpus) as executor:
-                        futures = [
-                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"))
-                            for i, shard in enumerate(shards)
-                        ]
-                        mapped_shards = [f.result() for f in futures]
-                    for m in model_copies:
-                        del m
-                    self.data = concatenate_datasets(mapped_shards)
-                elif th.cuda.is_available():
-                    print("Embedding dataset on single GPU")
-                    model_reference = model_reference.to(th.device("cuda"))
-                    model_reference.eval()
-                    self.data = self.data.map(
-                            lambda x: embed_sample(x, model_reference, tokenizer, collator, use_context=use_context, device=th.device("cuda")),
-                            load_from_cache_file=not recalculate_embeddings,
-                            batched=True,
-                            batch_size=batch_size,
-                        )
-
-                else:
-                        print("WARNING: No GPU available, embedding dataset on CPU. This may be very slow.")
-                        model_reference = model_reference.to(th.device("cpu"))
-                        model_reference.eval()
-                        self.data = self.data.map(
-                            lambda x: embed_sample(x, model_reference, tokenizer, collator, use_context=use_context, device=th.device("cpu")),
-                            load_from_cache_file=not recalculate_embeddings,
-                            batched=True,
-                            batch_size=batch_size,
-                            num_proc=4
-                        )
-                self.data = save_dataset(self.data, embedded_or_tokenized_dataset_output_path)
+                self.data = self.calculate_features(recalculate_features, use_context, fe_kwargs)
+                self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
         
-        if use_embeddings:
+        if use_extracted_features:
             assert self.data[0].get("embedding_1", None) is not None, "Embedding 1 is missing after embedding step."
         
         if cleanup_cache_files:
@@ -298,8 +251,182 @@ class PairwisePreferenceDataset():
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
 
+    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
+        
+        self.data = self.data.map(
+                            lambda x: self.feature_extractor_method(x, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
+                            load_from_cache_file=not recalculate_features,
+                            batched=True,
+                            batch_size=batch_size,
+                            num_proc=num_proc
+                        )
+        return self.data
+        
+
+    def get_all_contexts_embeddings(self, recalculate=False) -> List[th.Tensor]:
+        if self._cached_context_embeddings is None or recalculate:
+            contexts = []
+            for i in range(len(self.data)):
+                if self.data[i].get("context_embedding", None) is not None:
+                    contexts.append(self.data[i]["context_embedding"].detach().cpu().numpy())
+            self._cached_context_embeddings = np.stack(contexts)
+        return self._cached_context_embeddings
     def __len__(self):
         return len(self.data)
     
-			           
+
+
+def postprocess_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
+    keep_keys = ["option1", "option2", "grounding_features_1", "grounding_features_2", "labels"]
+    if extra_keep_keys:
+        keep_keys.extend(extra_keep_keys)
+    sample['option1'] = [sample["state"], sample["action1"]]
+    sample['option2'] = [sample["state"], sample["action2"]]
+    if use_context:
+        if sample.get("context", None) is not None:
+            ctx = sample['context']
+        else:
+            ctx = sample['state']
+        
+        sample['context'] = ctx
+        sample['context_features'] = ctx
+        keep_keys.extend(["context_input_ids", "context_attention_mask", "context"])
+    
+    sample["grounding_features_1"] = sample.get("grounding_features_1", np.concatenate(sample["state"],sample["action1"], axis=-1))
+    sample["grounding_features_2"] = sample.get("grounding_features_2", np.concatenate(sample["state"],sample["action2"], axis=-1))
+    
+    value_ratings1 = []
+    value_ratings2 = []
+    for key in value_keys:
+        if sample.get(f"{key}_1", 'N/A') == 'N/A' or sample.get(f"{key}_2", 'N/A') == 'N/A':
+            value_ratings1.append(NO_RATING_MASK)
+            value_ratings2.append(NO_RATING_MASK)
+        else:
+            value_ratings1.append(float(sample.get(f"{key}_1", NO_RATING_MASK)))
+            value_ratings2.append(float(sample.get(f"{key}_2", NO_RATING_MASK)))
+            
+    sample["labels"] = th.tensor(np.array([[*value_ratings1, sample.get("score1", NO_RATING_MASK)] , [*value_ratings2, sample.get("score2", NO_RATING_MASK)]]), dtype=th.float16)
+    
+    if delete_other_keys:	
+        keys_to_delete = [key for key in sample.keys() if key not in keep_keys and not key.startswith("value_")]
+    for key in keys_to_delete:
+        del sample[key]	
+    return sample
+
+
+def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_context: bool =True, device: th.device = th.device("cpu")) -> dict:
+    # THIS ASSUMES BATCHED MAPPING FUNCTION.
+    with th.no_grad():
+        model_device = device
+        for ic, case in enumerate([("option1", "grounding_features_1"), ("option2", "grounding_features_2"), ("context", "context_features")]):
+            if ic == 2 and not use_context:
+                continue
+            merged_features = {
+                case[0]: sample[case[0]],
+                case[1]: sample[case[1]],
+            }
+            
+            batch = convert_to_tensors(
+                merged_features,
+                return_tensors=collator.return_tensors,
+            )
+            sample[case[0]] = batch[case[0]].to(device =model_device)
+            sample[case[1]] = batch[case[1]].to(device =model_device)
+            
+        return sample
+class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
+    postprocessor_method = postprocess_sample
+    feature_extractor_method = feature_extract_sample
+
+
+class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
+    postprocessor_method = tokenize_sample
+    feature_extractor_method = embed_sample
+
+    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
+        model_reference = fe_kwargs.pop("model_reference")
+        model_reference = model_reference.cpu()
+        def _embed_shard(dataset_shard, local_model, device):
+            with th.no_grad():
+                return dataset_shard.map(
+                            lambda x: self.feature_extractor_method(x, local_model, use_context=use_context, device=device, **fe_kwargs),
+                            load_from_cache_file=not recalculate_features,
+                            batched=True,
+                            batch_size=batch_size,
+                        )
+
+        if th.cuda.is_available() and th.cuda.device_count() > 1:
+            n_gpus = th.cuda.device_count()
+            print(f"Embedding map sharded across {n_gpus} GPUs")
+
+            shards = [
+                        self.data.shard(num_shards=n_gpus, index=i, contiguous=True)
+                        for i in range(n_gpus)
+                    ]
+
+            model_copies = [deepcopy(model_reference).to(th.device(f"cuda:{i}")).eval() for i in range(n_gpus)]
+
+            with ThreadPoolExecutor(max_workers=n_gpus) as executor:
+                futures = [
+                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"))
+                            for i, shard in enumerate(shards)
+                        ]
+                mapped_shards = [f.result() for f in futures]
+            for m in model_copies:
+                del m
+            self.data = concatenate_datasets(mapped_shards)
+        elif th.cuda.is_available():
+            print("Embedding dataset on single GPU")
+            model_reference = model_reference.to(th.device("cuda"))
+            model_reference.eval()
+            self.data = self.data.map(
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), **fe_kwargs),
+                            load_from_cache_file=not recalculate_features,
+                            batched=True,
+                            batch_size=batch_size,
+                        )
+
+        else:
+                print("WARNING: No GPU available, embedding dataset on CPU. This may be very slow.")
+                model_reference = model_reference.to(th.device("cpu"))
+                model_reference.eval()
+                self.data = self.data.map(
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
+                            load_from_cache_file=not recalculate_features,
+                            batched=True,
+                            batch_size=batch_size,
+                            num_proc=num_proc
+                        )
+                
+    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+    
+        self.max_length = tokenizer.max_length
+
+        pp_kwargs = {
+            "tokenizer": tokenizer,
+        }
+        fe_kwargs = {
+            "tokenizer": tokenizer,
+            "model_reference": model_reference,
+            "collator": collator
+        }
+        super().__init__(path=path,
+                         from_disk=from_disk,
+                         extra_keep_keys=extra_keep_keys,
+                         recalculate_features=recalculate_embeddings,
+                         repostprocess=retokenize,
+                         use_context=use_context,
+                         split_seed=split_seed,
+                         use_extracted_features=use_embeddings,
+                         cleanup_cache_files=cleanup_cache_files,
+                         eval_proportion_or_indices=eval_proportion_or_indices,
+                         test_proportion_or_indices=test_proportion_or_indices,
+                         pp_kwargs=pp_kwargs,
+                         fe_kwargs=fe_kwargs
+                         
+                        )
+
+        
+    
+	           
 		

@@ -45,7 +45,7 @@ from vsllib.defines import (
 )
 from vsllib.reward_models import (
     MORMForSequenceClassification,
-    MORMForSequenceClassificationConfig,
+    MORMForClassificationConfig,
     mo_compute_loss_func,
 )
 from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, seed_everything, write_metrics_csv
@@ -359,17 +359,6 @@ def main() -> None:
         model = MORMForSequenceClassification.from_pretrained(
             str(script_args.checkpoint_path),
         ).to(device="cuda:0")
-        # Read seed info:
-        """seed_info = {
-            "seed": self.args.seed,
-            "dataseed": self.args.data_seed,
-            "pythonhashseed": os.environ.get("PYTHONHASHSEED"),
-            "torch_initial_seed": int(th.initial_seed()),
-        }
-        with open(os.path.join(checkpoint_dir, "seed_info.json"), "w", encoding="utf-8") as fp:
-            json.dump(seed_info, fp, indent=2, sort_keys=True)"""
-        
-
 
         
         torch_dtype = model.config.dtype
@@ -383,8 +372,8 @@ def main() -> None:
             from transformers import AutoConfig, AutoModelForSequenceClassification
             print("Pushing model to Hugging Face Hub...?")
             input("")
-            AutoConfig.register("morm_for_sequence_classification", MORMForSequenceClassificationConfig)
-            AutoModelForSequenceClassification.register(MORMForSequenceClassificationConfig, MORMForSequenceClassification)
+            AutoConfig.register("morm_for_sequence_classification", MORMForClassificationConfig)
+            AutoModelForSequenceClassification.register(MORMForClassificationConfig, MORMForSequenceClassification)
             
             mo_1 = AutoModelForSequenceClassification.from_pretrained(
                     str(script_args.checkpoint_path),
