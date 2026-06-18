@@ -3,9 +3,11 @@ import enum
 from pathlib import Path
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, List
 import numpy as np
 from torch import nn
+
+from datasets import Dataset
 
 NO_RATING_MASK = float('-inf')
 
@@ -15,44 +17,71 @@ LOCAL_DATASET_PATH = str(PROJECT_ROOT / "processed_datasets")
 MODEL_DIR = str(PROJECT_ROOT / "models")
 RESULTS_DIR = str(PROJECT_ROOT / "results")
 
-
 ULTRAFEEDBACK_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "ultrafeedback")
 ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels"]
 
 PKUALIGNMENT_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "pkuAlignment")
 PKUALIGNMENT_EXTRA_KEYS = ["labels"]
 
+PRISM_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "prism")
+
+OASST_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasst")
+OASSTFL_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasstfl")
+PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
+OASST_EXTRA_KEYS = ["labels", "user_id", "lang", "rev_count", "rank"]
+
 class SupportedDatasets(enum.Enum):
     ULTRAFEEDBACK = "ultra"
     PKUALIGNMENT = "pku"
+    PRISM = "prism"
+    OASST = "oasst"
+    OASSTFL = "oasstfl"
 
 class DatasetNames(enum.Enum):
     ULTRAFEEDBACK = "openbmb/UltraFeedback"
     PKUALIGNMENT = "PKU-Alignment/align-anything"
+    PRISM = "HannahRoseKirk/prism-alignment"
+    OASST = "OpenAssistant/oasst2"
+    OASSTFL = "OpenAssistant/oasst2"
 
 
 EXTRA_KEYS = {
     SupportedDatasets.PKUALIGNMENT: PKUALIGNMENT_EXTRA_KEYS,
     SupportedDatasets.ULTRAFEEDBACK: ULTRAFEEDBACK_EXTRA_KEYS,
+    SupportedDatasets.PRISM: PRISM_EXTRA_KEYS,
+    SupportedDatasets.OASST: OASST_EXTRA_KEYS,
+    SupportedDatasets.OASSTFL: OASST_EXTRA_KEYS,
 }
 
 PROCESSED_DATASET_PATHS = {
     SupportedDatasets.PKUALIGNMENT: PKUALIGNMENT_PROCESSED_PATH,
     SupportedDatasets.ULTRAFEEDBACK: ULTRAFEEDBACK_PROCESSED_PATH,
+    SupportedDatasets.PRISM: PRISM_PROCESSED_PATH,
+    SupportedDatasets.OASST: OASST_PROCESSED_PATH,
+    SupportedDatasets.OASSTFL: OASSTFL_PROCESSED_PATH,
 }
 
 HAS_UNDEFINED_LABELS = {
     SupportedDatasets.PKUALIGNMENT: False,
     SupportedDatasets.ULTRAFEEDBACK: True,
+    SupportedDatasets.PRISM: False,
+    SupportedDatasets.OASST: True,
+    SupportedDatasets.OASSTFL: True,
 }
 HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
     SupportedDatasets.ULTRAFEEDBACK: 0.02,
+    SupportedDatasets.PRISM: True,
+    SupportedDatasets.OASST: True,
+    SupportedDatasets.OASSTFL: True,
 }
 
 HAS_CUSTOM_TEST_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
     SupportedDatasets.ULTRAFEEDBACK: 0.1,
+    SupportedDatasets.PRISM: True,
+    SupportedDatasets.OASST: True,
+    SupportedDatasets.OASSTFL: True,
 }
 
 ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer-coherence',
@@ -63,6 +92,9 @@ ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer
    'code-style','code-explanation','code-instruction-following','code-readability']
 
 VALUES_PKU = ["promptfollowing", "objectivity", "clarity", "inforichness", "safety"]
+VALUES_OASST = ["quality", "nontoxicity", "humor", "helpfulness", "creativity", "nonviolence", "appropriateness"]
+VALUES_OASST_ORIG = ["quality", "toxicity", "humor", "helpfulness", "creativity", "violence", "not_appropriate"]
+
 
 ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
 #ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
@@ -166,29 +198,33 @@ class MOLossFunctions(enum.Enum):
     ONLY_GROUNDING_NO_LAGRANGE = "ONLY_GROUNDING_NO_LAGRANGE"
     FIRST_GROUNDING_THEN_VALUE_SYSTEM = "FIRST_GROUNDING_THEN_VALUE_SYSTEM"
     
+    CTX_DEFAULT = "CTX_DEFAULT"
 
 
 class MOLossFunctionsCategories():
-    REQUIRES_GRAD_ON_EVERYTHING = [MOLossFunctions.DEFAULT]
+    REQUIRES_GRAD_ON_EVERYTHING = [MOLossFunctions.DEFAULT, MOLossFunctions.CTX_DEFAULT]
     REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS = [MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, 
                                            MOLossFunctions.ONLY_VALUE_SYSTEM, 
                                            MOLossFunctions.DEFAULT,
-                                           MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+                                           MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
+                                           MOLossFunctions.CTX_DEFAULT]
     EPOCH_DEPENDENT_GRAD_REQUIREMENTS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM]
 
     REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
-    REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES = [MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+    REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES = [MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.CTX_DEFAULT, MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
     REQUIRES_GRAD_FOR_SOME_OR_ALL_GROUNDING_LOSSES = REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES + REQUIRES_GRAD_FOR_ALL_GROUNDING_LOSSES
     
-    SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM,MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
-    SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM,MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_VALUES_IN_KWARGS, MOLossFunctions.ONLY_VALUE_SYSTEM,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+    SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM, MOLossFunctions.CTX_DEFAULT, MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
+    SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM, MOLossFunctions.CTX_DEFAULT, MOLossFunctions.ONLY_GROUNDING,  MOLossFunctions.ONLY_GROUNDING_NO_LAGRANGE, MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_VALUES_IN_KWARGS, MOLossFunctions.ONLY_VALUE_SYSTEM,MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE]
     SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
-    SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS = [MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUES_IN_KWARGS]
+    SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS = [MOLossFunctions.DEFAULT, MOLossFunctions.CTX_DEFAULT, MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUES_IN_KWARGS]
 
 
     SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS = SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS + SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS
     
     NEEDS_NO_GRAD_EVER = [MOLossFunctions.EVALUATION_ONLY]
+
+    CONTEXT_DEPENDENT_LOSS = [MOLossFunctions.CTX_DEFAULT]
 
 class MOLossManagement():
     def __init__(self, loss_func_type: MOLossFunctions, loss_func_kwargs: dict | None = None) -> None:
@@ -295,3 +331,27 @@ def get_test_indices(dataset_name: SupportedDatasets) -> list[int] | float | Non
         if test_indices_path.exists():
             with test_indices_path.open("r", encoding="utf-8") as f:
                 return json.load(f)
+            
+
+def save_processeddataset(processed_path: str, ds: Dataset, validation_indices: List[int]=None, test_indices: List[int]=None):
+    print(f"Total pairs after processing: {len(ds)}")
+    
+    # Save to OASST_PROCESSED_PATH folder
+    final_output = Path(OASST_PROCESSED_PATH).joinpath("preprocessed/")
+    final_output.mkdir(parents=True, exist_ok=True)
+    print(f"Saving processed dataset to disk... {final_output}")
+    ds.save_to_disk(final_output)
+
+    if validation_indices is not None:
+
+
+        validation_indices_path = final_output / f"validation_indices.json"
+        with validation_indices_path.open("w", encoding="utf-8") as f:
+            json.dump(validation_indices, f)
+
+    if test_indices is not None:
+        test_indices_path = final_output / f"test_indices.json"
+        with test_indices_path.open("w", encoding="utf-8") as f:
+            json.dump(test_indices, f)
+    
+    assert set(validation_indices).isdisjoint(set(test_indices))

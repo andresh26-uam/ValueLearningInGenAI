@@ -11,7 +11,7 @@ load_dotenv()
 
 from datasets import load_dataset, Dataset, concatenate_datasets
 
-from vsllib.defines import LOCAL_DATASET_PATH, PKUALIGNMENT_PROCESSED_PATH, DatasetNames
+from vsllib.defines import LOCAL_DATASET_PATH, PKUALIGNMENT_PROCESSED_PATH, DatasetNames, save_processeddataset
 
 
 def _build_pair_row(index_, completion_pair: dict[str, Any], val_indices, test_indices) -> dict[str, Any]:
@@ -61,10 +61,7 @@ def pkuAlignment_processor() -> tuple[int, list[int]]:
     ds = concatenate_datasets([train_dataset, val_dataset])
 
     
-    validation_indices = list(range(len(train_dataset), len(ds)))
     
-    assert len(validation_indices) == len(val_dataset), "Validation indices length should match the validation dataset length."    
-
     rows = []
     skipped_amount = 0
     for i, completion_pair in enumerate(ds):
@@ -74,25 +71,20 @@ def pkuAlignment_processor() -> tuple[int, list[int]]:
             rows.append(row_or_skipped)
         else:
             skipped_amount += 1
+    validation_indices = list(range(len(train_dataset), len(ds)))
+    
+    assert len(validation_indices) == len(val_dataset), "Validation indices length should match the validation dataset length."    
+
+    test_indices = list(range(len(rows)))[0:len(validation_indices)]  # Assuming test set is the same as validation set for now
+    
     print(f"Skipped {skipped_amount} pairs due to identical responses.")
     ds_new = Dataset.from_dict( {k: [row[k] for row in rows] for k in rows[0].keys()})
+
     print(f"Total pairs after processing: {len(ds_new)}")
-    test_indices = list(range(len(ds_new)))[0:len(validation_indices)]  # Assuming test set is the same as validation set for now
     
+    save_processeddataset(PKUALIGNMENT_PROCESSED_PATH, ds_new, validation_indices, test_indices)
     # Save to PKUALIGNMENT_PROCESSED_PATH folder
-    final_output = Path(PKUALIGNMENT_PROCESSED_PATH).joinpath("preprocessed/")
-    final_output.mkdir(parents=True, exist_ok=True)
-    print(f"Saving processed dataset to disk... {final_output}")
-    ds_new.save_to_disk(final_output)
-
-    validation_indices_path = final_output / f"validation_indices.json"
-    with validation_indices_path.open("w", encoding="utf-8") as f:
-        json.dump(validation_indices, f)
-
-    test_indices_path = final_output / f"test_indices.json"
-    with test_indices_path.open("w", encoding="utf-8") as f:
-        json.dump(test_indices, f)
-
+    
     return len(rows), validation_indices, test_indices
 
 
