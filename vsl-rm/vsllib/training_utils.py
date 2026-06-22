@@ -87,19 +87,24 @@ class MORewardDataCollator:
 
     
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # This arranges features into a batch, so that:
+        # batch["key"] = features[:]["key"]
+        # Additionally, we manage cases where we have features[i]["key_1"], features[i]["key_2"] to produce:
+        # batch["key"][i] = features[i]["key_1"] when i is 0,2,4,6...
+        # batch["key"][i+1] = features[i]["key_2"] 
+        # 
         merged_features = []
-
 
         for feature in features:
             pair_labels = feature["labels"]
-            c = feature.get("context_features", None)
+            c = feature.pop("context_features", [])
             dic1 = {"labels": pair_labels[0],
                 }
             dic2 = {"labels": pair_labels[1],
                 }
-            dic1["grounding_features"] = feature.get("grounding_features_1", None)
+            dic1["grounding_features"] = feature.pop("grounding_features_1", [])
             dic1["context_features"] = c
-            dic2["grounding_features"] = feature.get("grounding_features_2", None)
+            dic2["grounding_features"] = feature.pop("grounding_features_2", [])
             dic2["context_features"] = c
             merged_features.append(
                 dic1
@@ -108,17 +113,16 @@ class MORewardDataCollator:
             merged_features.append(
                 dic2
             )
-        batch = convert_to_tensors(merged_features,
-            return_tensors=self.return_tensors
-        )
+        batch = {
+            key: th.stack([th.tensor(feature[key],dtype=self.dtype) for feature in merged_features])
+            for key in merged_features[0]
+        }
+        assert len(batch) == len(features)*2
         
         batch["return_loss"] = True
-        batch["grounding_features"] = batch["grounding_features"].to(dtype=self.dtype) if "grounding_features" in batch.keys() else None
-        batch["context_features"] = batch["context_features"].to(dtype=self.dtype) if "context_features" in batch.keys() else None
-        """if self.use_embeddings:
-            assert batch["embedding"] is not None, "Expected 'embedding' key in the batch when use_embeddings is True."
-            assert batch["context_embedding"] is not None, "Expected 'context_embedding' key in the batch when use_embeddings is True."
-        """
+        batch["grounding_features"] = batch["grounding_features"].to(dtype=self.dtype) 
+        batch["context_features"] = batch["context_features"].to(dtype=self.dtype) 
+        
         return batch
 
 @dataclass
@@ -133,8 +137,12 @@ class MORewardDataCollatorWithPadding:
 
     
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # This arranges features into a batch, so that:
+        # batch["key"] = features[:]["key"]
+        # Additionally, we manage cases where we have features[i]["key_1"], features[i]["key_2"] to produce:
+        # batch["key"][i] = features[i]["key_1"] when i is 0,2,4,6...
+        # batch["key"][i+1] = features[i]["key_2"] 
         merged_features = []
-
 
         for feature in features:
             pair_labels = feature["labels"]
@@ -144,6 +152,7 @@ class MORewardDataCollatorWithPadding:
                     "attention_mask": feature["attention_mask_1"],
                     "labels": pair_labels[0],
                 }
+            
             dic2 = {
                     "input_ids": feature["input_ids_2"],
                     "attention_mask": feature["attention_mask_2"],
@@ -169,7 +178,6 @@ class MORewardDataCollatorWithPadding:
             return_tensors=self.return_tensors,
             
         )
-        
         batch["return_loss"] = True
         batch["embedding"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch.keys() else None
         batch["context_embedding"] = batch["context_embedding"].to(dtype=self.dtype) if "context_embedding" in batch.keys() else None
@@ -439,11 +447,12 @@ class MORMTrainingVariables(th.nn.Module):
                     norm_penalty_ = th.zeros(1, device=self.lagrange_multipliers.device, dtype=self.lagrange_multipliers.dtype, requires_grad=False)
                 if vs_ideal_diff is not None:
                     with th.no_grad():
+                        vs_ideal_diff = 0.0
                         if th.any(gr_ideal_diff_orig > 0.0):
                             #add_vs_loss = False
                             vs_ideal_diff = 0.0
-                        else:
-                            vs_ideal_diff = th.clamp(vs_ideal_diff, min=0.0).detach()
+                        #else:
+                            #vs_ideal_diff = th.clamp(vs_ideal_diff, min=0.0).detach()
                 
                 forward = -self.forward(grounding_losses=gr_ideal_diff, vs_losses=vs_ideal_diff, selected_indices=self._last_selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=self._last_add_gr_loss) + norm_penalty_ # It is negated, as it is a maximization problem
                 self._last_add_vs_loss = before_vs_loss

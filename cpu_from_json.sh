@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config_file="${1}"
+scriptvsl="${1}"
+config_file="${2}"
+
 if [[ $# -gt 0 ]]; then
-    shift
+    shift 2
 fi
 
 if [[ ! -f "$config_file" ]]; then
@@ -32,4 +34,4 @@ else
     python_optimize=1
 fi
 
-PYTHONOPTIMIZE="$python_optimize" accelerate launch --config_file="accelerate_config/cpu_config.yaml" vsl-rm/context_vsl.py --use_cpu --config_file="$config_file" "${extra_args[@]}"
+PYTHONOPTIMIZE="$python_optimize" accelerate launch --config_file="accelerate_config/cpu_config.yaml" $scriptvsl --use_cpu --config_file="$config_file" "${extra_args[@]}"

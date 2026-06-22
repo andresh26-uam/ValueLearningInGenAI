@@ -10,29 +10,13 @@ if [[ "$CPU" == "True" ]]; then
 else
   SCRIPT=sbatch_from_json.sh
 fi
-DATASET=pku
-CONFIG=run_configs/smol_ctx_linear.json
 
-EVAL_EVERY_STEPS=""
-if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
-  NAME=LlamaBTRMv2
-elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
-  NAME=LlamaSEQ-RMv2
-elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
-  NAME=LlamaVSLRMv2
-elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
-  NAME=LlamaGRRMv2
-  elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
-  NAME=LlamaVSL-NL-RMv2
-elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
-  NAME=SmolBTRMv2
-elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
-  NAME=SmolVSLRMv2
-  elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv2
-else
-  NAME=test
-fi
+#DATASET=pku
+#CONFIG=run_configs/smol_linear.json
+DATASET=apollo
+CONFIG=run_configs/features_apollo.json
+SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+
 if [[ "$DATASET" == "ultra" ]]; then
   DISCORDANCE_EPSILON=0.25
   NUM_TRAIN_EPOCHS=10
@@ -47,6 +31,40 @@ elif [[ "$DATASET" == "pku" ]]; then
     NUM_TRAIN_EPOCHS=150
     EVAL_EVERY_STEPS="--eval_every_steps=200"
   fi
+elif [[ "$DATASET" == "apollo" ]]; then
+  DISCORDANCE_EPSILON="-1"
+  NUM_TRAIN_EPOCHS=500
+
+EVAL_EVERY_STEPS=""
+if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
+  NAME=LlamaBTRMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
+  NAME=LlamaSEQ-RMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
+  NAME=LlamaVSLRMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
+  NAME=LlamaGRRMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+  elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
+  NAME=LlamaVSL-NL-RMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
+  NAME=SmolBTRMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
+  NAME=SmolVSLRMv2
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
+  NAME=SmolCtxVSLRMv2
+  SCRIPT_PYTHON="vsl-rm/context_vsl.py"
+else
+  NAME=test
+fi
+
+
 else
   echo "Unknown dataset: $DATASET" >&2
   exit 1
@@ -57,6 +75,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
+  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
 done
 

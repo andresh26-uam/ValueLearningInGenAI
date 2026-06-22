@@ -14,6 +14,8 @@ NO_RATING_MASK = float('-inf')
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 assert PROJECT_ROOT.name == "ValueLearningInGenAI", f"Expected project root to be 'ValueLearningInGenAI', but got '{PROJECT_ROOT.name}'"
 LOCAL_DATASET_PATH = str(PROJECT_ROOT / "processed_datasets")
+
+DOWNLOADED_DATASETS_PATH = str(Path(PROJECT_ROOT) / "local_datasets")
 MODEL_DIR = str(PROJECT_ROOT / "models")
 RESULTS_DIR = str(PROJECT_ROOT / "results")
 
@@ -27,15 +29,19 @@ PRISM_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "prism")
 
 OASST_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasst")
 OASSTFL_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasstfl")
-PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
-OASST_EXTRA_KEYS = ["labels", "user_id", "lang", "rev_count", "rank"]
 
+APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
+
+PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
+OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank"]
+APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
 class SupportedDatasets(enum.Enum):
     ULTRAFEEDBACK = "ultra"
     PKUALIGNMENT = "pku"
     PRISM = "prism"
     OASST = "oasst"
     OASSTFL = "oasstfl"
+    APOLLO = "apollo"
 
 class DatasetNames(enum.Enum):
     ULTRAFEEDBACK = "openbmb/UltraFeedback"
@@ -43,7 +49,7 @@ class DatasetNames(enum.Enum):
     PRISM = "HannahRoseKirk/prism-alignment"
     OASST = "OpenAssistant/oasst2"
     OASSTFL = "OpenAssistant/oasst2"
-
+    APOLLO = "apollo"
 
 EXTRA_KEYS = {
     SupportedDatasets.PKUALIGNMENT: PKUALIGNMENT_EXTRA_KEYS,
@@ -51,6 +57,7 @@ EXTRA_KEYS = {
     SupportedDatasets.PRISM: PRISM_EXTRA_KEYS,
     SupportedDatasets.OASST: OASST_EXTRA_KEYS,
     SupportedDatasets.OASSTFL: OASST_EXTRA_KEYS,
+    SupportedDatasets.APOLLO: APOLLO_EXTRA_KEYS
 }
 
 PROCESSED_DATASET_PATHS = {
@@ -59,14 +66,16 @@ PROCESSED_DATASET_PATHS = {
     SupportedDatasets.PRISM: PRISM_PROCESSED_PATH,
     SupportedDatasets.OASST: OASST_PROCESSED_PATH,
     SupportedDatasets.OASSTFL: OASSTFL_PROCESSED_PATH,
+    SupportedDatasets.APOLLO: APOLLO_PROCESSED_PATH
 }
 
 HAS_UNDEFINED_LABELS = {
     SupportedDatasets.PKUALIGNMENT: False,
     SupportedDatasets.ULTRAFEEDBACK: True,
     SupportedDatasets.PRISM: False,
-    SupportedDatasets.OASST: True,
-    SupportedDatasets.OASSTFL: True,
+    SupportedDatasets.OASST: False,
+    SupportedDatasets.OASSTFL: False,
+    SupportedDatasets.APOLLO: False,
 }
 HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
@@ -74,6 +83,7 @@ HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PRISM: True,
     SupportedDatasets.OASST: True,
     SupportedDatasets.OASSTFL: True,
+    SupportedDatasets.APOLLO: True
 }
 
 HAS_CUSTOM_TEST_SETS = {
@@ -82,6 +92,7 @@ HAS_CUSTOM_TEST_SETS = {
     SupportedDatasets.PRISM: True,
     SupportedDatasets.OASST: True,
     SupportedDatasets.OASSTFL: True,
+    SupportedDatasets.APOLLO: True
 }
 
 ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer-coherence',
@@ -95,7 +106,7 @@ VALUES_PKU = ["promptfollowing", "objectivity", "clarity", "inforichness", "safe
 VALUES_OASST = ["quality", "nontoxicity", "humor", "helpfulness", "creativity", "nonviolence", "appropriateness"]
 VALUES_OASST_ORIG = ["quality", "toxicity", "humor", "helpfulness", "creativity", "violence", "not_appropriate"]
 
-
+VALUES_APOLLO = ["Cost_Efficiency", "Time_Efficienccy", "Comfort"]
 ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
 #ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
 ATTRIBUTES_ARMO_RM_INDEX_PKU = [6, 7, 2, 3, 10] # ultrainstruct -> promptfollowing
@@ -135,6 +146,7 @@ VALUE_LAYER_ACTIVATIONS = {
 }
 
 MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
+    "mlp": {},
     "gemma": {
         "tokenizer_use_fast": None,
         "tokenizer_add_pad_token": False,
@@ -179,6 +191,8 @@ def infer_variant(model_name: str, requested_variant: str) -> str:
         return "mistral"
     if "smol" in lower_name:
         return "smol"
+    if "mlp" in lower_name:
+         return "mlp"
     
     raise ValueError(
         "Could not infer model variant from model_name. "
@@ -337,7 +351,7 @@ def save_processeddataset(processed_path: str, ds: Dataset, validation_indices: 
     print(f"Total pairs after processing: {len(ds)}")
     
     # Save to OASST_PROCESSED_PATH folder
-    final_output = Path(OASST_PROCESSED_PATH).joinpath("preprocessed/")
+    final_output = Path(processed_path).joinpath("preprocessed/")
     final_output.mkdir(parents=True, exist_ok=True)
     print(f"Saving processed dataset to disk... {final_output}")
     ds.save_to_disk(final_output)

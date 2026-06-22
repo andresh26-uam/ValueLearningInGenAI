@@ -1,12 +1,6 @@
 
-import dis
-import math
-from turtle import forward
-
-import accelerate
-from sympy import use
 from transformers.configuration_utils import PretrainedConfig
-from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast
+from transformers.modeling_outputs import BaseModelOutputWithPast, SequenceClassifierOutputWithPast, ModelOutput
 from collections.abc import Iterator
 from dataclasses import dataclass
 
@@ -38,14 +32,17 @@ def construct_layers(input_dim, hidden_sizes, intermediate_activation, dropout, 
     if intermediate_activation is None:
         raise ValueError(
             f"Unsupported intermediate activation: {intermediate_activation}")
+    final_size = input_dim
+    input_aux = input_dim
     for hidden_size in hidden_sizes:
-        layers.append(nn.Linear(input_dim, hidden_size,
+        layers.append(nn.Linear(input_aux, hidden_size,
                       dtype=dtype, device=device))
 
         layers.append(intermediate_activation())
         if dropout > 0.0:
             layers.append(nn.Dropout(dropout))
         final_size = hidden_size
+        input_aux = hidden_size
     layers.append(nn.Linear(final_size, n_outputs,
                   dtype=dtype, device=device))
 
@@ -73,7 +70,7 @@ class LinearAlignmentLayer(th.nn.Linear):
             self.load_state_dict(state_dict)
 
     #@th.compile
-    def forward(self, input: th.Tensor) -> th.Tensor:
+    def forward(self, input: th.Tensor, **kwargs) -> th.Tensor:
         # assert w_bounded.dtype == self.weight.dtype, f"Expected w_bounded dtype {self.weight.dtype}, but got {w_bounded.dtype}"
         # assert w_bounded.device == self.weight.device, f"Expected w_bounded device {self.weight.device}, but got {w_bounded.device}"
         return th.nn.functional.linear(input, self.get_alignment_layer())
@@ -173,6 +170,8 @@ class MORMForClassificationConfig(PretrainedConfig):
         # This will be set properly in the model init based on the tokenizer
         pad_token_id: int = "UNKNOWN",
         num_values: int = 3,
+        input_size: int = "infer", 
+        input_size_vs: int = "infer",
         hidden_sizes: list[int] = [1024, 1024, 1024],
         value_layer_dropout: float = 0.1,
         value_layer_intermediate_activation: str = "ReLU",
@@ -233,8 +232,9 @@ class MORMForClassificationConfig(PretrainedConfig):
         label2id = kwargs.pop(
             "label2id", {label: index for index, label in id2label.items()})
 
-        if pad_token_id == "UNKNOWN":
+        """if pad_token_id == "UNKNOWN":
             raise ValueError("pad_token_id must be set to a valid integer value corresponding to the tokenizer's pad token ID. It is currently set to 'UNKNOWN', which is not valid. Please set it to the correct value when initializing the config.")
+        """
         self.pad_token_id = pad_token_id
         self.num_values = num_values
         self.gather_train_metrics = gather_train_metrics
@@ -256,6 +256,8 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.zero_constraint = zero_constraint
         self.rew_center_coefficient = rew_center_coefficient
         self.discordance_epsilon = discordance_epsilon
+        self.input_size = input_size
+        self.input_size_vs = input_size_vs
         if isinstance(dtype, th.dtype):
             self.dtype = str(dtype).replace("torch.", "")
         else:
@@ -897,9 +899,9 @@ def mo_compute_loss_func(outputs, labels, config=None, training_variables=None, 
 class SequenceClassifierOutputWithPastAndIdeal(SequenceClassifierOutputWithPast):
     ideal_logits: th.Tensor = None
 @dataclass
-class ClassifierOutputWithPast():
+class ClassifierOutputWithPast(ModelOutput):
     logits: th.Tensor
-    loss: th.Tensor
+    loss: th.Tensor = None
 
 @dataclass
 class ClassifierOutputWithPastAndIdeal(ClassifierOutputWithPast):
@@ -958,8 +960,9 @@ class MultiValueRewardHead(nn.Module):
             return_str += head_str + "\n"
         return return_str
 
-class MORMForClassification(nn.Module):
-
+class MORMForClassification(PreTrainedModel):
+    config_class = MORMForClassificationConfig
+    supports_gradient_checkpointing = False
     
     @property
     def grounding_features_name(self) -> str:
@@ -972,29 +975,45 @@ class MORMForClassification(nn.Module):
 
     classifier_ouput_class = ClassifierOutputWithPast
     classifier_output_class_ideal = ClassifierOutputWithPastAndIdeal
-    def __init__(self, config: MORMForClassificationConfig, input_size: int, input_size_vs_layer: Optional[int] = None):
-        super().__init__()
+    def __init__(self, config: MORMForClassificationConfig):
+        super().__init__(config)
+        self.supports_gradient_checkpointing = False
         self.config = config
         self.reward_heads: Optional[MultiValueRewardHead] = None
         self.reward_heads_ideal: Optional[MultiValueRewardHead] = None
         self.value_system_layer: Optional[nn.Module] = None
         self.training_variables: Optional[MORMTrainingVariables] = None
-        self.use_ideal_grounding_model: bool = False
-        self.forward_ideal_grounding: bool = False
 
+        self.config = config
+        print(f"Initializing MORMForSequenceClassification")
+        self.use_base_model_heads = config.use_base_model_heads
+        self.base_model_reward_head_indices = config.base_model_reward_head_indices
+        self.base_model_rewards_attr_name = config.base_model_reward_heads_module_name
+        self.base_model_score_attr_name = config.base_model_value_system_module_name
+        
         self.num_values = config.num_values
         self.use_ideal_grounding_model = config.use_ideal_grounding_model
         self.forward_ideal_grounding = self.use_ideal_grounding_model
 
+        self.init_networks(config)
+
+        self.post_init()
+
+        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
+        self.zero_grad(set_to_none=True)
+
+    def init_networks(self, config, *args, **kwargs) -> None:
+
+        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
+        
+
         model_device = "cuda:0" if th.cuda.is_available() else "cpu"
         
-        self.create_reward_networks(config, input_size, model_device, input_size_vs_layer=input_size_vs_layer)
+        self.create_reward_networks(config, model_device)
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
         self.create_training_variables(config, model_device)
 
-        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
-        self.zero_grad(set_to_none=True)
 
     def _set_train_mode(self, train_mode: bool):
         for param in self.grounding_parameters():
@@ -1022,9 +1041,12 @@ class MORMForClassification(nn.Module):
         
 
         self.loss_function = partial(parse_loss_function(
-            self.config), training_variables=self.training_variables, config=self.config)
+            config), training_variables=self.training_variables, config=config)
 
-    def create_reward_networks(self, config: MORMForClassificationConfig, input_size: int, model_device: th.Device, input_size_vs_layer=None):
+    def construct_value_system_layer(self, config, device, dtype):
+        return ConvexAlignmentLayer(
+                config.num_values, 1, device=device, dtype=dtype)
+    def create_reward_networks(self, config: MORMForClassificationConfig, model_device: th.Device):
         if len(config.hidden_sizes) > 0:
                 # This constructs one NN per value to avoid that changing one value loss parameter chagnes also affect others.
             constructor = self.construct_reward_head
@@ -1033,11 +1055,10 @@ class MORMForClassification(nn.Module):
             constructor = partial(
                     self.construct_value_layer, n_outputs=self.num_values, add_normalization=config.layer_normalization != 'none')
             
-        self.reward_heads = constructor(config, input_size=input_size, model_device=model_device)
+        self.reward_heads = constructor(config, input_size=config.input_size, model_device=model_device)
         if config.use_ideal_grounding_model:
-            self.reward_heads_ideal = constructor(config, input_size=input_size, model_device=model_device)
-        self.value_system_layer = ConvexAlignmentLayer(
-                config.num_values, 1, device=model_device, dtype=self.reward_heads.parameters().__next__().dtype)
+            self.reward_heads_ideal = constructor(config, input_size=config.input_size, model_device=model_device)
+        self.value_system_layer =  self.construct_value_system_layer(config, model_device, dtype=self.reward_heads.parameters().__next__().dtype) #config.input_size_vs
         self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
         # self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
         
@@ -1166,9 +1187,26 @@ class MORMForClassification(nn.Module):
             all_rewards = rewards
         return all_rewards
     
-    
+    def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:
+        # Condition 2: Reward heads
+        if self.reward_heads is not None and self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            
+            yield from self.reward_heads.parameters(recurse=recurse)
+            
+        # Condition 3: Value system layer
+        if self.value_system_layer is not None and self.config.loss_management.should_apply_grad_on_value_system_weights():
+            
+            yield from self.value_system_layer.parameters(recurse=recurse)
+        # yield from self.training_variables.parameters(recurse=recurse)
+        
+        # Condition 4: Ideal grounding model
+        if self.use_ideal_grounding_model and self.config.loss_management.should_apply_grad_on_grounding_parameters():
+            
+            yield from self.reward_heads_ideal.parameters(recurse=recurse)
+
     def base_forward(self, *args, **kwargs) -> th.Tensor:
         grounding_features = kwargs.pop(self.grounding_features_name)
+        
         vs_features = kwargs.pop(self.vs_features_name, None)
         all_rewards = self.score(grounding_features, vs_features=vs_features)
 
@@ -1192,7 +1230,7 @@ class MORMForClassification(nn.Module):
         
         return self.base_forward(*args,**kwargs)
         
-class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
+class MORMForSequenceClassification(MORMForClassification):
     config_class = MORMForClassificationConfig
     base_model_prefix = "full_model"
     supports_gradient_checkpointing = True
@@ -1209,22 +1247,7 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
     def vs_features_name(self) -> Optional[str]:
         return None
     
-    def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:
-        # Condition 2: Reward heads
-        if self.reward_heads is not None and self.config.loss_management.should_apply_grad_on_grounding_parameters():
-            
-            yield from self.reward_heads.parameters(recurse=recurse)
-            
-        # Condition 3: Value system layer
-        if self.value_system_layer is not None and self.config.loss_management.should_apply_grad_on_value_system_weights():
-            
-            yield from self.value_system_layer.parameters(recurse=recurse)
-        # yield from self.training_variables.parameters(recurse=recurse)
-        
-        # Condition 4: Ideal grounding model
-        if self.use_ideal_grounding_model and self.config.loss_management.should_apply_grad_on_grounding_parameters():
-            
-            yield from self.reward_heads_ideal.parameters(recurse=recurse)
+    
         
 
     def _build_base_model_from_config(self, config: MORMForClassificationConfig) -> AutoModelForSequenceClassification:
@@ -1274,7 +1297,7 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
         if self.use_base_model_heads and self.config.loss_management.should_apply_grad_on_grounding_or_value_system_params():
             yield from self.full_model.parameters(recurse=recurse)
 
-        yield from super(MORMForClassification, self).parameters(recurse=recurse)
+        yield from MORMForClassification.parameters(self, recurse=recurse)
     
     
 
@@ -1321,7 +1344,8 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
 
         return th.cat([rewards, score], dim=-1)
 
-    def _infer_model_inputs_sizes(self, base_model: AutoModelForSequenceClassification) -> Tuple[int, Optional[int]]:
+    @staticmethod
+    def infer_model_inputs_sizes(base_model: AutoModelForSequenceClassification) -> Tuple[int, Optional[int]]:
         # SequenceClassification wrappers often expose the classifier head input width here.
         if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
             return int(base_model.score.in_features), None
@@ -1348,8 +1372,11 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
     
 
     def __init__(self, config: MORMForClassificationConfig, base_model: AutoModelForSequenceClassification = None):
-        super(PreTrainedModel, self).__init__(config)
-        print(f"Initializing MORMForSequenceClassification")
+        
+        super().__init__(self, config)
+        
+
+    def init_networks(self, config: MORMForClassificationConfig, base_model: AutoModelForSequenceClassification, *args, **kwargs) -> None:
         if base_model is None:
             base_model = self._build_base_model_from_config(config)
         print(f"Base model loaded: {base_model.__class__.__name__}")
@@ -1357,15 +1384,10 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
         self.supports_gradient_checkpointing = hasattr(
             self.full_model, "gradient_checkpointing_enable")
         model_device = self._module_device(self.full_model)
-        self.use_base_model_heads = config.use_base_model_heads
-        self.base_model_reward_head_indices = config.base_model_reward_head_indices
-        self.base_model_rewards_attr_name = config.base_model_reward_heads_module_name
-        self.base_model_score_attr_name = config.base_model_value_system_module_name
+        input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model)
+        assert input_size == config.input_size
+        assert input_size_vs == config.input_size_vs
         
-        self.num_values = config.num_values
-        self.use_ideal_grounding_model = config.use_ideal_grounding_model
-        self.forward_ideal_grounding = self.use_ideal_grounding_model
-
         # In base-model mode, consume reward/score attributes from base model outputs.
         if self.use_base_model_heads:
             if not self.base_model_rewards_attr_name:
@@ -1378,17 +1400,11 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
             self.value_system_layer = None
             self.reward_heads_ideal = None
         else:
-            input_size, input_size_vs = self._infer_model_inputs_sizes(base_model)
-            self.create_reward_networks(config, input_size, model_device, input_size_vs_layer=input_size_vs)
+            
+            self.create_reward_networks(config, model_device)
 
         # if config.training_variables_dtype == "float32" else th.float16 if config.training_variables_dtype == "float16" else self._resolve_torch_dtype(config.training_variables_dtype)
         self.create_training_variables(config, model_device)
-
-        self.post_init()
-
-        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
-        self.zero_grad(set_to_none=True)
-
 
     def _set_train_mode(self, train_mode: bool = True) -> None:
         # Freeze pretrained weights and train only the custom reward/value-system heads.
@@ -1399,7 +1415,7 @@ class MORMForSequenceClassification(PreTrainedModel,MORMForClassification):
         
         self.full_model.train(train_mode_base_model)
 
-        super(MORMForClassification, self)._set_train_mode(train_mode)
+        MORMForClassification._set_train_mode(self,train_mode)
 
     @property
     def is_gradient_checkpointing(self) -> bool:

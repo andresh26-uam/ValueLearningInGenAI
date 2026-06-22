@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-config_file="${1}"
+scriptvsl="${1}"
+config_file="${2}"
 if [[ $# -gt 0 ]]; then
     shift
 fi
@@ -13,6 +14,7 @@ fi
 
 gpu_request="L40S:2"
 extra_args=()
+scriptvsl="vsl-rm/no_context_vsl.py"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,4 +35,4 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-sbatch --gpus="$gpu_request" sbatch_script.sh vsl-rm/no_context_vsl.py --config_file="$config_file" "${extra_args[@]}"
+sbatch --gpus="$gpu_request" sbatch_script.sh $script_vsl --config_file="$config_file" "${extra_args[@]}"

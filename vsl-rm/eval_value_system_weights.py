@@ -151,7 +151,7 @@ def main() -> None:
         tokenizer,
         from_disk=True,
         extra_keep_keys=extra_keep_keys,
-        retokenize=bool(script_args.retokenize),
+        retokenize=bool(script_args.repostprocess),
         recalculate_embeddings=False,
         use_embeddings=False,
         model_reference=None,

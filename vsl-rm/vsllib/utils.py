@@ -88,6 +88,7 @@ def print_tensor_and_grad_fn(grad_fn, level=0):
 
 from transformers.utils import TensorType, is_numpy_array
 from transformers.utils.import_utils import is_torch_available, is_mlx_available
+from transformers.tokenization_utils_base import flatten
 
 def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, prepend_batch_axis: bool = False):
         """
@@ -126,7 +127,7 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
                 raise ImportError("Unable to convert output to MLX tensors format, MLX is not installed.")
             import mlx.core as mx
 
-            def as_tensor(value, dtype=None):
+            def as_tensor(value: Any, dtype=None):
                 if len(flatten(value)) == 0 and dtype is None:
                     dtype = mx.int32
                 return mx.array(value, dtype=dtype)
@@ -135,7 +136,7 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
                 return isinstance(obj, mx.array)
         else:
 
-            def as_tensor(value, dtype=None):
+            def as_tensor(value: Any, dtype=None):
                 if (
                     isinstance(value, (list, tuple))
                     and len(value) > 0
@@ -188,20 +189,23 @@ class ScriptArguments:
     """
     These arguments vary depending on how many GPUs you have, what their capacity and features are, and what size model you want to train.
     """
+    task_type: Optional[str] = field(
+        default="nlp_based", metadata={"help": "Options: nlp_based, feature_based"}
+    )
     use_frozen_base_model: Optional[bool] = field(
         default=False, metadata={"help": "Whether to use a frozen base model with built-in reward structure (e.g. ArmoRM). If False, we will use the base model as a starting point and train the reward heads from scratch."})
     local_rank: Optional[int] = field(
         default=-1, metadata={"help": "Used for multi-gpu"})
-    retokenize: Optional[bool] = field(
-        default=False, metadata={"help": "Whether to retokenize the dataset. Set this to False if you have already tokenized and saved the dataset to disk, and just want to load it."})
-    recalculate_embeddings: Optional[bool] = field(
-        default=False, metadata={"help": "Whether to recalculate embeddings for the dataset."})
-    use_embeddings: Optional[bool] = field(
-        default=True, metadata={"help": "Whether to use embeddings for the dataset."})
+    repostprocess: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to retokenize/postprocess the dataset. Set this to False if you have already tokenized and saved the dataset to disk, and just want to load it."})
+    recalculate_features: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to recalculate embeddings/features for the dataset."})
+    use_extracted_features: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to use embeddings/features for the dataset."})
     use_cpu: Optional[bool] = field(
         default=False, metadata={"help": "Whether to use CPU for training. If False, will use GPU if available."})
 
-    save_embedded_dataset: Optional[bool] = field(
+    save_postprocessed_and_feature_extracted_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
         default=True, metadata={"help": "Whether to remove temporary Hugging Face dataset cache files after preprocessing."})
@@ -329,7 +333,7 @@ class ScriptArguments:
         metadata={"help": "The name of the run for logging purposes."},
     )
     discordance_epsilon: Optional[float] = field(
-        default=None,
+        default=-1,
         metadata={"help": "The epsilon to use for calculating discordance-aware representativeness. If None, will be set to half of the minimum nonzero difference between any pair of labels in the training dataset."},
     )
     save_every_steps: Optional[int] = field(
@@ -383,6 +387,7 @@ class ScriptArguments:
 def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
 
     if script_args.config_file:
+
         config_path = os.path.abspath(script_args.config_file)
         with open(config_path, "r", encoding="utf-8") as f:
             config_data = json.load(f)
@@ -392,6 +397,7 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
                 f"Expected JSON object in config file, got {type(config_data).__name__}")
 
         valid_fields = set(class_source.__dataclass_fields__.keys())
+        config_data["use_extracted_features"] = config_data.pop("use_embeddings", True)
         unknown_keys = set(config_data.keys()) - valid_fields
         if unknown_keys:
             raise ValueError(
@@ -432,7 +438,8 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
         f"_{datetime.now().strftime('%m%d_%H%M%S')}_epo{script_args.num_train_epochs}_s{script_args.seed}" if script_args.run_name is not None else None
     variant = infer_variant(script_args.model_name,
                             script_args.model_variant or "auto")
-    
+    preset = MODEL_PRESETS[variant]
+
     if script_args.loss_func_type_kwargs is not None:
         if isinstance(script_args.loss_func_type_kwargs, str):  
             script_args.loss_func_type_kwargs = json.loads(
@@ -444,9 +451,10 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
     if "n_epochs_for_grounding" in script_args.loss_func_type_kwargs and isinstance(script_args.loss_func_type_kwargs["n_epochs_for_grounding"], float) and script_args.loss_func_type_kwargs["n_epochs_for_grounding"] < 1:
         script_args.loss_func_type_kwargs["n_epochs_for_grounding"] = int(script_args.loss_func_type_kwargs["n_epochs_for_grounding"] * script_args.num_train_epochs)
     print(f"Using loss function {script_args.loss_func_type} with kwargs {script_args.loss_func_type_kwargs}")
-    
+    if script_args.discordance_epsilon < 0:
+        script_args.discordance_epsilon = None
     script_args.update_tendencies_every_n_steps = script_args.eval_every_steps if script_args.use_validation_for_tendencies else script_args.update_tendencies_every_n_steps
-    preset = MODEL_PRESETS[variant]
+    
     return script_args, preset
 
 

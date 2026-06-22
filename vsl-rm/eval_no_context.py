@@ -408,7 +408,7 @@ def main() -> None:
             tokenizer=tokenizer,
             max_length=int(script_args.max_length),
             dtype=torch_dtype,
-            use_embeddings=bool(script_args.use_embeddings),
+            use_embeddings=bool(script_args.use_extracted_features),
         )
 
         train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
@@ -416,7 +416,7 @@ def main() -> None:
         test_proportion_or_indices = get_test_indices(script_args.dataset)
         eval_proportion_or_indices = get_validation_indices(script_args.dataset)
 
-        embed_model = model.full_model if script_args.use_embeddings else None
+        embed_model = model.full_model if script_args.use_extracted_features else None
 
         dataset = PairwisePreferenceDataset(
             train_path,
@@ -425,7 +425,7 @@ def main() -> None:
             extra_keep_keys=extra_keep_keys,
             retokenize=False,
             recalculate_embeddings=False,
-            use_embeddings=bool(script_args.use_embeddings),
+            use_embeddings=bool(script_args.use_extracted_features),
             model_reference=embed_model,
             collator=dc,
             split_seed=int(script_args.data_seed),

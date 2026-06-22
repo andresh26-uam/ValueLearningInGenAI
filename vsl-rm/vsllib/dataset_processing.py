@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import os
 from pathlib import Path
 from pyexpat import model
@@ -147,37 +148,33 @@ class BasePairwisePreferenceDataset():
                 suggested_epsilon = min(suggested_epsilon, smallest_diff_in_pair)
         return suggested_epsilon/2.0
 
-    def __init__(self, path: str, from_disk: bool = True, extra_keep_keys: list = None, repostprocess: bool = False, recalculate_features: bool = False, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
+    def __init__(self, path: str, sub_path: str = "postproc", from_disk: bool = True, extra_keep_keys: list = None, repostprocess: bool = False, recalculate_features: bool = False, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
         
         self.data: Dataset 
         self._cached_context_embeddings=None
         print(f"Loading dataset from {path} with from_disk={from_disk}")
 
-        processed_dataset_path = os.path.join(path, f"preprocessed")
-        os.makedirs(processed_dataset_path, exist_ok=True)
+        preprocessed_dataset_path = os.path.join(path, f"preprocessed")
+        os.makedirs(preprocessed_dataset_path, exist_ok=True)
         
         postprocessed_dataset_output_path = None
-        if model_reference is not None:
-            postprocessed_dataset_output_path = os.path.join(path, f"{model_reference.config._name_or_path.replace('/', '_')}")
-            os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
-        else:
-            postprocessed_dataset_output_path = os.path.join(path, f"only_tokenized")
-            os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
+        postprocessed_dataset_output_path = os.path.join(path, f"{sub_path}")
+        os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
         """if recalculate_embeddings :
             shutil.rmtree(embedded_or_tokenized_dataset_output_path, ignore_errors=True)"""
 
         if from_disk:
 
             if postprocessed_dataset_output_path is None:
-                self.data = load_from_disk(processed_dataset_path)
-                print(f"Loaded dataset from {processed_dataset_path}")
+                self.data = load_from_disk(preprocessed_dataset_path)
+                print(f"Loaded dataset from {preprocessed_dataset_path}")
             else:
                 try:
                     self.data = load_from_disk(postprocessed_dataset_output_path)
                     print(f"Loaded embedded/tokenized dataset from {postprocessed_dataset_output_path}")
                 except FileNotFoundError:
                     print(f"Embedded/Tonkenized dataset not found at {postprocessed_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
-                    self.data = load_from_disk(processed_dataset_path)
+                    self.data = load_from_disk(preprocessed_dataset_path)
                     print(f"Copying dataset to {postprocessed_dataset_output_path} for processing.")
                     output_path = Path(postprocessed_dataset_output_path)
                     self.data = save_dataset(self.data, output_path)
@@ -200,6 +197,7 @@ class BasePairwisePreferenceDataset():
         
         if self.data[0].get("labels") is None:
             print("Adding labels and tokens to dataset")
+            print(pp_kwargs)
             self.data: DatasetDict = self.data.map(lambda x: self.postprocessor_method(x, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context, **pp_kwargs), 
                                                    num_proc=16, 
                                                    load_from_cache_file=not repostprocess)
@@ -258,7 +256,7 @@ class BasePairwisePreferenceDataset():
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,
-                            num_proc=num_proc
+                            num_proc=1
                         )
         return self.data
         
@@ -276,12 +274,24 @@ class BasePairwisePreferenceDataset():
     
 
 
-def postprocess_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
+def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
+  
     keep_keys = ["option1", "option2", "grounding_features_1", "grounding_features_2", "labels"]
     if extra_keep_keys:
         keep_keys.extend(extra_keep_keys)
-    sample['option1'] = [sample["state"], sample["action1"]]
-    sample['option2'] = [sample["state"], sample["action2"]]
+    sample["state"] =np.asarray(sample["state"])
+    if len(sample["state"].shape) == 0:
+        sample["state"] = sample["state"].reshape((1,))
+    sample["action1"] =np.asarray(sample["action1"])
+    if len(sample["action1"].shape) == 0:
+        sample["action1"] = sample["action1"].reshape((1,))
+    sample["action2"] =np.asarray(sample["action2"])
+    if len(sample["action2"].shape) == 0:
+        sample["action2"] = sample["action2"].reshape((1,))
+
+
+    sample['option1'] = np.concatenate([sample["state"],sample["action1"]], axis=-1)
+    sample['option2'] = np.concatenate([sample["state"],sample["action2"]], axis=-1)
     if use_context:
         if sample.get("context", None) is not None:
             ctx = sample['context']
@@ -290,10 +300,10 @@ def postprocess_sample(sample: dict, tokenizer: Any, value_keys: list, delete_ot
         
         sample['context'] = ctx
         sample['context_features'] = ctx
-        keep_keys.extend(["context_input_ids", "context_attention_mask", "context"])
+        keep_keys.extend(["context_features", "context"])
     
-    sample["grounding_features_1"] = sample.get("grounding_features_1", np.concatenate(sample["state"],sample["action1"], axis=-1))
-    sample["grounding_features_2"] = sample.get("grounding_features_2", np.concatenate(sample["state"],sample["action2"], axis=-1))
+    sample["grounding_features_1"] = sample.get("grounding_features_1", sample["option1"])
+    sample["grounding_features_2"] = sample.get("grounding_features_2", sample["option2"])
     
     value_ratings1 = []
     value_ratings2 = []
@@ -328,20 +338,26 @@ def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_con
             
             batch = convert_to_tensors(
                 merged_features,
-                return_tensors=collator.return_tensors,
+                tensor_type=collator.return_tensors,
             )
             sample[case[0]] = batch[case[0]].to(device =model_device)
             sample[case[1]] = batch[case[1]].to(device =model_device)
             
         return sample
 class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
-    postprocessor_method = postprocess_sample
-    feature_extractor_method = feature_extract_sample
 
+
+    def __init__(self, path: str, from_disk: bool = True, extra_keep_keys: List = None, repostprocess: bool = False, recalculate_features: bool = False, collator: MORewardDataCollator = None, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: float | List[int] = 0.05, test_proportion_or_indices: float | List[int] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
+        fe_kwargs.update({"collator": collator})
+        sub_path = "postproc"
+        self.postprocessor_method = postprocess_sample
+        self.feature_extractor_method = feature_extract_sample
+        super().__init__(path, sub_path, from_disk, extra_keep_keys, repostprocess, recalculate_features, use_extracted_features, use_context, split_seed, cleanup_cache_files, eval_proportion_or_indices, test_proportion_or_indices, pp_kwargs, fe_kwargs)
+        
+        
 
 class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
-    postprocessor_method = tokenize_sample
-    feature_extractor_method = embed_sample
+    
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
         model_reference = fe_kwargs.pop("model_reference")
@@ -400,8 +416,6 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                 
     def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
     
-        self.max_length = tokenizer.max_length
-
         pp_kwargs = {
             "tokenizer": tokenizer,
         }
@@ -410,8 +424,12 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             "model_reference": model_reference,
             "collator": collator
         }
+        self.postprocessor_method = tokenize_sample
+        self.feature_extractor_method = embed_sample
         super().__init__(path=path,
+                         
                          from_disk=from_disk,
+                         sub_path=model_reference.config._name_or_path.replace('/', '_') if model_reference is not None else "only_tokenized",
                          extra_keep_keys=extra_keep_keys,
                          recalculate_features=recalculate_embeddings,
                          repostprocess=retokenize,
