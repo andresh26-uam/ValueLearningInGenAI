@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import json
 import sys
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 import torch as th
@@ -221,6 +221,16 @@ class ScriptArguments:
 
     hidden_size: Optional[int] = field(
         default=1024, metadata={"help": "The hidden size of the grounding MLP."})
+    vs_hidden_size: Optional[int] = field(
+        default=24,  metadata={"help": "The hidden size of neuron layers for the MLP models used for predicting value systems. Depends on the context implementation."}
+    )
+    vs_layer_dropout: float = field(default=0,  metadata={"help": "The dropout probability of the models used for predicting value systems."})
+    vs_layer_activation: Optional[str] = field(default="ReLU", metadata={
+                                            "help": f"The activation function to use for the hidden layers of the value system prediction models. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"})
+    
+    vs_num_hidden_layers: Optional[int] = field(default=0, metadata={
+                                             "help": "The number of hidden layers in the value system prediction models. If 0, there will be no hidden layers and the value head will be a simple linear layer from the prompt-respose final embedding into the number of values."})
+    
     num_hidden_layers: Optional[int] = field(default=0, metadata={
                                              "help": "The number of hidden layers in the grounding MLP. If 0, there will be no hidden layers and the value head will be a simple linear layer from the prompt-respose final embedding into the number of values."})
     value_layer_dropout: Optional[float] = field(default=0.0)
@@ -378,10 +388,15 @@ class ScriptArguments:
         default=10,
         metadata={"help": "The maximum number of contexts to use. If the dataset has more contexts than this, we will use the ones with the most examples."},
     )
-    kmeans_max_dataset_size: Optional[int] = field( 
+    training_initialization_data_size: Optional[int] = field( 
         default=1000,
-        metadata={"help": "The maximum number of examples to use for k-means clustering when assigning value systems to contexts. If the training dataset is larger than this, we will sample a subset of this size for the k-means clustering."},
+        metadata={"help": "The maximum number of examples to use for training initialization step when assigning value systems to contexts. If the training dataset is larger than this, we will sample a subset of this size for the k-means clustering."},
     )
+    context_implementation: Optional[str] = field(
+        default="NO_CONTEXT",
+        metadata={"help": "Choose between ContextImplementations in defines.py"}
+    )
+
 
 
 def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
@@ -484,6 +499,19 @@ def maybe_assign_pad_token(mod, script_args: ScriptArguments, tokenizer: AutoTok
 
 
 
+def transform_weights_to_tuple(weights: Iterable|str, size_should_be: int = None, reduce_precision=False) -> tuple:
+        if isinstance(weights, str):
+            weights = weights.split(",")
+        if isinstance(weights, th.Tensor):
+            weights = weights.detach().tolist()
+        assert len(weights) > 1, f"Unrecognized weights {weights}"
+        if size_should_be is not None:
+            assert len(weights) == size_should_be, f"Expected {size_should_be} weights, got {len(weights)}"
+        if reduce_precision:
+            weights_real = tuple([float(f"{float(a):.3f}") for a in weights])
+        else:
+            weights_real = tuple([float(a) for a in weights])
+        return weights_real
 
 
 def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:

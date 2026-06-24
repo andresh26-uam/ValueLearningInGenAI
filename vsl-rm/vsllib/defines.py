@@ -214,6 +214,11 @@ class MOLossFunctions(enum.Enum):
     
     CTX_DEFAULT = "CTX_DEFAULT"
 
+class ContextImplementations(enum.Enum):
+    NO_CONTEXT = "NO_CONTEXT"
+    BASIC = "BASIC"
+    SINGLE_LEVEL_GMM = "GMM"
+    NESTED_GMM = "NESTED_GMM"
 
 class MOLossFunctionsCategories():
     REQUIRES_GRAD_ON_EVERYTHING = [MOLossFunctions.DEFAULT, MOLossFunctions.CTX_DEFAULT]

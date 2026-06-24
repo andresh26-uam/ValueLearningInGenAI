@@ -117,12 +117,13 @@ class MORewardDataCollator:
             key: th.stack([th.tensor(feature[key],dtype=self.dtype) for feature in merged_features])
             for key in merged_features[0]
         }
-        assert len(batch) == len(features)*2
+        
+        
         
         batch["return_loss"] = True
         batch["grounding_features"] = batch["grounding_features"].to(dtype=self.dtype) 
         batch["context_features"] = batch["context_features"].to(dtype=self.dtype) 
-        
+        assert len(batch["grounding_features"]) == len(features)*2
         return batch
 
 @dataclass

@@ -35,9 +35,9 @@ for candidate in (
 from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, seed_everything
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
-from vsllib.training import ConstrainedOptimizer, MORewardTrainer
+from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
 from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, mo_compute_loss_func
-from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, ContextImplementations, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 
 load_dotenv()
@@ -138,6 +138,14 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         mo_config = MORMForClassificationConfig(
+            training_initialization_data_size=script_args.training_initialization_data_size,
+            max_contexts=script_args.max_contexts,
+            max_value_systems=script_args.max_value_systems,
+            vs_layer_hidden_sizes=[script_args.vs_hidden_size]*script_args.num_hidden_layers,
+            vs_layer_dropout=script_args.vs_layer_dropout,
+            vs_layer_intermediate_activation=script_args.vs_layer_activation,
+            context_implementation=script_args.context_implementation,
+            
             input_size=input_size,
             input_size_vs=input_size_vs,
             activate_discordance_epsilon_for_loss=script_args.activate_discordance_epsilon_for_loss,
@@ -155,7 +163,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             loss_func_type=script_args.loss_func_type,
             loss_func_kwargs=script_args.loss_func_type_kwargs,
             lambda_decay=script_args.lambda_decay,
-            hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, value_layer_dropout=script_args.value_layer_dropout,
+            hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, 
+            value_layer_dropout=script_args.value_layer_dropout,
             value_layer_intermediate_activation=script_args.layer_activation,
             value_layer_final_activation=script_args.final_layer_activation,
             layer_normalization=script_args.layer_normalization,
@@ -200,15 +209,28 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
         pprint(vars(script_args))
         # exit(0)
-        trainer: Trainer = MORewardTrainer(
+        if ContextImplementations(mo_config.context_implementation) == ContextImplementations.NO_CONTEXT:
+            trainer_class = MORewardTrainer 
+            trainer_extra_kwargs = dict(
+                compute_loss_func=partial(
+                    mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            )
+        elif ContextImplementations(mo_config.context_implementation) == ContextImplementations.BASIC:
+            trainer_class = CtxMORewardTrainer
+            trainer_extra_kwargs = dict(
+                compute_loss_func=partial(
+                    mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            )
+        else:
+            raise NotImplementedError(f"This type of context implementation is not implemented yet. {mo_config.context_implementation}")
+        
+        trainer: Trainer = trainer_class(
             model=mo_model,
             args=training_args,
             train_dataset=dataset.train_dataset if not script_args.use_frozen_base_model else dataset.train_dataset.select(list(range(min(len(dataset.train_dataset), training_args.per_device_train_batch_size * mo_config.gradient_accumulation_steps*2)))),  # TODO: RESET THIS!!
             eval_dataset=dataset.eval_dataset,
-            compute_metrics=partial(MORewardTrainer.compute_metrics,
+            compute_metrics=partial(trainer_class.compute_metrics_custom,
                                     config=mo_config, training_variables=mo_model.training_variables),
-            compute_loss_func=partial(
-                mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             optimizer_cls_and_kwargs=(ConstrainedOptimizer, {
                 'params_gr': list(mo_model.grounding_parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
@@ -224,6 +246,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 ** sub_optimizer_kwargs
             }),
             data_collator=dc,
+            **trainer_extra_kwargs
         )
         # trainer.train()
         print("Saving last checkpoint of the model")

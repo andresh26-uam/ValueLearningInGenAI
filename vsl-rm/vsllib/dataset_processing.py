@@ -204,8 +204,7 @@ class BasePairwisePreferenceDataset():
             
             self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
-        assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
-        assert self.data[0].get("labels", None) is not None, "Labels   are missing after tokenization step."
+        
     
         
         if recalculate_features:
@@ -216,8 +215,7 @@ class BasePairwisePreferenceDataset():
                 self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
         
-        if use_extracted_features:
-            assert self.data[0].get("embedding_1", None) is not None, "Embedding 1 is missing after embedding step."
+        
         
         if cleanup_cache_files:
             removed_cache_files = self.data.cleanup_cache_files()
@@ -299,7 +297,10 @@ def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys:
             ctx = sample['state']
         
         sample['context'] = ctx
-        sample['context_features'] = ctx
+        if sample.get("context_features", None) is None:
+            sample['context_features'] = ctx
+            
+        
         keep_keys.extend(["context_features", "context"])
     
     sample["grounding_features_1"] = sample.get("grounding_features_1", sample["option1"])
@@ -326,6 +327,7 @@ def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys:
 
 def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_context: bool =True, device: th.device = th.device("cpu")) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
+    
     with th.no_grad():
         model_device = device
         for ic, case in enumerate([("option1", "grounding_features_1"), ("option2", "grounding_features_2"), ("context", "context_features")]):
@@ -342,7 +344,7 @@ def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_con
             )
             sample[case[0]] = batch[case[0]].to(device =model_device)
             sample[case[1]] = batch[case[1]].to(device =model_device)
-            
+        
         return sample
 class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
 
@@ -359,9 +361,11 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
 class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
     
 
-    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
+    def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=32, num_proc=4):
         model_reference = fe_kwargs.pop("model_reference")
         model_reference = model_reference.cpu()
+        assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
+        assert self.data[0].get("labels", None) is not None, "Labels   are missing after tokenization step."
         def _embed_shard(dataset_shard, local_model, device):
             with th.no_grad():
                 return dataset_shard.map(

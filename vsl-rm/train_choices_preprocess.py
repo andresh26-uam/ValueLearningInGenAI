@@ -28,7 +28,7 @@ def process_dataset() -> tuple[pd.DataFrame, Path]:
 
     to_scale_features = ["hh_inc_abs"]
     for f in to_scale_features:
-        full_data[f + "_NORM"] = (full_data[f])/(full_data[f].max())
+        full_data[f + "_NORM"] = ((full_data[f])-full_data[f].mean())/full_data[f].std()
 
     print(full_data.head(5))
 
@@ -53,6 +53,7 @@ def process_line(line: dict, i) -> dict:
     instance["action2"] = 2
 
     instance["context_features"] = np.array([line["hh_inc_abs_NORM"],line["car_availability"],line["commute"],line["shopping"],line["business"],line["leisure"]], dtype=np.float32)
+   # print(instance["context_features"] )
     instance["grounding_features_1"] = np.array([line["tt1"], line["tc1"], line["hw1"], line["ch1"]], dtype=np.float32)
 
     instance["grounding_features_2"] = np.array([line["tt2"], line["tc2"], line["hw2"], line["ch2"]], dtype=np.float32)

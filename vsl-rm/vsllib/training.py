@@ -1,7 +1,6 @@
 import enum
 from typing import Any, Dict, NamedTuple, Optional
 import numpy as np
-from sklearn.cluster import KMeans
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
@@ -10,7 +9,7 @@ from transformers.trainer import *
 from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
-from vsllib.reward_models import CtxMORMForSequenceClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
+from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
 
@@ -18,6 +17,11 @@ from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
 from vsllib.utils import to_float
 from vsllib.defines import MIN_EPSILON
+
+
+from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+
+
 
 
 class EvalPredictionWithExtraLabels(EvalPrediction):
@@ -35,14 +39,16 @@ class EvalPredictionWithExtraLabels(EvalPrediction):
         self,
         predictions: np.ndarray | tuple[np.ndarray],
         label_ids: np.ndarray | tuple[np.ndarray],
-        labels_ql: np.ndarray | tuple[np.ndarray],
-        labels_qt: np.ndarray | tuple[np.ndarray],
+        #labels_ql: np.ndarray | tuple[np.ndarray],
+        #labels_qt: np.ndarray | tuple[np.ndarray],
         inputs: np.ndarray | tuple[np.ndarray] | None = None,
         losses: np.ndarray | tuple[np.ndarray] | None = None,
+        others: Dict[str,np.ndarray]={}
     ):
         super().__init__(predictions=predictions, label_ids=label_ids, inputs=inputs, losses=losses)
-        self.labels_ql = labels_ql
-        self.labels_qt = labels_qt
+        self.labels_ql = others.pop("target_probs_quantitative")
+        self.labels_qt = others.pop("target_probs_qualitative")
+        self.others = others
         self.elements = (*self.elements, self.labels_ql, self.labels_qt)
 
 
@@ -51,14 +57,26 @@ class EvalLoopOutputWithExtraLabels(NamedTuple):
     label_ids: np.ndarray | tuple[np.ndarray] | None
     metrics: dict[str, float] | None
     num_samples: int | None
-    labels_qt: np.ndarray | tuple[np.ndarray] | None
-    labels_ql: np.ndarray | tuple[np.ndarray] | None
+    others: dict | None
+    
+
+    @property
+    def labels_qt(self):
+        return self.others["target_probs_quantitative"]
+
+    @property
+    def labels_ql(self):
+        return self.others["target_probs_qualitative"]
+
+    #labels_qt: np.ndarray | tuple[np.ndarray] | None
+    #labels_ql: np.ndarray | tuple[np.ndarray] | None
 
 
 class MORewardTrainer(Trainer):
     training_variables: MORMTrainingVariables
     model: MORMForSequenceClassification
     accelerator: Accelerator
+    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative"]
 
     def __init__(self, **kwargs: Any) -> None:
         args = kwargs.get("args")
@@ -78,7 +96,7 @@ class MORewardTrainer(Trainer):
             train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
 
             if self.model.value_system_layer is not None:
-                w = self.model.value_system_layer.get_weights()
+                w = self.model.value_system_layer.get_value_system_info()
 
                 for i in range(self.model.num_values):
                     train_metrics[f"vs_weight_{i}"] = to_float(w[i])
@@ -145,7 +163,7 @@ class MORewardTrainer(Trainer):
 
         return self.lr_scheduler
 
-    def compute_metrics(eval_pred, config: MORMForClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
+    def compute_metrics_custom(eval_pred: EvalPredictionWithExtraLabels, config: MORMForClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
             epsilon_list = set([0.0, 0.001, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5])
             epsilon_list.add(config.discordance_epsilon)
@@ -588,7 +606,7 @@ class MORewardTrainer(Trainer):
                         loss = loss.detach()
                     assert len(
                         loss.shape) == 1,  f"Expected loss to be a 1d vector, got {loss.shape}"
-
+                    
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items()
                                        if k not in ignore_keys + ["loss"])
@@ -614,7 +632,7 @@ class MORewardTrainer(Trainer):
         logits, labels, others = rewards_and_labels_to_logits_and_targets(
             logits, labels, config=self.model.config, assume_torch=True)
 
-        return (loss, logits, labels, others["target_probs_quantitative"], others["target_probs_qualitative"])
+        return (loss, logits, labels, {k: others[k] for k in self.keys_to_save_in_prediction})
 
     def compute_loss(
         self,
@@ -658,6 +676,7 @@ class MORewardTrainer(Trainer):
                 kwargs["num_items_in_batch"] = num_items_in_batch
             inputs = {**inputs, **kwargs}
         outputs = model(**inputs)
+        
 
         # User-defined compute_loss function
         if self.compute_loss_func is not None:
@@ -775,10 +794,12 @@ class MORewardTrainer(Trainer):
             self.args.eval_do_concat_batches, padding_index=-100)
         all_labels = EvalLoopContainer(
             self.args.eval_do_concat_batches, padding_index=-100)
-        all_labels_ql = EvalLoopContainer(
-            self.args.eval_do_concat_batches, padding_index=-100)
-        all_labels_qt = EvalLoopContainer(
-            self.args.eval_do_concat_batches, padding_index=-100)
+        
+        all_others = dict()
+        for extra_key in self.keys_to_save_in_prediction:
+            all_others[extra_key] = EvalLoopContainer(
+                self.args.eval_do_concat_batches, padding_index=-100)
+            
         all_inputs = EvalLoopContainer(
             self.args.eval_do_concat_batches, padding_index=-100)
 
@@ -799,7 +820,7 @@ class MORewardTrainer(Trainer):
                     batch_size = observed_batch_size
 
             # Prediction step
-            losses, logits, labels, labels_qt, labels_ql = self.prediction_step(
+            losses, logits, labels, others = self.prediction_step(
                 model, inputs, prediction_loss_only, ignore_keys=ignore_keys, epoch="EVAL")
             main_input_name = getattr(
                 self.model, "main_input_name", "input_ids")
@@ -835,14 +856,19 @@ class MORewardTrainer(Trainer):
                 # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
                 labels = self.accelerator.pad_across_processes(
                     labels, dim=1, pad_index=-100)
-            if labels_ql is not None:
+                
+            for extra_key in self.keys_to_save_in_prediction:
+                if others.get(extra_key, None) is not None:
+                    others[extra_key] = self.accelerator.pad_across_processes(
+                    others[extra_key], dim=1, pad_index=-100)
+            """if labels_ql is not None:
                 # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
                 labels_ql = self.accelerator.pad_across_processes(
                     labels_ql, dim=1, pad_index=-100)
             if labels_qt is not None:
                 # Pad labels here, preparing for preprocess_logits_for_metrics in next logits block.
                 labels_qt = self.accelerator.pad_across_processes(
-                    labels_qt, dim=1, pad_index=-100)
+                    labels_qt, dim=1, pad_index=-100)"""
             if logits is not None:
                 logits = self.accelerator.pad_across_processes(
                     logits, dim=1, pad_index=-100)
@@ -855,14 +881,21 @@ class MORewardTrainer(Trainer):
                 labels = self.gather_function(labels)
                 if not self.args.batch_eval_metrics or description == "Prediction":
                     all_labels.add(labels)
-            if labels_ql is not None:
+
+            for extra_key in self.keys_to_save_in_prediction:
+                evalue =others.get(extra_key, None)
+                if evalue is not None:
+                    others[extra_key] = self.gather_function(evalue)
+                    if not self.args.batch_eval_metrics or description == "Prediction":
+                        all_others[extra_key].add(others[extra_key])
+            """if labels_ql is not None:
                 labels_ql = self.gather_function(labels_ql)
                 if not self.args.batch_eval_metrics or description == "Prediction":
                     all_labels_ql.add(labels_ql)
             if labels_qt is not None:
                 labels_qt = self.gather_function(labels_qt)
                 if not self.args.batch_eval_metrics or description == "Prediction":
-                    all_labels_qt.add(labels_qt)
+                    all_labels_qt.add(labels_qt)"""
 
 
             self.control = self.callback_handler.on_prediction_step(
@@ -875,8 +908,10 @@ class MORewardTrainer(Trainer):
                     batch_kwargs["losses"] = losses if "loss" in args.include_for_metrics else None
                     batch_kwargs["inputs"] = inputs if "inputs" in args.include_for_metrics else None
                     metrics = self.compute_metrics(
+                        #EvalPredictionWithExtraLabels(predictions=logits,label_ids=labels, labels_ql=labels_ql, labels_qt=labels_qt, **batch_kwargs)
                         EvalPredictionWithExtraLabels(predictions=logits,
-                                                       label_ids=labels, labels_ql=labels_ql, labels_qt=labels_qt, **batch_kwargs),
+                                                       label_ids=labels, others=others, **batch_kwargs),
+
                         compute_result=is_last_step,
                     )
 
@@ -888,12 +923,14 @@ class MORewardTrainer(Trainer):
                 all_losses.to_cpu_and_numpy()
                 all_preds.to_cpu_and_numpy()
                 all_labels.to_cpu_and_numpy()
-                all_labels_ql.to_cpu_and_numpy()
-                all_labels_qt.to_cpu_and_numpy()
+                for extra_key in self.keys_to_save_in_prediction:
+                    all_others[extra_key].to_cpu_and_numpy()
+                #all_labels_ql.to_cpu_and_numpy()
+                #all_labels_qt.to_cpu_and_numpy()
 
                 all_inputs.to_cpu_and_numpy()
 
-                del losses, logits, labels, labels_ql, labels_qt, inputs
+                del losses, logits, labels, others, inputs
                 torch.cuda.empty_cache()
 
         # After all calls to `.gather_function`, reset to `gather_for_metrics`:
@@ -904,8 +941,11 @@ class MORewardTrainer(Trainer):
         # print("LIBRARY ALL LOSSES", all_losses.shape)
         all_preds = all_preds.get_arrays()
         all_labels = all_labels.get_arrays()
-        all_labels_ql = all_labels_ql.get_arrays()
-        all_labels_qt = all_labels_qt.get_arrays()
+
+        for extra_key in self.keys_to_save_in_prediction:
+            all_others[extra_key] = all_others[extra_key].get_arrays()
+        #all_labels_ql = all_labels_ql.get_arrays()
+        #all_labels_qt = all_labels_qt.get_arrays()
         all_inputs = all_inputs.get_arrays()
 
         # Number of samples
@@ -933,8 +973,9 @@ class MORewardTrainer(Trainer):
             eval_set_kwargs["losses"] = all_losses if "loss" in args.include_for_metrics else None
             eval_set_kwargs["inputs"] = all_inputs if "inputs" in args.include_for_metrics else None
             metrics = self.compute_metrics(
+                #EvalPredictionWithExtraLabels(predictions=all_preds,label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, **eval_set_kwargs)
                 EvalPredictionWithExtraLabels(predictions=all_preds,
-                               label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, **eval_set_kwargs)
+                                                       label_ids=all_labels, others=all_others, **eval_set_kwargs),
             )
         elif metrics is None:
             metrics = {}
@@ -955,7 +996,8 @@ class MORewardTrainer(Trainer):
             if not key.startswith(f"{metric_key_prefix}_"):
                 metrics[f"{metric_key_prefix}_{key}"] = metrics.pop(key)
 
-        return EvalLoopOutputWithExtraLabels(predictions=all_preds, label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, metrics=metrics, num_samples=num_samples)
+        #return EvalLoopOutputWithExtraLabels(predictions=all_preds, label_ids=all_labels, labels_ql=all_labels_ql, labels_qt=all_labels_qt, metrics=metrics, num_samples=num_samples)
+        return EvalLoopOutputWithExtraLabels(predictions=all_preds, label_ids=all_labels, others=all_others, metrics=metrics, num_samples=num_samples)
 
     def save_with_seed(self, checkpoint_name: str = "last_checkpoint"):
         checkpoint_dir = os.path.join(self.args.output_dir, checkpoint_name)
@@ -977,39 +1019,64 @@ class MORewardTrainer(Trainer):
         return checkpoint_dir
 
 
-
-from vsllib.dataset_processing import PairwisePreferenceDataset, Dataset
-
 class CtxMORewardTrainer(MORewardTrainer):
     training_variables: MORMTrainingVariables
-    model: CtxMORMForSequenceClassification
+    model: MORMForClassification
     accelerator: Accelerator
+    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative", "ctx"]
     
-    def train_initialization(self, train_dataset: Dataset) -> None:
+    def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
+        """
+        This overrides the original logging process to include new train metrics.
+        """
+        is_eval_log = any(k.startswith("eval_") for k in logs.keys())
+        if self.model.training and not is_eval_log:
 
-        # K-means for clustering the context embeddings.
-        K = self.model.config.max_contexts
-        dataset_ctxs = np.array(train_dataset.select_columns(["context_embedding"])["context_embedding"])
-        print(dataset_ctxs.shape)
-        if dataset_ctxs.shape[0] == 0:
-            raise ValueError("No context embeddings were found in the dataset, so KMeans cannot be fitted.")
+            train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
 
-        n_clusters = min(int(K), int(dataset_ctxs.shape[0]))
-        random_state = 42
-        kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state)
-        kmeans.fit(dataset_ctxs)
-
-        centroids = th.tensor(kmeans.cluster_centers_).cpu()
+            if self.model.value_system_layer is not None:
+                assert isinstance(self.model.value_system_layer, AbstractCtxDependentAlignmentLayer)
+                """contexts_to_vc = self.get_context_ids_mapped_to_value_system(vi)
+            vs_tuple = transform_weights_to_tuple(vc)
+            data={
+                "contexts": contexts_to_vc,
+                "share_of_data": float(th.sum(self.running_context_training_data.frequencies[contexts_to_vc]).numpy())}
+            for iv, v in enumerate(vs_tuple):
+                data[f"vs_w{iv}"] = v
+            per_vs_contexts[f"vs_{vi}"] = data"""
+                
+                w_info = self.model.value_system_layer.get_value_system_info()
+                
+                """for i in range(self.model.num_values):
+                    train_metrics[f"vs_weight_{i}"] = to_float(w[i])"""
+                for vs_key, vs_data in w_info.items():
+                    train_metrics[vs_key] = dict()
+                    train_metrics[vs_key]["ncontexts"] = len(vs_data["contexts"])
+                    train_metrics[vs_key]["share"] = vs_data["share_of_data"]
+                    for k,v in vs_data.items():
+                        if "vs_w" in k:
+                            train_metrics[vs_key][k] = v # Weights of this VS.
+            if train_metrics:
+                for key, value in train_metrics.items():
+                    # Train/ is put by default
+                    logs.setdefault(f"{key}", value)
         
-        self.model.set_context_centroids(centroids)
-        return centroids
+        return Trainer.log(self, logs, start_time)
+
+
+    def train_initialization(self) -> None:
+        if self.model.config.training_initialization_data_size != "all":
+            training_initialization_data_size = min(len(self.train_dataset), self.model.config.training_initialization_data_size)
+            indices_ = np.random.choice(len(self.train_dataset), size=training_initialization_data_size, replace=False)
+            subset = self.train_dataset.select(indices_)
+        else:
+            subset = self.train_dataset
+        self.model.train_initialization(subset)
     
     def train(self, resume_from_checkpoint: str | bool | None = None, trial: Any | Dict[str, Any] | None = None, ignore_keys_for_eval: list[str] | None = None) -> TrainOutput:
         
         if resume_from_checkpoint is None and self.accelerator.is_main_process:
-            kmeans_dataset_size = min(len(self.train_dataset), self.model.config.kmeans_max_dataset_size)
-            indices_ = np.random.choice(len(self.train_dataset), size=kmeans_dataset_size, replace=False)
-            self.train_initialization(self.train_dataset.select(indices_))
+            self.train_initialization()
 
         return super().train(resume_from_checkpoint, trial, ignore_keys_for_eval)
 

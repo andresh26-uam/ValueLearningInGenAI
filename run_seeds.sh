@@ -14,7 +14,7 @@ fi
 #DATASET=pku
 #CONFIG=run_configs/smol_linear.json
 DATASET=apollo
-CONFIG=run_configs/features_apollo.json
+CONFIG=run_configs/features_apollo_ctx.json
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
 if [[ "$DATASET" == "ultra" ]]; then
@@ -32,11 +32,15 @@ elif [[ "$DATASET" == "pku" ]]; then
     EVAL_EVERY_STEPS="--eval_every_steps=200"
   fi
 elif [[ "$DATASET" == "apollo" ]]; then
-  DISCORDANCE_EPSILON="-1"
-  NUM_TRAIN_EPOCHS=500
+  DISCORDANCE_EPSILON="0.04"
+  NUM_TRAIN_EPOCHS=5000
+  EVAL_EVERY_STEPS="--eval_every_steps=200"
 
 EVAL_EVERY_STEPS=""
-if [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
+if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
+    NAME=Simple3BatchedTanh
+
+elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
@@ -75,6 +79,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE
+  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --debug
 done
 
