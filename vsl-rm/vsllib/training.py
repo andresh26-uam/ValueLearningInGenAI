@@ -9,14 +9,14 @@ from transformers.trainer import *
 from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
-from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
+from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-from vsllib.utils import to_float
-from vsllib.defines import MIN_EPSILON
+from vsllib.utils import kmeans_clustering, plot_alternative_clusterings, to_float
+from vsllib.defines import MIN_EPSILON, ContextImplementations
 
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
@@ -143,6 +143,14 @@ class MORewardTrainer(Trainer):
                 num_warmup_steps=warmup_steps,
                 num_training_steps=num_training_steps,
             )
+        sched_z = None
+        if constrained_optim.optimz is not None:
+            sched_z = get_scheduler(
+                name=scheduler_name,
+                optimizer=constrained_optim.optimz,
+                num_warmup_steps=warmup_steps,
+                num_training_steps=num_training_steps,
+            )
 
         sched_lambda = None
         if getattr(constrained_optim, "optim_lambdas", None) is not None:
@@ -157,6 +165,7 @@ class MORewardTrainer(Trainer):
             optimizer=constrained_optim,
             sched_x=sched_x,
             sched_y=sched_y,
+            sched_z=sched_z,
             sched_lambda=sched_lambda,
         )
         print("Optimizer and schedulers created successfully.")
@@ -1050,12 +1059,16 @@ class CtxMORewardTrainer(MORewardTrainer):
                 """for i in range(self.model.num_values):
                     train_metrics[f"vs_weight_{i}"] = to_float(w[i])"""
                 for vs_key, vs_data in w_info.items():
-                    train_metrics[vs_key] = dict()
-                    train_metrics[vs_key]["ncontexts"] = len(vs_data["contexts"])
-                    train_metrics[vs_key]["share"] = vs_data["share_of_data"]
-                    for k,v in vs_data.items():
-                        if "vs_w" in k:
-                            train_metrics[vs_key][k] = v # Weights of this VS.
+                    if str(vs_key).startswith("vs"):
+                        train_metrics[vs_key] = dict()
+                        train_metrics[vs_key]["ncontexts"] = len(vs_data["contexts"])
+                        train_metrics[vs_key]["share"] = vs_data["share_of_data"]
+                        for k,v in vs_data.items():
+                            if "vs_w" in k:
+                                train_metrics[vs_key][k] = v # Weights of this VS.
+
+                    else:
+                        train_metrics[vs_key] = float(vs_data)
             if train_metrics:
                 for key, value in train_metrics.items():
                     # Train/ is put by default
@@ -1063,6 +1076,108 @@ class CtxMORewardTrainer(MORewardTrainer):
         
         return Trainer.log(self, logs, start_time)
 
+    def evaluate(
+        self,
+        eval_dataset: Dataset | dict[str, Dataset] | None = None,
+        ignore_keys: list[str] | None = None,
+        metric_key_prefix: str = "eval",
+    ) -> dict[str, float]:
+        """
+        Run evaluation and returns metrics. 
+
+        The calling script will be responsible for providing a method to compute metrics, as they are task-dependent
+        (pass it to the init `compute_metrics` argument).
+
+        You can also subclass and override this method to inject custom behavior.
+
+        Args:
+            eval_dataset (`Dataset` | dict[str, `Dataset`], *optional*):
+                Pass a dataset if you wish to override `self.eval_dataset`. If it is a [`~datasets.Dataset`], columns
+                not accepted by the `model.forward()` method are automatically removed. If it is a dictionary, it will
+                evaluate on each dataset, prepending the dictionary key to the metric name. Datasets must implement the
+                `__len__` method.
+
+                <Tip>
+
+                If you pass a dictionary with names of datasets as keys and datasets as values, evaluate will run
+                separate evaluations on each dataset. This can be useful to monitor how training affects other
+                datasets or simply to get a more fine-grained evaluation.
+                When used with `load_best_model_at_end`, make sure `metric_for_best_model` references exactly one
+                of the datasets. If you, for example, pass in `{"data1": data1, "data2": data2}` for two datasets
+                `data1` and `data2`, you could specify `metric_for_best_model="eval_data1_loss"` for using the
+                loss on `data1` and `metric_for_best_model="eval_data2_loss"` for the loss on `data2`.
+
+                </Tip>
+
+            ignore_keys (`list[str]`, *optional*):
+                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
+                gathering predictions.
+            metric_key_prefix (`str`, *optional*, defaults to `"eval"`):
+                An optional prefix to be used as the metrics key prefix. For example the metrics "bleu" will be named
+                "eval_bleu" if the prefix is "eval" (default)
+
+        Returns:
+            A dictionary containing the evaluation loss and the potential metrics computed from the predictions. The
+            dictionary also contains the epoch number which comes from the training state.
+        """
+        # handle multiple eval datasets
+        override = eval_dataset is not None
+        eval_dataset = eval_dataset if override else self.eval_dataset
+        if isinstance(eval_dataset, dict):
+            metrics = {}
+            for eval_dataset_name, _eval_dataset in eval_dataset.items():
+                dataset_metrics = self.evaluate(
+                    eval_dataset=_eval_dataset if override else eval_dataset_name,
+                    ignore_keys=ignore_keys,
+                    metric_key_prefix=f"{metric_key_prefix}_{eval_dataset_name}",
+                )
+                metrics.update(dataset_metrics)
+            return metrics
+
+        # memory metrics - must set up as early as possible
+        self._memory_tracker.start()
+
+        eval_dataloader = self.get_eval_dataloader(eval_dataset)
+        if self.is_fsdp_xla_v2_enabled:
+            eval_dataloader = tpu_spmd_dataloader(eval_dataloader)
+
+        start_time = time.time()
+
+        output = self.evaluation_loop(
+            eval_dataloader,
+            description="Evaluation",
+            # No point gathering the predictions if there are no metrics, otherwise we defer to
+            # self.args.prediction_loss_only
+            prediction_loss_only=True if self.compute_metrics is None else None,
+            ignore_keys=ignore_keys,
+            metric_key_prefix=metric_key_prefix,
+        )
+
+        total_batch_size = self.args.eval_batch_size * self.args.world_size
+        if f"{metric_key_prefix}_model_preparation_time" in output.metrics:
+            start_time += output.metrics[f"{metric_key_prefix}_model_preparation_time"]
+        output.metrics.update(
+            speed_metrics(
+                metric_key_prefix,
+                start_time,
+                num_samples=output.num_samples,
+                num_steps=math.ceil(output.num_samples / total_batch_size),
+            )
+        )
+
+        self.log(output.metrics)
+
+        if DebugOption.TPU_METRICS_DEBUG in self.args.debug:
+            xm.master_print(met.metrics_report())
+
+        self.control = self.callback_handler.on_evaluate(self.args, self.state, self.control, output.metrics)
+
+        self._memory_tracker.stop_and_update_metrics(output.metrics)
+
+        output.metrics["others"] = output.others # Just changed this.  
+
+        return output.metrics 
+    
 
     def train_initialization(self) -> None:
         if self.model.config.training_initialization_data_size != "all":
@@ -1073,10 +1188,37 @@ class CtxMORewardTrainer(MORewardTrainer):
             subset = self.train_dataset
         self.model.train_initialization(subset)
     
+    def evaluate_contexts(self, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "") -> None:
+
+        output = {"validation": None if validation_output is None else {}, "test": None if test_output is None else {}}
+        for otype, output_per_type in zip(("validation", "test",), (validation_output, test_output)):
+            if output_per_type is not None:
+                ctxdata: CtxData = CtxData.from_dict(output_per_type["ctx"], to_tensor=True)
+                stats = self.model.value_system_layer.calculate_statistics(ctxdata)
+                
+                #dataset_ctxs = np.array(val_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
+
+                kmeans = kmeans_clustering(ctxdata.context_features, K= self.model.config.max_contexts)
+                features = ctxdata.context_features
+                labels_1 = kmeans.labels_
+                labels_2 = ctxdata.vs_assignments
+
+                plot_alternative_clusterings(features, [labels_1, labels_2], 
+                                             dim_reduction="pca", 
+                                             reduction_kwargs={"svd_solver": "full", "whiten": True},
+                                             label_set_names=[f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}",f"{self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"], output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
+                plot_alternative_clusterings(features, 
+                                             [labels_1, labels_2], 
+                                             
+                                             dim_reduction="tsne", label_set_names=[f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}",f"{self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"], output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
+
+                output[otype] = stats.to_dict()
+        return output
+    
+
     def train(self, resume_from_checkpoint: str | bool | None = None, trial: Any | Dict[str, Any] | None = None, ignore_keys_for_eval: list[str] | None = None) -> TrainOutput:
         
         if resume_from_checkpoint is None and self.accelerator.is_main_process:
             self.train_initialization()
 
         return super().train(resume_from_checkpoint, trial, ignore_keys_for_eval)
-

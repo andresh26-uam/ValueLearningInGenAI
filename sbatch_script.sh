@@ -18,12 +18,17 @@ entrypoint="$1"
 shift
 
 debug_mode=0
+use_cpu=0
 entrypoint_args=()
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 		--debug)
 			debug_mode=1
 			;;
+        --use_cpu)
+            use_cpu=1
+            entrypoint_args+=("$1")
+            ;;
 		*)
 			entrypoint_args+=("$1")
 			;;
@@ -40,7 +45,12 @@ num_machines="${NUM_MACHINES:-${SLURM_NNODES:-1}}"
 
 config_file="accelerate_config/default_config.yaml"
 if [[ "$num_processes" -eq 1 ]]; then
-	config_file="accelerate_config/single_config.yaml"
+    if [[ "$use_cpu" -eq 1 ]]; then
+        config_file="accelerate_config/cpu_config.yaml"
+    else
+        config_file="accelerate_config/single_config.yaml"
+    fi
+	#config_file="accelerate_config/single_config.yaml"
 fi
 
 gpu_ids="${CUDA_VISIBLE_DEVICES:-}"

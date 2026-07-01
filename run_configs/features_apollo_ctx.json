@@ -2,9 +2,9 @@
     "task_type": "feature_based",
     "model_name": "mlp",
     "dataset": "apollo",
-    "context_implementation": "BASIC",
-    "max_value_systems": 3,
-    "max_contexts": 3,
+    "context_implementation": "NO_CONTEXT",
+    "max_value_systems": 10,
+    "max_contexts": 10,
     "gather_train_metrics": true,
     
     "use_extracted_features": true,
@@ -18,25 +18,27 @@
 
     "activate_discordance_epsilon_for_loss": false,
 
-    "hidden_size": 16,
-    "num_hidden_layers": 3,
+    "hidden_size": 4,
+    "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
     "layer_activation": "Tanh",
-    "final_layer_activation": "Tanh",
+    "layer_normalization": "none",
+    "final_layer_activation": "none",
 
-    "vs_hidden_size": 8,
-    "vs_num_hidden_layers": 3,
+    "vs_hidden_size": 20,
+    "vs_num_hidden_layers": 2,
     "vs_layer_dropout": 0.0,
     "vs_layer_activation": "Tanh",
-
+    
 
     "use_validation_for_tendencies": false,
     "update_tendencies_every_n_steps": 20,
 
     "rew_center_coefficient": 0.0,
-    "layer_normalization": "none",
-    "learning_rate": 0.001,
-    "grounding_learning_rate": 0.001,
+    
+    "learning_rate": 0.002,
+    "grounding_learning_rate": 0.002,
+    "context_learning_rate": 0.0002,
     "lagrange_learning_rate": 0.1,
     "grounding_loss_tendency_update_ratio": 0.1,
     "max_grad_norm": 1.0,
@@ -53,8 +55,7 @@
     "gradient_checkpointing": false,
     "optim": "adamw_torch_fused",
     "lr_scheduler_type": "constant",
-    "max_length": 4096,
-    "save_every_steps": 10000,
+    "save_every_steps": 1000000000,
     "eval_every_steps": 100,
 
     "run_name": "CtxApollo"

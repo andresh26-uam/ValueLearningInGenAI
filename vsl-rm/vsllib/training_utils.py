@@ -735,21 +735,24 @@ def _create_sub_optimizer(params: OrderedSet, lr: float, sub_optimizer_class: ty
 
 
 class VSLOptimizer(th.optim.Optimizer):
-    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, n_values: int, lr_grounding=None, lr_value_system=None, sub_optimizer_class=th.optim.Adam,  **optimizer_kwargs):
+    def __init__(self, params_gr: th.ParameterDict, params_vs: th.ParameterDict, params_ctx: th.ParameterDict,  n_values: int, lr_grounding=None, lr_value_system=None, lr_context=None, sub_optimizer_class=th.optim.Adam,  **optimizer_kwargs):
         
         self.lr_grounding = lr_grounding
         self.lr_value_system = lr_value_system
+        self.lr_context = lr_context
         defaults = dict(lr_grounding=lr_grounding,
-                        lr_value_system=lr_value_system)
+                        lr_value_system=lr_value_system,lr_context=lr_context)
 
         self.optimizer_kwargs = optimizer_kwargs
         self.n_values = n_values
 
         params_gr = OrderedSet(params_gr)
         params_vs = OrderedSet(params_vs)
+        params_ctx = OrderedSet(params_ctx)
 
         self.params_gr = params_gr
         self.params_vs = params_vs
+        self.params_ctx = params_ctx
 
         print("SUBOPTIMIZER CLASS:", sub_optimizer_class)
         self.sub_optimizer_class = sub_optimizer_class
@@ -762,8 +765,13 @@ class VSLOptimizer(th.optim.Optimizer):
             self.optimy = _create_sub_optimizer(params_vs, lr_value_system, self.sub_optimizer_class, self.optimizer_kwargs)
         else:
             self.optimy = None
+        
+        if params_ctx is not None and len(params_ctx) > 0:
+            self.optimz = _create_sub_optimizer(params_ctx, lr_context, self.sub_optimizer_class, self.optimizer_kwargs)
+        else:
+            self.optimz = None
             
-        all_params = [*params_gr, *params_vs]
+        all_params = [*params_gr, *params_vs, *params_ctx]
         if len(all_params) == 0:
             all_params = [th.nn.Parameter(th.empty(0), requires_grad=True)] # Dummy parameter for initialization.
             print("WARNING: No parameters provided to VSLOptimizer. Initializing with dummy parameter.")
@@ -786,6 +794,8 @@ class VSLOptimizer(th.optim.Optimizer):
             self.optimx.zero_grad(set_to_none)
         if self.optimy is not None:
             self.optimy.zero_grad(set_to_none)
+        if self.optimz is not None:
+            self.optimz.zero_grad(set_to_none)
         return None
 
     @abstractmethod
@@ -794,6 +804,8 @@ class VSLOptimizer(th.optim.Optimizer):
             self.optimx.step()
         if self.optimy is not None:
             self.optimy.step()
+        if self.optimz is not None:
+            self.optimz.step()
         return None
 
 class ConstrainedOptimizer(VSLOptimizer):
@@ -802,14 +814,14 @@ class ConstrainedOptimizer(VSLOptimizer):
     def loss_management(self) -> MOLossManagement:
         return MOLossManagement(self.loss_func_type, self.loss_func_kwargs)
     
-    def __init__(self, params, params_gr, params_vs, n_values, params_gr_ideal=None, lr_grounding=None,
-                 lr_value_system=None, lr_lambda=None,
+    def __init__(self, params, params_gr, params_vs, params_ctx, n_values, params_gr_ideal=None, lr_grounding=None,
+                 lr_value_system=None, lr_lambda=None, lr_context=None,
                  loss_func_type: MOLossFunctions=MOLossFunctions.DEFAULT, loss_func_type_kwargs: dict = {},
                  training_variables: MORMTrainingVariables = None,
                  sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
         # Params must be provided for compatibility with transformers library.
-        super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, n_values=n_values,
-                                                   lr_grounding=lr_grounding, lr_value_system=lr_value_system, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
+        super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, params_ctx=params_ctx, n_values=n_values,
+                                                   lr_grounding=lr_grounding, lr_value_system=lr_value_system, lr_context=lr_context, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
         self.loss_func_type = MOLossFunctions(loss_func_type)
         self.loss_func_kwargs=loss_func_type_kwargs
         
@@ -847,9 +859,13 @@ class ConstrainedOptimizer(VSLOptimizer):
         if __debug__:
             x = self.params_gr 
             w = self.params_vs
+            z = self.params_ctx
             if len(w) > 0:
                 assert w[0] is self.optimy.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
                 assert w[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
+            if len(z) > 0:
+                assert z[0] is self.optimz.param_groups[0]['params'][0], "Value system parameters do not match those in the optimizer"
+                assert z[0].requires_grad, "Value system parameters must require gradients for stoic optimization."
             if len(x) > 0:
                 assert x[0] is self.optimx.param_groups[0]['params'][0], "Grounding parameters do not match those in the optimizer"
             #assert x[0].requires_grad, "Grounding parameters must require gradients for stoic optimization."
@@ -907,6 +923,11 @@ class ConstrainedOptimizer(VSLOptimizer):
                 for p in self.params_vs:
                     p.requires_grad_(vsgrad)
 
+                ctxgrad = self.loss_management.should_apply_grad_on_context_parameters(epoch=epoch)
+                
+                for p in self.params_ctx:
+                    p.requires_grad_(ctxgrad)
+
             if self.loss_management.requires_grad_for_only_some_grounding_losses(epoch=epoch):
                 selected_indices = self.loss_func_kwargs['value_indices']
                 unselected_indices = [i for i in range(len(loss_gr)) if i not in selected_indices]
@@ -927,11 +948,16 @@ class ConstrainedOptimizer(VSLOptimizer):
             
             if self.lr_value_system > 0.0:
                 assert self.params_vs[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
+            if self.lr_context > 0.0:
+                if len(self.params_ctx) > 0:
+                    assert self.params_ctx[0].grad is not None, "Value system gradients have not been computed. Make sure to call the backward pass on the value system loss before stepping the optimizer."
             
         if self.optimx is not None and self.lr_grounding > 0.0:
             self.optimx.step()
         if self.optimy is not None and self.lr_value_system > 0.0:
                 self.optimy.step()
+        if self.optimz is not None and self.lr_context > 0.0:
+                self.optimz.step()
         
         
         self.training_variables.prepare_for_optimizer_step(need_backward=self.lr_lambda > 0)
@@ -942,37 +968,22 @@ class ConstrainedOptimizer(VSLOptimizer):
 class ConstrainedLRScheduler(th.optim.lr_scheduler.LRScheduler):
     """Composite scheduler that advances all internal schedulers together."""
 
-    def __init__(self, optimizer: ConstrainedOptimizer, sched_x, sched_y=None, sched_lambda=None):
+    def __init__(self, optimizer: ConstrainedOptimizer, sched_x, sched_y=None, sched_z=None, sched_lambda=None):
         self.optimizer = optimizer
         self.sched_x = sched_x
         self.sched_y = sched_y
+        self.sched_z = sched_z
         self.sched_lambda = sched_lambda
 
     def step(self, metric=None) -> None:
-        for scheduler in (self.sched_x, self.sched_y, self.sched_lambda):
+        for scheduler in (self.sched_x, self.sched_y, self.sched_z, self.sched_lambda):
             if scheduler is not None:
                 if isinstance(scheduler, ReduceLROnPlateau):
                         scheduler.step(metric)
                 else:
                         scheduler.step()
 
-    """def state_dict(self):
-
-        print("SUPER", super().state_dict())
-        
-        return {
-            "sched_x": self.sched_x.state_dict() if self.sched_x is not None else None,
-            "sched_y": self.sched_y.state_dict() if self.sched_y is not None else None,
-            "sched_lambda": self.sched_lambda.state_dict() if self.sched_lambda is not None else None,
-        }"""
-
-    """ def load_state_dict(self, state_dict):
-        if self.sched_x is not None and state_dict.get("sched_x") is not None:
-            self.sched_x.load_state_dict(state_dict["sched_x"])
-        if self.sched_y is not None and state_dict.get("sched_y") is not None:
-            self.sched_y.load_state_dict(state_dict["sched_y"])
-        if self.sched_lambda is not None and state_dict.get("sched_lambda") is not None:
-            self.sched_lambda.load_state_dict(state_dict["sched_lambda"]"""
+    
 
     def get_last_lr(self) -> list[float]:
         lrs = []
@@ -980,6 +991,8 @@ class ConstrainedLRScheduler(th.optim.lr_scheduler.LRScheduler):
             lrs.extend(self.sched_x.get_last_lr())
         if self.sched_y is not None:
             lrs.extend(self.sched_y.get_last_lr())
+        if self.sched_z is not None:
+            lrs.extend(self.sched_z.get_last_lr())
         if self.sched_lambda is not None:
             lrs.extend(self.sched_lambda.get_last_lr())
         if len(lrs) == 0:

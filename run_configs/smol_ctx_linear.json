@@ -1,7 +1,11 @@
 {
     "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
-    "dataset": "ultra",
+    "dataset": "pku",
     "gather_train_metrics": true,
+
+    "context_implementation": "NO_CONTEXT",
+    "max_value_systems": 10,
+    "max_contexts": 10,
 
     "use_frozen_base_model": false,
     "use_embeddings": true,
@@ -21,6 +25,11 @@
     "layer_activation": "ReLU",
     "final_layer_activation": "none",
 
+    "vs_hidden_size": 1024,
+    "vs_num_hidden_layers": 2,
+    "vs_layer_dropout": 0.0,
+    "vs_layer_activation": "Tanh",
+
     "use_validation_for_tendencies": false,
     "update_tendencies_every_n_steps": 20,
 
@@ -28,6 +37,7 @@
     "layer_normalization": "none",
     "learning_rate": 0.0001,
     "grounding_learning_rate": 0.0001,
+    "context_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,
     "max_grad_norm": 0.1,
@@ -36,7 +46,7 @@
     "grad_on_only_worst_value": false,
     "zero_constraint": true,
     "use_ideal_grounding_model": false,
-    "loss_func_type": "CTX_DEFAULT",
+    "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
     "weight_decay": 0.003,
     "bf16": true,
@@ -48,5 +58,5 @@
     "save_every_steps": 10000,
     "eval_every_steps": 100,
 
-    "run_name": "smol_def_linear"
+    "run_name": "smol_ctx_linear"
 }

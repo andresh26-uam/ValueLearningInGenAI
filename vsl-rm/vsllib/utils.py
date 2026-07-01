@@ -7,12 +7,34 @@ import sys
 from typing import Any, Iterable
 
 import numpy as np
+from sklearn.cluster import KMeans
 import torch as th
 
 from pathlib import Path
 from typing import Any, Optional, Dict, Tuple
 import os
 import random
+
+
+
+
+import numpy as np
+
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+
+import matplotlib.pyplot as plt
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+
+
 
 from transformers import (
     set_seed, AutoTokenizer
@@ -250,6 +272,8 @@ class ScriptArguments:
 
     learning_rate: Optional[float] = field(default=0.0001)
     grounding_learning_rate: Optional[float] = field(
+        default=0.0001) 
+    context_learning_rate: Optional[float] = field(
         default=0.0001) 
     lagrange_learning_rate: Optional[float] = field(default=0.1)  
     grounding_loss_tendency_update_ratio: Optional[float] = field(default=0.01)
@@ -531,6 +555,158 @@ def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
         else:
             flat[key] = str(value)
     return flat
+
+def entropy(p, eps=1e-12):    
+        p = np.asarray(p)    
+        p = np.clip(p, eps, 1.0)  # avoid log(0)    
+        return -np.sum(p * np.log(p))
+
+def kmeans_clustering(dataset_ctxs: np.ndarray, K=None, max_iter=10000)-> KMeans:
+        
+            
+        assert K is not None
+        print(dataset_ctxs.shape)
+        if dataset_ctxs.shape[0] == 0:
+            raise ValueError("No context embeddings were found in the dataset, so KMeans cannot be fitted.")
+
+        n_clusters = min(int(K), int(dataset_ctxs.shape[0]))
+        random_state = 42
+        kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state, max_iter=max_iter)
+        kmeans.fit(dataset_ctxs)
+
+        
+        return kmeans
+
+
+from matplotlib.backends.backend_pdf import PdfPages
+
+
+def plot_alternative_clusterings(
+    features,
+    label_sets,
+    label_set_names=None,
+    dim_reduction="pca",
+    reduction_kwargs={},
+    output_path="clusterings.pdf"
+):
+    X = np.asarray(features)
+
+    # --- Default names ---
+    if label_set_names is None:
+        label_set_names = [f"Clustering {i+1}" for i in range(len(label_sets))]
+
+    if len(label_set_names) != len(label_sets):
+        raise ValueError("label_set_names must match label_sets length")
+
+    # --- Dimensionality reduction ---
+    if X.shape[1] > 2:
+        if dim_reduction == "pca":
+            reducer = PCA(n_components=2, **reduction_kwargs)
+            X_reduced = reducer.fit_transform(X)
+            title_suffix = "PCA"
+        elif dim_reduction == "tsne":
+            reducer = TSNE(n_components=2, random_state=42, init="pca", **reduction_kwargs)
+            X_reduced = reducer.fit_transform(X)
+            title_suffix = "t-SNE"
+        else:
+            raise ValueError("dim_reduction must be 'pca' or 'tsne'")
+    else:
+        X_reduced = X
+        title_suffix = "Original space"
+
+    n_plots = len(label_sets)
+
+    # --- Palettes and markers ---
+    palettes = ["tab10", "tab20", "Set1", "Set2", "Dark2"]
+    markers = ["o", "s", "^", "D", "P", "X"]
+
+    with PdfPages(output_path) as pdf:
+
+        # ==========================================================
+        # 1. INDIVIDUAL CLUSTERINGS
+        # ==========================================================
+        fig, axes = plt.subplots(1, n_plots, figsize=(7 * n_plots, 6))
+        if n_plots == 1:
+            axes = [axes]
+
+        for i, (labels, name) in enumerate(zip(label_sets, label_set_names)):
+            ax = axes[i]
+            labels = np.asarray(labels)
+
+            # Sort clusters by size
+            unique, counts = np.unique(labels, return_counts=True)
+            sorted_clusters = [
+                u for u, _ in sorted(zip(unique, counts), key=lambda x: -x[1])
+            ]
+
+            cmap = plt.cm.get_cmap(palettes[i % len(palettes)], len(sorted_clusters))
+
+            for j, lab in enumerate(sorted_clusters):
+                mask = labels == lab
+                ax.scatter(
+                    X_reduced[mask, 0],
+                    X_reduced[mask, 1],
+                    color=cmap(j),
+                    label=f"Cluster {lab} (n={mask.sum()})",
+                    s=30,
+                )
+
+            # ✅ Use label_set_name as title
+            ax.set_title(f"{name} ({title_suffix})")
+            ax.set_xlabel("Component 1")
+            ax.set_ylabel("Component 2")
+            ax.legend(title="Clusters", fontsize=9)
+
+        plt.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        # ==========================================================
+        # 2. COMBINED PLOT
+        # ==========================================================
+        fig, ax = plt.subplots(figsize=(8, 7))
+
+        for i, (labels, name) in enumerate(zip(label_sets, label_set_names)):
+            labels = np.asarray(labels)
+
+            unique, counts = np.unique(labels, return_counts=True)
+            sorted_clusters = [
+                u for u, _ in sorted(zip(unique, counts), key=lambda x: -x[1])
+            ]
+
+            cmap = plt.cm.get_cmap(palettes[i % len(palettes)], len(sorted_clusters))
+
+
+def plot_clustering_confusion_matrix(
+    labels_1,
+    labels_2,
+    output_path="confusion_matrix.pdf"
+):
+    labels_1 = np.asarray(labels_1)
+    labels_2 = np.asarray(labels_2)
+
+    cm = confusion_matrix(labels_1, labels_2)
+
+    fig, ax = plt.subplots(figsize=(6, 5))
+
+    cax = ax.imshow(cm)
+
+    ax.set_xlabel("Labels 2")
+    ax.set_ylabel("Labels 1")
+    ax.set_title("Confusion Matrix")
+
+    # Add values inside cells
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, cm[i, j],
+                    ha="center", va="center")
+
+    fig.colorbar(cax)
+
+    plt.tight_layout()
+
+    plt.savefig(output_path)
+    plt.close(fig)
 
 def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "test_metrics.csv") -> None:
     path = Path(output_path).joinpath(name)

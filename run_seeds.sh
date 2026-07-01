@@ -11,10 +11,10 @@ else
   SCRIPT=sbatch_from_json.sh
 fi
 
-#DATASET=pku
-#CONFIG=run_configs/smol_linear.json
-DATASET=apollo
-CONFIG=run_configs/features_apollo_ctx.json
+DATASET=pku
+CONFIG=run_configs/smol_linear.json
+#DATASET=apollo
+#CONFIG=run_configs/features_apollo_ctx.json
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
 if [[ "$DATASET" == "ultra" ]]; then
@@ -32,14 +32,22 @@ elif [[ "$DATASET" == "pku" ]]; then
     EVAL_EVERY_STEPS="--eval_every_steps=200"
   fi
 elif [[ "$DATASET" == "apollo" ]]; then
-  DISCORDANCE_EPSILON="0.04"
+  DISCORDANCE_EPSILON=0.04
   NUM_TRAIN_EPOCHS=5000
   EVAL_EVERY_STEPS="--eval_every_steps=200"
 
-EVAL_EVERY_STEPS=""
-if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
-    NAME=Simple3BatchedTanh
+else
+  echo "Unknown dataset: $DATASET" >&2
+  exit 1
+fi
 
+
+EVAL_EVERY_STEPS=""
+echo $CONFIG
+if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
+    NAME=LinearGR_NOCONTEXT_LR10_SCALED
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
+    NAME=NOCONTEXT_ctx_smol
 elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
@@ -63,16 +71,11 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
   NAME=SmolCtxVSLRMv2
-  SCRIPT_PYTHON="vsl-rm/context_vsl.py"
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test
 fi
 
-
-else
-  echo "Unknown dataset: $DATASET" >&2
-  exit 1
-fi
 
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"

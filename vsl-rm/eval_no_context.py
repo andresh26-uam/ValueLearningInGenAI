@@ -5,6 +5,7 @@ from functools import partial
 import csv
 import os
 from pathlib import Path
+from pprint import pprint
 import sys
 from typing import Any, Dict, List, Optional
 from enum import Enum
@@ -27,11 +28,12 @@ for candidate in (
         break
 
 from vsllib.training_utils import (
+    MORewardDataCollator,
     MORewardDataCollatorWithPadding,
 )
-from vsllib.training import MORewardTrainer
+from vsllib.training import CtxMORewardTrainer, MORewardTrainer
 
-from vsllib.dataset_processing import PairwisePreferenceDataset
+from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.defines import (
     EXTRA_KEYS,
     MODEL_DIR,
@@ -40,10 +42,12 @@ from vsllib.defines import (
     REWARD_HEADS_OUTPUT,
     PROCESSED_DATASET_PATHS,
     VALUE_SYSTEM_OUTPUT,
+    ContextImplementations,
     get_test_indices,
     get_validation_indices,
 )
 from vsllib.reward_models import (
+    MORMForClassification,
     MORMForSequenceClassification,
     MORMForClassificationConfig,
     mo_compute_loss_func,
@@ -301,28 +305,34 @@ def load_training_args_from_checkpoint(checkpoint_path: str, default_batch_size:
     return default_batch_size, default_batch_size
 
 
-def extract_and_save_value_system_weights(model, results_dir: Path) -> None:
+def extract_and_save_value_system_weights( model: MORMForClassification, results_dir: Path) -> None:
     """
     Extract value system weights from model and save to CSV.
     """
     os.makedirs(results_dir, exist_ok=True)
     
-    weights = model.value_system_layer.get_weights()
-    
-    # Convert weights to numpy if needed
-    if isinstance(weights, torch.Tensor):
-        weights = weights.cpu().detach().numpy()
-    
-    weights = np.asarray(weights).flatten()
-    
+    weights = model.value_system_layer.get_value_system_info()
+    if isinstance(weights, dict):
+        weights = np.array([[weights[key][f"vs_w{i}"] for i in range(model.num_values)] for key in weights.keys() if str(key).startswith("vs")])
+    else:
+        # Convert weights to numpy if needed
+        if isinstance(weights, torch.Tensor):
+            weights = weights.cpu().detach().numpy()
+        
+        weights = np.asarray(weights).flatten()
+        
     # Create CSV with weights for each value dimension
     csv_path = results_dir / "value_system_weights.csv"
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
         # Write header
-        writer.writerow([f"value_{i}" for i in range(len(weights))])
+        writer.writerow([f"value_{i}" for i in range(model.num_values)])
         # Write weights row
-        writer.writerow(weights.tolist())
+        if len(weights.shape) > 1:
+            for w in weights:
+                writer.writerow(w.tolist())
+        else:
+            writer.writerow(weights.tolist())
     
     print(f"Value system weights saved to: {csv_path.resolve()}")
 
@@ -336,6 +346,7 @@ def main() -> None:
     
     print("EVAL ARGUMENTS PARSED")
     for script_args in script_args_all:
+        
         with open(os.path.join(str(script_args.checkpoint_path), "seed_info.json"), "r", encoding="utf-8") as fp:
             seed_info = json.load(fp)
         script_args.seed = seed_info.get("seed", script_args.seed)
@@ -345,7 +356,12 @@ def main() -> None:
         #torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
         #print("TORCH DTYPE:", torch_dtype )
         print("LOADING TOKENIZER...")
-        tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
+        if script_args.task_type == "nlp_based":
+            tokenizer = obtain_tokenizer(script_args, preset)
+        else: 
+            tokenizer= None
+            
+        #tokenizer = obtain_tokenizer(script_args, preset=preset, checkpoint_path=script_args.checkpoint_path)
         print("LOADED TOKENIZER")
         print(f"LOADING MODEL... ({script_args.checkpoint_path})")
         import subprocess
@@ -356,15 +372,21 @@ def main() -> None:
         checkpoint_size = du(script_args.checkpoint_path)
         print(f"Checkpoint size: {checkpoint_size}")
 
-        model = MORMForSequenceClassification.from_pretrained(
-            str(script_args.checkpoint_path),
-        ).to(device="cuda:0")
+        if script_args.task_type == "nlp_based":
+                    model = MORMForSequenceClassification.from_pretrained(
+                            str(script_args.checkpoint_path),
+                        ).to(device="cpu" if script_args.use_cpu else "cuda:0")
 
+        else:
+            model = MORMForClassification.from_pretrained(
+                    str(script_args.checkpoint_path),
+                ).to(device="cpu" if script_args.use_cpu else "cuda:0")
+        model: MORMForClassification     
         
         torch_dtype = model.config.dtype
-        print("VS", model.value_system_layer.get_weights())
+        print("VS", model.value_system_layer.get_value_system_info())
         print("MODEL DETAILS:", model, "MODEL DTYPE:", model.dtype, "MODEL CONFIG DTYPE:", torch_dtype)
-        print("MODEL DTYPE", model.value_system_layer.weight.dtype)
+        print("MODEL DTYPE", list(model.value_system_layer.parameters())[0].dtype)
         print("FIRST PARAMETER:", next(model.parameters()), next(model.parameters()).dtype)
         print("TRAINING VARIABLES:", model.training_variables.state_dict(), model.training_variables.lagrange_multipliers.dtype)
         
@@ -391,6 +413,7 @@ def main() -> None:
          # Extract and save value system weights if requested
         
         results_path = Path(script_args.results_dir)
+    
         extract_and_save_value_system_weights(
             model,
             results_path
@@ -404,35 +427,55 @@ def main() -> None:
             torch.cuda.empty_cache()
             continue
 
-        dc = MORewardDataCollatorWithPadding(
-            tokenizer=tokenizer,
-            max_length=int(script_args.max_length),
-            dtype=torch_dtype,
-            use_embeddings=bool(script_args.use_extracted_features),
-        )
+        
 
         train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
         extra_keep_keys = EXTRA_KEYS[script_args.dataset]
         test_proportion_or_indices = get_test_indices(script_args.dataset)
         eval_proportion_or_indices = get_validation_indices(script_args.dataset)
 
-        embed_model = model.full_model if script_args.use_extracted_features else None
-
-        dataset = PairwisePreferenceDataset(
-            train_path,
-            tokenizer,
-            from_disk=True,
-            extra_keep_keys=extra_keep_keys,
-            retokenize=False,
-            recalculate_embeddings=False,
+        if script_args.task_type == "nlp_based":
+            dc = MORewardDataCollatorWithPadding(
+            tokenizer=tokenizer,
+            max_length=int(script_args.max_length),
+            dtype=torch_dtype,
             use_embeddings=bool(script_args.use_extracted_features),
-            model_reference=embed_model,
-            collator=dc,
-            split_seed=int(script_args.data_seed),
-            eval_proportion_or_indices=eval_proportion_or_indices,
-            test_proportion_or_indices=test_proportion_or_indices,
-            cleanup_cache_files=False,
         )
+            embed_model = model.full_model if script_args.use_extracted_features else None
+
+            dataset = PairwisePreferenceDataset(
+                            train_path,
+                            tokenizer,
+                            from_disk=True,
+                            extra_keep_keys=extra_keep_keys,
+                            retokenize=False,
+                            recalculate_embeddings=False,
+                            use_embeddings=bool(script_args.use_extracted_features),
+                            model_reference=embed_model,
+                            collator=dc,
+                            split_seed=int(script_args.data_seed),
+                            eval_proportion_or_indices=eval_proportion_or_indices,
+                            test_proportion_or_indices=test_proportion_or_indices,
+                            cleanup_cache_files=False,
+                        )
+        else:
+            pad_token_id = None
+            dc = MORewardDataCollator(dtype=torch_dtype)
+            dataset = FeatureBasedPreferenceDataset(train_path, 
+                                                    from_disk=True,
+                                                extra_keep_keys=extra_keep_keys,
+                                                repostprocess=script_args.repostprocess,
+                                                recalculate_features=script_args.recalculate_features,
+                                                use_extracted_features=script_args.use_extracted_features,
+                                                
+                                                collator=dc,
+                                                split_seed=int(script_args.data_seed),
+                                                eval_proportion_or_indices=eval_proportion_or_indices,
+                                                test_proportion_or_indices=test_proportion_or_indices,
+                                                cleanup_cache_files=False,
+                                                )
+        
+        
         if model.num_values != len(dataset.value_keys):
             raise ValueError(
                 f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
@@ -457,7 +500,7 @@ def main() -> None:
         per_device_train_batch_size, per_device_eval_batch_size = load_training_args_from_checkpoint(
             str(script_args.checkpoint_path)
         )
-        
+        bf16 = bool(script_args.bf16) if script_args.task_type != "feature_based" else False
         eval_args = TrainingArguments(
             output_dir=str(script_args.results_dir),
             seed=int(script_args.seed),
@@ -465,12 +508,12 @@ def main() -> None:
             per_device_eval_batch_size=per_device_eval_batch_size,
             per_device_train_batch_size=per_device_train_batch_size,
             remove_unused_columns=False,
-            bf16=bool(script_args.bf16),
+            bf16=bf16,
             logging_strategy="steps",
             logging_steps=1,
             report_to="none",
             label_names=["labels"],
-            use_cpu=bool(script_args.use_cpu),
+            use_cpu=script_args.use_cpu,
             do_train=False,
             do_eval=True,
             save_strategy="no",
@@ -481,25 +524,37 @@ def main() -> None:
         model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
         
         # Use the exact same metric and loss functions as training.
-        trainer = MORewardTrainer(
+        if ContextImplementations(model.config.context_implementation) == ContextImplementations.NO_CONTEXT:
+            trainer_class = MORewardTrainer 
+            trainer_extra_kwargs = dict(
+                compute_loss_func=partial(
+                    mo_compute_loss_func, config=model.config, training_variables=model.training_variables),
+            )
+        else:
+            trainer_class = CtxMORewardTrainer
+            trainer_extra_kwargs = dict(
+                compute_loss_func=partial(
+                    mo_compute_loss_func, config=model.config, training_variables=model.training_variables),
+            )
+        
+        print("TR", trainer_extra_kwargs)
+        pprint(trainer_extra_kwargs)
+        pprint(eval_args.__dict__)
+        trainer = trainer_class(
             model=model,
             args=eval_args,
             eval_dataset=dataset.test_dataset,
-            compute_metrics=partial(
-                MORewardTrainer.compute_metrics,
-                config=model.config,
-                training_variables=model.training_variables,
-            ),
-            compute_loss_func=partial(
-                mo_compute_loss_func,
-                config=model.config,
-                training_variables=model.training_variables,
-            ),
+            compute_metrics=partial(trainer_class.compute_metrics_custom,
+                                    config=model.config, training_variables=model.training_variables),
+            
             data_collator=dc,
+            **trainer_extra_kwargs
         )
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
         
         metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
+        if "others" in metrics_test.keys():
+            others_test = metrics_test.pop("others")
         flat_metrics_test = flatten_metrics_for_csv(metrics_test)
         write_metrics_csv(flat_metrics_test, script_args.results_dir, name="test_metrics.csv")
 
@@ -508,6 +563,8 @@ def main() -> None:
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
         print("Starting eval evaluation...")
         metrics_eval = trainer.evaluate(eval_dataset=dataset.eval_dataset, metric_key_prefix="eval")
+        if "others" in metrics_eval.keys():
+            others_eval = metrics_eval.pop("others")
         flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
         write_metrics_csv(flat_metrics_eval, script_args.results_dir, name="eval_metrics.csv")
 
@@ -515,11 +572,46 @@ def main() -> None:
         print(f"Checkpoint: {script_args.checkpoint_path}")
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
 
+        if isinstance(trainer, CtxMORewardTrainer):
+            trainer: CtxMORewardTrainer
+            output = trainer.evaluate_contexts(validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir)
+            save_context_evaluation(output, output_dir=script_args.results_dir)
+
+            
+                
+
         model = model.to(device="cpu")
         embed_model = embed_model.to(device="cpu") if embed_model is not None else None
         del trainer, dataset, model, tokenizer, dc, embed_model
         torch.cuda.empty_cache()
 
+def denumpify_detensorize(metrics: dict|list|tuple|np.generic|torch.Tensor) -> dict|list|tuple|float:
+    """
+    Recursively calls `.item()` on the element of the dictionary passed
+    """
+    if isinstance(metrics, (list, tuple)):
+        return type(metrics)(denumpify_detensorize(m) for m in metrics)
+    elif isinstance(metrics, dict):
+        return type(metrics)({k: denumpify_detensorize(v) for k, v in metrics.items()})
+    elif isinstance(metrics, np.generic):
+        return float(metrics.item())
+    elif isinstance(metrics, torch.Tensor):
+        if metrics.numel() == 1:
+            return float(metrics.item())
+        else:
+            return [denumpify_detensorize(m) for m in metrics.detach().cpu().tolist()]
+    return metrics
 
+def save_context_evaluation(output: dict, output_dir="") -> None:
+    print("CONTEXT OUTPUT")
+    pprint(output)
+    
+    for c,d in output.items():
+        if "feature" in c:
+            output.pop(c)
+    output = denumpify_detensorize(output)
+    with open(os.path.join(output_dir, "context_evaluation.json"), "w", encoding="utf-8") as f:
+        json.dump(output, f, indent=4) 
+    
 if __name__ == "__main__":
     main()

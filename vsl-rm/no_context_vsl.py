@@ -141,7 +141,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             training_initialization_data_size=script_args.training_initialization_data_size,
             max_contexts=script_args.max_contexts,
             max_value_systems=script_args.max_value_systems,
-            vs_layer_hidden_sizes=[script_args.vs_hidden_size]*script_args.num_hidden_layers,
+            vs_layer_hidden_sizes=[script_args.vs_hidden_size]*script_args.vs_num_hidden_layers,
             vs_layer_dropout=script_args.vs_layer_dropout,
             vs_layer_intermediate_activation=script_args.vs_layer_activation,
             context_implementation=script_args.context_implementation,
@@ -165,7 +165,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             lambda_decay=script_args.lambda_decay,
             hidden_sizes=[script_args.hidden_size]*script_args.num_hidden_layers, 
             value_layer_dropout=script_args.value_layer_dropout,
-            value_layer_intermediate_activation=script_args.layer_activation,
+            value_layer_intermediate_activation=script_args.vs_layer_activation,
             value_layer_final_activation=script_args.final_layer_activation,
             layer_normalization=script_args.layer_normalization,
             grounding_loss_tendency_update_ratio=script_args.grounding_loss_tendency_update_ratio,
@@ -183,6 +183,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             gather_train_metrics=script_args.gather_train_metrics,
             lr_value_system=script_args.learning_rate,
             lr_grounding=script_args.grounding_learning_rate,
+            lr_context=script_args.context_learning_rate,
             lr_lambda=script_args.lagrange_learning_rate,
         )
 
@@ -215,7 +216,13 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) == ContextImplementations.BASIC:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH] :
+            trainer_class = CtxMORewardTrainer
+            trainer_extra_kwargs = dict(
+                compute_loss_func=partial(
+                    mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
+            )
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.DIRECT_VS,] :
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
@@ -235,9 +242,11 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 'params_gr': list(mo_model.grounding_parameters()),
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
                 'params_vs': list(mo_model.value_system_parameters()),
+                'params_ctx': list(mo_model.context_parameters()),
                 'n_values': mo_config.num_values,
                 'lr_value_system': mo_config.lr_value_system,
                 'lr_grounding': mo_config.lr_grounding,
+                'lr_context': mo_config.lr_context,
                 'lr_lambda': mo_config.lr_lambda,
                 'loss_func_type': mo_config.loss_func_type,
                 'loss_func_type_kwargs': mo_config.loss_func_type_kwargs,
@@ -272,7 +281,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
             write_metrics_csv(flat_metrics_eval, os.path.join(RESULTS_DIR, script_args.model_name, script_args.run_name), name="eval_metrics.csv")
 
-        return trainer
+        return trainer, dataset
 
 
 if __name__ == "__main__":
@@ -348,8 +357,9 @@ if __name__ == "__main__":
     else: 
         tokenizer= None
 
-    trainer: MORewardTrainer = main_fun(script_args, training_args, tokenizer)
-    
+    trainer, dataset = main_fun(script_args, training_args, tokenizer)
+    trainer : CtxMORewardTrainer
+    dataset : PairwisePreferenceDataset
     @accelerate_state.on_main_process
     def saving():
         
@@ -362,6 +372,9 @@ if __name__ == "__main__":
                     mo_model = MORMForClassification.from_pretrained(save_location)
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)
+                trainer.model = mo_model
+                
+                print(trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test"))
 
     saving()
         

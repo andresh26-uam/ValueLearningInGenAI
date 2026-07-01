@@ -26,9 +26,25 @@ def process_dataset() -> tuple[pd.DataFrame, Path]:
     """Download the ready trees file and load it into a pandas dataframe."""
     full_data = pd.read_csv(LOCAL_FILENAME, header='infer')
 
-    to_scale_features = ["hh_inc_abs"]
+    to_norm_features = ["hh_inc_abs", ("tt1", "tt2"), ("hw1", "hw2"), ("ch1", "ch2"), ("tc1", "tc2")]
+    for f in to_norm_features:
+        if isinstance(f, tuple):
+            f1, f2 = f[0], f[1]
+            all_data = np.concatenate([full_data[f1].to_numpy(), full_data[f2].to_numpy()])
+            for f_ in (f1,f2):
+                full_data[f_ + "_NORM"] = ((full_data[f_])-np.mean(all_data))/np.std(all_data)
+        else:
+            full_data[f + "_NORM"] = ((full_data[f])-full_data[f].mean())/full_data[f].std()
+    
+    to_scale_features = ["hh_inc_abs", ("tt1", "tt2"), ("hw1", "hw2"), ("ch1", "ch2"), ("tc1", "tc2")]
     for f in to_scale_features:
-        full_data[f + "_NORM"] = ((full_data[f])-full_data[f].mean())/full_data[f].std()
+        if isinstance(f, tuple):
+            f1, f2 = f[0], f[1]
+            all_data = np.concatenate([full_data[f1].to_numpy(), full_data[f2].to_numpy()])
+            for f_ in (f1,f2):
+                full_data[f_ + "_SCALED"] = ((full_data[f_]))/max(all_data)
+        else:
+            full_data[f + "_SCALED"] = full_data[f]/max(full_data[f].to_numpy())
 
     print(full_data.head(5))
 
@@ -52,12 +68,24 @@ def process_line(line: dict, i) -> dict:
     instance["action1"] = 1
     instance["action2"] = 2
 
+    instance["grounding_1"] = np.array([line["tt1"], line["tc1"], line["hw1"], line["ch1"]], dtype=np.float32)
+    instance["grounding_2"] = np.array([line["tt2"], line["tc2"], line["hw2"], line["ch2"]], dtype=np.float32)
+
     instance["context_features"] = np.array([line["hh_inc_abs_NORM"],line["car_availability"],line["commute"],line["shopping"],line["business"],line["leisure"]], dtype=np.float32)
    # print(instance["context_features"] )
-    instance["grounding_features_1"] = np.array([line["tt1"], line["tc1"], line["hw1"], line["ch1"]], dtype=np.float32)
+    use_normalized_features = "scale"
+    if not use_normalized_features:
+        instance["grounding_features_1"] = np.array([line["tt1"], line["tc1"], line["hw1"], line["ch1"]], dtype=np.float32)
 
-    instance["grounding_features_2"] = np.array([line["tt2"], line["tc2"], line["hw2"], line["ch2"]], dtype=np.float32)
+        instance["grounding_features_2"] = np.array([line["tt2"], line["tc2"], line["hw2"], line["ch2"]], dtype=np.float32)
+    elif use_normalized_features == "norm":
+        instance["grounding_features_1"] = np.array([line["tt1_NORM"], line["tc1_NORM"], line["hw1_NORM"], line["ch1_NORM"]], dtype=np.float32)
 
+        instance["grounding_features_2"] = np.array([line["tt2_NORM"], line["tc2_NORM"], line["hw2_NORM"], line["ch2_NORM"]], dtype=np.float32)
+    else:
+        instance["grounding_features_1"] = np.array([line["tt1_SCALED"], line["tc1_SCALED"], line["hw1_SCALED"], line["ch1_SCALED"]], dtype=np.float32)
+
+        instance["grounding_features_2"] = np.array([line["tt2_SCALED"], line["tc2_SCALED"], line["hw2_SCALED"], line["ch2_SCALED"]], dtype=np.float32)
     better_option_is_1 = int(line["choice"] == 1)
     instance["score1"], instance["score2"] = better_option_is_1, 1 - better_option_is_1
     for value_name in VALUES_APOLLO:

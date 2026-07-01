@@ -142,6 +142,7 @@ VALUE_LAYER_ACTIVATIONS = {
     "Tanh": nn.Tanh,
     "Softplus": nn.Softplus,
     "SiLU": nn.SiLU,
+    "Sigmoid": nn.Sigmoid,
     "none": None,
 }
 
@@ -216,7 +217,10 @@ class MOLossFunctions(enum.Enum):
 
 class ContextImplementations(enum.Enum):
     NO_CONTEXT = "NO_CONTEXT"
+    DIRECT_VS = "DIRECT_VS"
     BASIC = "BASIC"
+    BASIC_SMOOTH = "BASIC_SMOOTH"
+    BASIC_HARSH = "BASIC_HARSH"
     SINGLE_LEVEL_GMM = "GMM"
     NESTED_GMM = "NESTED_GMM"
 
@@ -238,12 +242,14 @@ class MOLossFunctionsCategories():
     SHOULD_APPLY_GRAD_ON_PART_OF_GROUNDING_PARAMETERS = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
     SHOULD_APPLY_GRAD_ON_LAGRANGE_MULTIPLIERS = [MOLossFunctions.DEFAULT, MOLossFunctions.CTX_DEFAULT, MOLossFunctions.ONLY_GROUNDING, MOLossFunctions.ONLY_VALUES_IN_KWARGS]
 
-
+    
     SHOULD_APPLY_GRAD_ON_GROUNDING_OR_VALUE_SYSTEM_PARAMS = SHOULD_APPLY_GRAD_ON_VALUE_SYSTEM_WEIGHTS + SHOULD_APPLY_GRAD_ON_GROUNDING_PARAMETERS
     
+    
+    CONTEXT_DEPENDENT_LOSS = [MOLossFunctions.CTX_DEFAULT]
+    SHOULD_APPLY_GRAD_ON_CONTEXT_PARAMS = CONTEXT_DEPENDENT_LOSS + [MOLossFunctions.DEFAULT, MOLossFunctions.ONLY_VALUE_SYSTEM_AND_ONLY_WEIGHTS, MOLossFunctions.ONLY_VALUE_SYSTEM, MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE, MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM]
     NEEDS_NO_GRAD_EVER = [MOLossFunctions.EVALUATION_ONLY]
 
-    CONTEXT_DEPENDENT_LOSS = [MOLossFunctions.CTX_DEFAULT]
 
 class MOLossManagement():
     def __init__(self, loss_func_type: MOLossFunctions, loss_func_kwargs: dict | None = None) -> None:
@@ -330,6 +336,15 @@ class MOLossManagement():
 
     def should_apply_grad_on_grounding_or_value_system_params(self, epoch: int = None, **kwargs) -> bool:
         return self.should_apply_grad_on_grounding_parameters(epoch=epoch, **kwargs) or self.should_apply_grad_on_value_system_weights(epoch=epoch, **kwargs)
+    
+    def should_apply_grad_on_context_parameters(self, epoch: int = None, **kwargs) -> bool:
+        if epoch is not None and epoch != "EVAL":
+             if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                    n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
+                    return epoch>=n_epochs_for_grounding
+        return self._in_category(MOLossFunctionsCategories.SHOULD_APPLY_GRAD_ON_CONTEXT_PARAMS)
+    
 
 def get_validation_indices(dataset_name: SupportedDatasets) -> list[int] | float | None:
     maybe_proportion = HAS_CUSTOM_VAL_SETS[dataset_name]
