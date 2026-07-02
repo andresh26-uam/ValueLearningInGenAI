@@ -764,9 +764,6 @@ def accuracy_logits_smooth(logits: th.Tensor, target_probs: th.Tensor, missing_m
             logits_of_smoothing_equal_cases = logits
             targets_of_smoothing_equal_cases = target_probs
 
-        print("LOGITS", logits_of_smoothing_equal_cases)
-        print("TARGETS", targets_of_smoothing_equal_cases)
-        input()
 
         if assume_torch:
             f = th.nn.functional.sigmoid(logits_of_smoothing_equal_cases)

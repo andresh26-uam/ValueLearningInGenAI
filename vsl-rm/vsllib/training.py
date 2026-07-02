@@ -46,8 +46,8 @@ class EvalPredictionWithExtraLabels(EvalPrediction):
         others: Dict[str,np.ndarray]={}
     ):
         super().__init__(predictions=predictions, label_ids=label_ids, inputs=inputs, losses=losses)
-        self.labels_ql = others.pop("target_probs_quantitative")
-        self.labels_qt = others.pop("target_probs_qualitative")
+        self.labels_ql = others.get("target_probs_qualitative")
+        self.labels_qt = others.get("target_probs_quantitative")
         self.others = others
         self.elements = (*self.elements, self.labels_ql, self.labels_qt)
 
