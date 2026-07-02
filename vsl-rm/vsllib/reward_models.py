@@ -752,6 +752,7 @@ def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.
 
 def accuracy_logits_smooth(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True) -> th.Tensor:
     with th.no_grad():
+        
         missing_mask = get_missing_rating_mask(
             target_probs) if missing_mask is None else missing_mask
         if missing_mask is not None:
@@ -763,7 +764,9 @@ def accuracy_logits_smooth(logits: th.Tensor, target_probs: th.Tensor, missing_m
             logits_of_smoothing_equal_cases = logits
             targets_of_smoothing_equal_cases = target_probs
 
-        
+        print("LOGITS", logits_of_smoothing_equal_cases)
+        print("TARGETS", targets_of_smoothing_equal_cases)
+        input()
 
         if assume_torch:
             f = th.nn.functional.sigmoid(logits_of_smoothing_equal_cases)
