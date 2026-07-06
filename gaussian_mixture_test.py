@@ -6,7 +6,7 @@ from sklearn.cluster import KMeans
 import torch as th
 import numpy as np
 import torch
-
+from matplotlib.colors import Normalize
 import math
 import time
 import numpy as np
@@ -136,7 +136,7 @@ class GaussianMixtureContextProbability(nn.Module):
         )
 
 
-    def forward(self, x):
+    def forwardmaybe(self, x):
 
         """
         x:
@@ -231,7 +231,7 @@ class GaussianMixtureContextProbability(nn.Module):
             dim=0
         )
 
-
+        
         return th.logsumexp(
             component_log_prob
             +
@@ -257,7 +257,7 @@ class GaussianMixtureContextProbability(nn.Module):
         L = L + th.diag_embed(diag)
 
         return L
-    def forwardworks(self, context_embeddings: th.Tensor):
+    def forward(self, context_embeddings: th.Tensor):
 
         """
         Returns log p(x) under the Gaussian mixture.
@@ -304,21 +304,15 @@ class GaussianMixtureContextProbability(nn.Module):
         )
 
 
-        # add mixture probability
-        component_log_probs = (
-            component_log_probs
-            + log_weights
-        )
-
 
         # log sum_k pi_k N(x|mu_k,Sigma_k)
         log_prob = th.logsumexp(
-            component_log_probs,
+            component_log_probs + log_weights,
             dim=-1
         )
 
 
-        return log_prob
+        return log_prob, component_log_probs
 
 
 
@@ -407,11 +401,12 @@ class FastGaussianMixture(nn.Module):
         self,
         input_size: int,
         num_components: int,
+        l_entropy = 1e-1,
         device=None,
         dtype=None
     ):
         super().__init__()
-
+        self.l_entropy = l_entropy
         self.input_size = input_size
         self.num_components = num_components
 
@@ -487,14 +482,14 @@ class FastGaussianMixture(nn.Module):
                 norm
             )
         )
-
+        logits = th.log_softmax(self.logits, dim=0)
 
         return th.logsumexp(
             component_log_prob
             +
-            th.log_softmax(self.logits, dim=0),
+            logits,
             dim=1
-        )
+        ), component_log_prob #+ logits
 
     def set_centroids(self, centroids: th.Tensor):
 
@@ -536,6 +531,48 @@ class FastGaussianMixture(nn.Module):
                 th.randn_like(std) * std,
                 ids
             )
+    def sample_with_predicted_cluster(self, n: int):
+
+        with th.no_grad():
+
+            mixture_probs = th.softmax(self.logits, dim=0)
+
+            # Generate samples
+            ids = th.multinomial(
+                mixture_probs,
+                n,
+                replacement=True
+            )
+
+            std = th.exp(0.5 * self.log_var[ids])
+
+            samples = (
+                self.centroids[ids]
+                + th.randn_like(std) * std
+            )
+
+            # Compute log p(x | k) for every component
+            diff = samples[:, None, :] - self.centroids[None, :, :]
+            inv_var = th.exp(-self.log_var)
+
+            mahalanobis = (diff.pow(2) * inv_var).sum(dim=-1)
+            log_det = self.log_var.sum(dim=-1)
+            norm = self.input_size * th.log(
+                th.tensor(2 * th.pi, device=samples.device, dtype=samples.dtype)
+            )
+
+            component_log_prob = -0.5 * (
+                mahalanobis + log_det + norm
+            )
+
+            # Add log mixture weights
+            log_post: th.Tensor = component_log_prob + th.log_softmax(self.logits, dim=0)
+
+            # MAP component
+            predicted_ids = log_post.argmax(dim=-1)
+            log_prob, _ = th.max(log_post, dim=-1)
+
+            return samples, log_prob, predicted_ids
         
 class GaussianMixture(nn.Module):
     def __init__(self, num_components, dim, cov="full", batch_norm=False):
@@ -611,62 +648,169 @@ class GMMDataset(Dataset):
 
     def __getitem__(self, idx):
         return self.x[idx]
-
-def train(lr, epochs, loader, gmm, file_name):
+def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.0):
     optimizer = torch.optim.Adam(gmm.parameters(), lr=lr)
-    
 
     start_time = time.time()
     history = []
     bar = trange(epochs)
+
     for e in bar:
         epoch_loss, epoch_n = 0, 0
-        for i, data_batch in enumerate(loader):
-            logp = gmm.forward(data_batch)
-            loss = -torch.mean(logp)
+        epoch_true_loss = 0.0
+        for data_batch in loader:
+            entropy_loss = 0.0
+            logp, component_log_prob = gmm(data_batch)
+            logits = th.log_softmax(gmm.logits, dim=0)
+            k = len(gmm.centroids)
+            #if l_entropy != 0.0:
+            responsibilities = th.log_softmax(component_log_prob, dim=1)#*th.exp(logits)
+            #avg_resp = responsibilities.mean(dim=0)
+            # Mean entropy over the batch
+            entropy_loss = -(
+                    responsibilities *
+                    responsibilities.exp()
+                ).sum(dim=1).mean()
+            
+            
+            
+            l2 = (
+                #(gmm.centroids-gmm.centroids.mean(dim=0)).square().sum()
+                #+ gmm.log_var.square().sum()
+                -(logits*th.exp(logits)).mean()
+            )
+            l3 = (gmm.centroids-gmm.centroids.mean(dim=0)).square().mean()
+            nll = -logp.mean() 
+            #l_entropy=0
+            #l2_lambda=0
+            loss = nll + l_entropy*entropy_loss*k + l2_lambda*l2*k
 
+            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
-            
-            epoch_loss += -logp.sum().data.item()
+
+            epoch_loss += -logp.sum().item()
+            epoch_true_loss += nll.item()
             epoch_n += len(data_batch)
+        
         
         epoch_loss /= epoch_n
         history.append(epoch_loss)
+        if e % 100 == 0:
+            plot(gmm, history, file_name)
 
         bar.set_postfix(
-            loss='{:.2f}'.format(epoch_loss), 
-            time="{:.2f}".format(time.time() - start_time)
+            loss=f"{epoch_true_loss:.2f}",
+            time=f"{time.time() - start_time:.2f}"
         )
-    end_time = time.time()
-    print(f"FINISHED IN {end_time - start_time:.2f} seconds")
+
+    print(f"FINISHED IN {time.time() - start_time:.2f} seconds")
+    
+    plot(gmm, history, file_name)
+
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot(gmm, history, file_name):
+    # ---- Training history plot ----
     fig, ax = plt.subplots(1, 1, figsize=(6, 6))
     ax.plot(history)
+    ax.set_title("Training history")
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Loss")
+    plt.tight_layout()
+    plt.savefig(file_name + "_history.png")
     plt.show()
-    plt.savefig(file_name+"_history.png")
     plt.close()
 
+    # ---- Sampling ----
     num_samples = 1000
+    predicted_cluster = None
+
     with torch.no_grad():
-        x_sample, logp = gmm.sample(num_samples)
+        if hasattr(gmm, "sample_with_predicted_cluster"):
+            x_sample, _, predicted_cluster = gmm.sample_with_predicted_cluster(num_samples)
+        else:
+            x_sample, _ = gmm.sample(num_samples)
+
+    x_sample_np = x_sample.cpu().numpy() if hasattr(x_sample, "cpu") else x_sample
 
     fig, ax = plt.subplots(1, 2, figsize=(8, 4), sharex=True, sharey=True)
+
+    # ---- Left: real data ----
     ax[0].scatter(x[:, 0], x[:, 1])
     ax[0].set_title("Data samples")
-    ax[1].scatter(x_sample[:, 0], x_sample[:, 1])
+
+    # ---- Right: model samples ----
+    if predicted_cluster is not None:
+        clusters = predicted_cluster.cpu().numpy()
+
+        markers = ['o', 's', '^', 'v', 'D', 'P', '*']
+        cmap = plt.cm.get_cmap('tab10')  # distinct cluster colors
+
+        used_clusters = np.unique(clusters)
+
+        # ---- Plot samples per cluster ----
+        for k in used_clusters:
+            idx = clusters == k
+
+            ax[1].scatter(
+                x_sample_np[idx, 0],
+                x_sample_np[idx, 1],
+                color=cmap(k % 10),
+                marker=markers[k % len(markers)],
+                label=f"Cluster {k}",
+                alpha=0.8,
+                edgecolors='black',
+                linewidths=0.3
+            )
+
+        # ---- Plot centroids ----
+        centroids = gmm.centroids
+        centroids_np = centroids.detach().cpu().numpy() if hasattr(centroids, "cpu") else centroids
+
+        for k in range(centroids_np.shape[0]):
+            if k in used_clusters:
+                color = cmap(k % 10)
+                alpha = 1.0
+            else:
+                color = 'black'
+                alpha = 0.3
+
+            ax[1].scatter(
+                centroids_np[k, 0],
+                centroids_np[k, 1],
+                color=color,
+                marker=markers[k % len(markers)],
+                s=180,
+                alpha=alpha,
+                edgecolors='white',
+                linewidths=1.2
+            )
+
+        # ---- Legend ----
+        ax[1].legend(title="Cluster", loc="best")
+
+    else:
+        ax[1].scatter(x_sample_np[:, 0], x_sample_np[:, 1])
+
     ax[1].set_title("Model samples")
+
     plt.tight_layout()
+    plt.savefig(file_name + "_samples.png")
     plt.show()
-    plt.savefig(file_name+"_samples.png")
     plt.close()
 
 if __name__ == "__main__":
-    seed = 34254
+    seed = 45376
     th.manual_seed(seed)
 
     # make gmm
-    K = 3
+    K = 4
     dim = 2
     pi = th.softmax(th.randn(K), dim=-1)
     mu = th.rand(K, dim).uniform_(-20, 20)
@@ -686,9 +830,9 @@ if __name__ == "__main__":
     plt.savefig(f"gmm_data.png")
     plt.close()
 
-    k = 4
+    k = 32
     dataset = GMMDataset(x)
-    random_state = 42
+    random_state = 426
     kmeans = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
     kmeans.fit(dataset)
 
@@ -697,8 +841,8 @@ if __name__ == "__main__":
 
     cov = "diag"
     batch_norm = False
-    lr = 1e-2
-    batch_size = 128
+    lr = 5e-1
+    batch_size = 500
     epochs = 1000
 
     loader = DataLoader(dataset, batch_size)
@@ -711,5 +855,6 @@ if __name__ == "__main__":
     print("Centroids", gmm_copilot.centroids)
     #gmm_copilot.initialize_from_data(x)
 
-    #train(lr, epochs, loader, gmm, "gmm_kaggle")
-    train(lr, epochs, loader, gmm_copilot, "gmm_copilot")
+    #
+    #train(lr, epochs, loader, gmm, "gmm_kaggle") #40/s
+    train(lr, epochs, loader, gmm_copilot, "gmm_copilot", l_entropy=-0.02, l2_lambda=0.05) # ~50/s
