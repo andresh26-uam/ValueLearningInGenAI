@@ -31,14 +31,17 @@ OASST_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasst")
 OASSTFL_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasstfl")
 
 APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
+SYNTH_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "synth")
 
 PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
 OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank"]
+SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real"]
 APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
 class SupportedDatasets(enum.Enum):
     ULTRAFEEDBACK = "ultra"
     PKUALIGNMENT = "pku"
     PRISM = "prism"
+    SYNTH = "synth"
     OASST = "oasst"
     OASSTFL = "oasstfl"
     APOLLO = "apollo"
@@ -50,6 +53,7 @@ class DatasetNames(enum.Enum):
     OASST = "OpenAssistant/oasst2"
     OASSTFL = "OpenAssistant/oasst2"
     APOLLO = "apollo"
+    SYNTH = "synth"
 
 EXTRA_KEYS = {
     SupportedDatasets.PKUALIGNMENT: PKUALIGNMENT_EXTRA_KEYS,
@@ -57,7 +61,8 @@ EXTRA_KEYS = {
     SupportedDatasets.PRISM: PRISM_EXTRA_KEYS,
     SupportedDatasets.OASST: OASST_EXTRA_KEYS,
     SupportedDatasets.OASSTFL: OASST_EXTRA_KEYS,
-    SupportedDatasets.APOLLO: APOLLO_EXTRA_KEYS
+    SupportedDatasets.APOLLO: APOLLO_EXTRA_KEYS,
+    SupportedDatasets.SYNTH: SYNTH_EXTRA_KEYS
 }
 
 PROCESSED_DATASET_PATHS = {
@@ -66,7 +71,8 @@ PROCESSED_DATASET_PATHS = {
     SupportedDatasets.PRISM: PRISM_PROCESSED_PATH,
     SupportedDatasets.OASST: OASST_PROCESSED_PATH,
     SupportedDatasets.OASSTFL: OASSTFL_PROCESSED_PATH,
-    SupportedDatasets.APOLLO: APOLLO_PROCESSED_PATH
+    SupportedDatasets.APOLLO: APOLLO_PROCESSED_PATH,
+    SupportedDatasets.SYNTH: SYNTH_PROCESSED_PATH
 }
 
 HAS_UNDEFINED_LABELS = {
@@ -76,6 +82,7 @@ HAS_UNDEFINED_LABELS = {
     SupportedDatasets.OASST: False,
     SupportedDatasets.OASSTFL: False,
     SupportedDatasets.APOLLO: False,
+    SupportedDatasets.SYNTH: False
 }
 HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PKUALIGNMENT: True,
@@ -83,7 +90,8 @@ HAS_CUSTOM_VAL_SETS = {
     SupportedDatasets.PRISM: True,
     SupportedDatasets.OASST: True,
     SupportedDatasets.OASSTFL: True,
-    SupportedDatasets.APOLLO: True
+    SupportedDatasets.APOLLO: True,
+    SupportedDatasets.SYNTH: True
 }
 
 HAS_CUSTOM_TEST_SETS = {
@@ -92,7 +100,8 @@ HAS_CUSTOM_TEST_SETS = {
     SupportedDatasets.PRISM: True,
     SupportedDatasets.OASST: True,
     SupportedDatasets.OASSTFL: True,
-    SupportedDatasets.APOLLO: True
+    SupportedDatasets.APOLLO: True,
+    SupportedDatasets.SYNTH: True
 }
 
 ATTRIBUTES_ARMO_RM = ['helpsteer-helpfulness','helpsteer-correctness','helpsteer-coherence',
@@ -107,6 +116,7 @@ VALUES_OASST = ["quality", "nontoxicity", "humor", "helpfulness", "creativity", 
 VALUES_OASST_ORIG = ["quality", "toxicity", "humor", "helpfulness", "creativity", "violence", "not_appropriate"]
 
 VALUES_APOLLO = ["Cost_Efficiency", "Time_Efficienccy", "Comfort"]
+
 ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
 #ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]
 ATTRIBUTES_ARMO_RM_INDEX_PKU = [6, 7, 2, 3, 10] # ultrainstruct -> promptfollowing
@@ -221,6 +231,7 @@ class ContextImplementations(enum.Enum):
     BASIC = "BASIC"
     BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
+    BASIC_DETACHED = "BASIC_DETACHED"
     SINGLE_LEVEL_GMM = "GMM"
     NESTED_GMM = "NESTED_GMM"
 
@@ -231,6 +242,12 @@ class MOLossFunctionsCategories():
                                            MOLossFunctions.DEFAULT,
                                            MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
                                            MOLossFunctions.CTX_DEFAULT]
+    REQUIRES_GRAD_FOR_CONTEXT_LOSS = [
+                                           MOLossFunctions.ONLY_VALUE_SYSTEM, 
+                                           MOLossFunctions.DEFAULT,
+                                           MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
+                                           MOLossFunctions.CTX_DEFAULT
+                                           ]
     EPOCH_DEPENDENT_GRAD_REQUIREMENTS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM]
 
     REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
@@ -266,6 +283,16 @@ class MOLossManagement():
         return self._in_category(MOLossFunctionsCategories.NEEDS_NO_GRAD_EVER)
 
     def requires_grad_for_value_system_loss(self, epoch: int = 0, **kwargs) -> bool:
+        if epoch == "EVAL":
+                    return False # Assumedly, evaluation step.
+        if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
+            if epoch is None:
+                 raise ValueError("Epoch must be provided for loss functions with epoch-dependent grad requirements.")
+            if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
+                return epoch>=n_epochs_for_grounding
+        return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS)
+    def requires_grad_for_context_loss(self, epoch: int = 0, **kwargs) -> bool:
         if epoch == "EVAL":
                     return False # Assumedly, evaluation step.
         if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
@@ -361,6 +388,7 @@ def get_test_indices(dataset_name: SupportedDatasets) -> list[int] | float | Non
     if isinstance(maybe_proportion, float):
         return maybe_proportion
     else:
+        print(dataset_name)
         test_indices_path = Path(PROCESSED_DATASET_PATHS[dataset_name]) / "preprocessed" / "test_indices.json"
         if test_indices_path.exists():
             with test_indices_path.open("r", encoding="utf-8") as f:

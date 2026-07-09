@@ -1,0 +1,118 @@
+program: sweep.py
+method: bayes
+metric:
+  goal: maximize
+  name: eval/representativeness_smooth
+
+parameters:
+  use_exponential_moving_average_or_optimum_targets:
+    values:
+      - optimum
+    distribution: categorical
+  
+  use_metrics_or_losses_for_lagrange_updates:
+    values:
+      - losses
+    distribution: categorical
+  grounding_loss_tendency_update_ratio:
+    values:
+      - 0.01
+      - 0.05
+      - 0.1
+    distribution: categorical
+  layer_activation:
+    values:
+      - ReLU
+    distribution: categorical
+  vs_layer_activation:
+    values:
+      - ReLU
+      - Tanh
+      - SiLU
+    distribution: categorical
+    
+  context_implementation:
+    values:
+      - BASIC_SMOOTH
+      - BASIC
+      - BASIC_DETACHED
+      - NO_CONTEXT
+    distribution: categorical
+  per_device_train_batch_size:
+    values:
+      - 512
+      - 1024
+      - 3000
+    distribution: categorical
+  gradient_accumulation_steps:
+    max: 12
+    min: 1
+    distribution: int_uniform
+  grad_on_only_worst_value:
+    values:
+      - False
+    distribution: categorical
+  rew_center_coefficient:
+    values:
+      - 0.0
+      - 0.01
+      - 0.001
+      - 0.1
+    distribution: categorical
+  layer_normalization:
+    values:
+      - none
+      - LayerNorm
+    distribution: categorical
+  vs_layer_normalization:
+    values:
+      - none
+      - LayerNorm
+    distribution: categorical
+  zero_constraint:
+    values:
+      - True
+    distribution: categorical
+  loss_func_type:
+    values:
+      - "DEFAULT"
+    distribution: categorical
+  max_grad_norm:
+    max: 1.0
+    min: 0.01
+    distribution: uniform
+  learning_rate:
+    max: 0.01
+    min: 0.0001
+    distribution: log_uniform_values
+  grounding_learning_rate:
+    max: 0.01
+    min: 0.0001
+    distribution: log_uniform_values
+  context_learning_rate:
+    max: 0.01
+    min: 0.0001
+    distribution: log_uniform_values
+  
+  weight_decay:
+    max: 0.1
+    min: 0.00001
+    distribution: log_uniform_values
+  
+  activate_discordance_epsilon_for_loss:
+    values:
+      - False
+      - True
+    distribution: categorical
+  save_every_steps:
+    values: 
+    - 100000
+    distribution: categorical
+  eval_every_steps: 
+    values:
+      - 100000
+    distribution: categorical
+  run_name:
+    values:
+      - sweep
+    distribution: categorical

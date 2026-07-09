@@ -14,7 +14,7 @@ from huggingface_hub import hf_hub_download
 
 from datasets import load_dataset, Dataset, concatenate_datasets
 from tqdm import tqdm
-from vsllib.defines import APOLLO_PROCESSED_PATH, NO_RATING_MASK, OASST_PROCESSED_PATH, OASSTFL_PROCESSED_PATH, VALUES_APOLLO, VALUES_OASST, VALUES_OASST_ORIG, DOWNLOADED_DATASETS_PATH, DatasetNames, save_processeddataset
+from vsllib.defines import APOLLO_PROCESSED_PATH, NO_RATING_MASK, OASST_PROCESSED_PATH, OASSTFL_PROCESSED_PATH, SYNTH_PROCESSED_PATH, VALUES_APOLLO, VALUES_OASST, VALUES_OASST_ORIG, DOWNLOADED_DATASETS_PATH, DatasetNames, save_processeddataset
 
 load_dotenv()
 
@@ -55,8 +55,10 @@ def process_dataset() -> tuple[pd.DataFrame, Path]:
     pdrows = pd.DataFrame(rows)
     pdrows = pdrows.reset_index(drop=True)
      # ID,choice,tt1,tc1,hw1,ch1,tt2,tc2,hw2,ch2,hh_inc_abs,car_availability,commute,shopping,business,leisure
-
-    return pdrows
+    # shuffle the rows to avoid any ordering bias:
+    pdrows_sh = pdrows.sample(frac=1, random_state=42).reset_index(drop=True)
+    assert len(pdrows_sh) == len(pdrows), f"Shuffled rows length {len(pdrows_sh)} does not match original rows length {len(pdrows)}"
+    return pdrows_sh
 
 def process_line(line: dict, i) -> dict:
     # ID,choice,tt1,tc1,hw1,ch1,tt2,tc2,hw2,ch2,hh_inc_abs,car_availability,commute,shopping,business,leisure
@@ -73,7 +75,7 @@ def process_line(line: dict, i) -> dict:
 
     instance["context_features"] = np.array([line["hh_inc_abs_NORM"],line["car_availability"],line["commute"],line["shopping"],line["business"],line["leisure"]], dtype=np.float32)
    # print(instance["context_features"] )
-    use_normalized_features = "scale"
+    use_normalized_features = False
     if not use_normalized_features:
         instance["grounding_features_1"] = np.array([line["tt1"], line["tc1"], line["hw1"], line["ch1"]], dtype=np.float32)
 

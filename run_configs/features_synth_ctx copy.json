@@ -1,8 +1,8 @@
 {
     "task_type": "feature_based",
     "model_name": "mlp",
-    "dataset": "apollo",
-    "context_implementation": "BASIC_SMOOTH",
+    "dataset": "synth",
+    "context_implementation": "BASIC_DETACHED",
     "max_value_systems": 10,
     "max_contexts": 10,
     "gather_train_metrics": true,
@@ -25,7 +25,7 @@
     "layer_normalization": "none",
     "final_layer_activation": "none",
 
-    "vs_hidden_size": 20,
+    "vs_hidden_size": 10,
     "vs_num_hidden_layers": 2,
     "vs_layer_dropout": 0.0,
     "vs_layer_activation": "Tanh",
@@ -41,7 +41,7 @@
     "context_learning_rate": 0.0003,
     "lagrange_learning_rate": 0.1,
     "grounding_loss_tendency_update_ratio": 0.1,
-    "max_grad_norm": 0.1,
+    "max_grad_norm": 10.0,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
     "use_exponential_moving_average_or_optimum_targets": "optimum",
     "grad_on_only_worst_value": false,

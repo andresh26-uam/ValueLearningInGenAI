@@ -3,7 +3,7 @@
     "dataset": "pku",
     "gather_train_metrics": true,
 
-    "context_implementation": "NO_CONTEXT",
+    "context_implementation": "BASIC_SMOOTH",
     "max_value_systems": 10,
     "max_contexts": 10,
 
@@ -28,16 +28,16 @@
     "vs_hidden_size": 1024,
     "vs_num_hidden_layers": 2,
     "vs_layer_dropout": 0.0,
-    "vs_layer_activation": "Tanh",
+    "vs_layer_activation": "ReLU",
 
     "use_validation_for_tendencies": false,
     "update_tendencies_every_n_steps": 20,
 
     "rew_center_coefficient": 0.01,
     "layer_normalization": "none",
-    "learning_rate": 0.0001,
+    "learning_rate": 0.01,
     "grounding_learning_rate": 0.0001,
-    "context_learning_rate": 0.0001,
+    "context_learning_rate": 0.001,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,
     "max_grad_norm": 0.1,

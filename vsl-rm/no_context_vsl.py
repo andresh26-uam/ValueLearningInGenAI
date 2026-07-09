@@ -216,7 +216,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH] :
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH, ContextImplementations.BASIC_DETACHED]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(

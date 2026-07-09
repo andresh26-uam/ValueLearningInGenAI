@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 CPU_LAUNCHER = REPO_ROOT / "cpu_from_json.sh"
 SWEEPS_ROOT = REPO_ROOT / "sweeps"
 DEFAULT_SWEEP_CONFIG = REPO_ROOT / "run_configs" / "sweep_default.yaml"
-
+SCRIPT = "vsl-rm/no_context_vsl.py"
 for candidate in (
     REPO_ROOT / "vsl-rm",
     Path.cwd() / "vsl-rm",
@@ -117,10 +117,12 @@ def main(default_config_file: str, dataset: str, rs: np.random.RandomState, num_
         discordance_epsilon = 0.25
     elif dataset == "pku":
         discordance_epsilon = 0.5
+    elif dataset == "apollo":
+        discordance_epsilon = 0.04
     else:
         raise ValueError(f"Unsupported dataset: {dataset}")
     completed = subprocess.run(
-        ["bash", str(CPU_LAUNCHER), str(merged_config_path), f"--dataset={dataset}", f"--discordance_epsilon={discordance_epsilon}", f"--do_save={False}", f"--do_checkpointing={False}", f"--num_train_epochs={num_train_epochs}", f"--seed={rs.randint(0, 1000000)}"],
+        ["bash", str(CPU_LAUNCHER), SCRIPT, str(merged_config_path), f"--dataset={dataset}", f"--discordance_epsilon={discordance_epsilon}", f"--do_save={False}", f"--do_checkpointing={False}", f"--num_train_epochs={num_train_epochs}", f"--seed={rs.randint(0, 1000000)}"],
         env=subprocess_env,
         check=False,
     )
@@ -152,7 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--dataset",
         default="ultra",
-        choices=["ultra", "pku"],
+        choices=["ultra", "pku", "apollo"],
         help="Dataset to use for the sweep.",
     )
     parser.add_argument(

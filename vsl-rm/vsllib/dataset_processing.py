@@ -169,6 +169,7 @@ class BasePairwisePreferenceDataset():
                 self.data = load_from_disk(preprocessed_dataset_path)
                 print(f"Loaded dataset from {preprocessed_dataset_path}")
             else:
+                print(postprocessed_dataset_output_path)
                 try:
                     self.data = load_from_disk(postprocessed_dataset_output_path)
                     print(f"Loaded embedded/tokenized dataset from {postprocessed_dataset_output_path}")
