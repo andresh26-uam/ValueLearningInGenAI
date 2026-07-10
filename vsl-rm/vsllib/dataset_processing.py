@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from pyexpat import model
 import shutil
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
@@ -418,6 +418,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                             batch_size=batch_size,
                             num_proc=num_proc
                         )
+        return self.data
                 
     def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
     

@@ -557,7 +557,7 @@ def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return flat
 
 def entropy(p, eps=1e-12):    
-        p = np.asarray(p)    
+        p = p.cpu().detach().numpy()    
         p = np.clip(p, eps, 1.0)  # avoid log(0)    
         return -np.sum(p * np.log(p))
 

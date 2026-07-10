@@ -107,7 +107,7 @@ class LinearAlignmentLayer(th.nn.Linear, AlignmentLayer):
 
     def get_value_system_info(self) -> List[float]:
         with th.no_grad():
-            return self.get_alignment_layer().detach().clone().view(-1).cpu().tolist()
+            return self.get_alignment_layer().detach().view(-1).cpu().tolist()
 
     
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
@@ -166,14 +166,14 @@ class CtxData:
     vs_pred_loss: Optional[th.Tensor] = None
 
     @staticmethod
-    def from_previous(other: CtxData, **extra_kwargs) -> CtxData:
+    def from_previous(other: Self, **extra_kwargs) -> Self:
         return replace(other, **extra_kwargs)
     
     def to_dict(self) -> Dict:    
         return {f.name: getattr(self, f.name) for f in fields(self) if getattr(self, f.name) is not None}
     
     @staticmethod
-    def from_dict(dict_info: dict, to_tensor: bool = True) -> CtxData:
+    def from_dict(dict_info: dict, to_tensor: bool = True) -> Self:
         constructed_fields = dict()
         for k, v in dict_info.items():
             #print(k,v, fields(CtxData))
@@ -208,7 +208,7 @@ class CtxStatistics:
     def spread_factor(self) -> int:
         return entropy(self.frequencies) if self.frequencies is not None else 0.0
     
-    def to(self, device)->CtxStatistics:
+    def to(self, device)->Self:
         self.centroids = self.centroids.to(device)
         self.deviations = self.deviations.to(device)
         self.frequencies = self.frequencies.to(device)
@@ -216,16 +216,16 @@ class CtxStatistics:
     def to_dict(self) -> Dict:    
         return {f.name: getattr(self, f.name) for f in fields(self)}
     
-    def cpu(self)->CtxStatistics:
+    def cpu(self)->Self:
         return self.to("cpu")
-    def update_running_average(self, metrics: CtxStatistics):
+    def update_running_average(self, metrics: Self):
         if self.centroids is None:
             self.update_full(metrics)
         else:
             self.centroids = self.centroids*self.update_factor + metrics.centroids*(1-self.update_factor)
             self.deviations= self.deviations*self.update_factor + metrics.deviations*(1-self.update_factor)
             self.frequencies = self.frequencies*self.update_factor + metrics.frequencies*(1-self.update_factor)
-    def update_full(self, metrics: CtxStatistics):
+    def update_full(self, metrics: Self):
         
         self.centroids = metrics.centroids
         self.deviations = metrics.deviations
@@ -288,7 +288,7 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
         assert vs_weights.shape[0] == grounding.shape[0]
         return (grounding * vs_weights).sum(dim=1, keepdim=True), {"ctx": ctx_data.to_dict()}
 
-    def get_value_system_info(self) -> Dict[Dict]:
+    def get_value_system_info(self) -> Dict[str, Dict]:
         value_system_ids, value_systems = self.get_value_systems()
         per_vs_contexts = {
 
@@ -298,7 +298,7 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
             vs_tuple = transform_weights_to_tuple(vc)
             data={
                 "contexts": contexts_to_vc,
-                "share_of_data": float(th.sum(self.running_context_training_data.frequencies[contexts_to_vc]).numpy()) if self.running_context_training_data.frequencies is not None else "UNK"}
+                "share_of_data": float(th.sum(self.running_context_training_data.frequencies[contexts_to_vc]).cpu().numpy()) if self.running_context_training_data.frequencies is not None else "UNK"}
             for iv, v in enumerate(vs_tuple):
                 data[f"vs_w{iv}"] = v
             per_vs_contexts[f"vs_{vi}"] = data
@@ -334,9 +334,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
     def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_context: bool = False, **kwargs: Any) -> None:
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values,  **kwargs)
         
-        print("HS", ctx_hidden_sizes)
-        print("Intermediate", ctx_intermediate_activation)
-        print("DTYPE", dtype)
+        
         
         self.context_logprobabilities = nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
@@ -349,7 +347,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             device=device,
             dtype=dtype,
         ))
-        print("CTX PARAMS", [p.dtype for p in self.context_logprobabilities.parameters()])
+        #print("CTX PARAMS", [p.dtype for p in self.context_logprobabilities.parameters()])
         #exit(0)
         self.log_softmaxctx = th.nn.LogSoftmax(dim=1)
         assert self.num_value_systems == self.num_contexts 
@@ -415,7 +413,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             freqs = counts/len(context_data.context_features)
             #print("F??", freqs, len(context_data.context_features))
             value_system_indices_all = list(range(self.num_contexts))
-            freqs_all = th.zeros((len(value_system_indices_all),),dtype=th.float32)
+            freqs_all = th.zeros((len(value_system_indices_all),),dtype=th.float32).to(context_data.context_features.device)
             freqs_all[values] = freqs
             centroids_new = th.stack([th.mean(context_data.context_features[context_data.ctx_assignments==vi],dim=0) for vi in values] )
             deviations_new = th.stack([th.std(context_data.context_features[context_data.ctx_assignments==vi], dim=0) for vi in values] )
@@ -424,25 +422,26 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
                 centroids = deepcopy(statistics_before.centroids)
                 deviations = deepcopy(statistics_before.deviations)
             else:
-                centroids = th.zeros((self.num_contexts, *(centroids_new[0].shape)), dtype=centroids_new.dtype)
-                deviations = th.zeros((self.num_contexts, *(deviations_new[0].shape)), dtype=deviations_new.dtype)
+                centroids = th.zeros((self.num_contexts, *(centroids_new[0].shape)), dtype=centroids_new.dtype, device=centroids_new.device)
+                deviations = th.zeros((self.num_contexts, *(deviations_new[0].shape)), dtype=deviations_new.dtype, device=deviations_new.device)
             
             centroids[values] = centroids_new
             deviations[values] = deviations_new
             
 
             return CtxStatistics(
-                centroids=centroids.detach().clone(),
-                deviations=deviations.detach().clone(),
-                frequencies=freqs_all.detach().clone(),
+                centroids=centroids.detach(),
+                deviations=deviations.detach(),
+                frequencies=freqs_all.detach(),
                 update_factor=update_factor
-            ).cpu()
+            )
 
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         #print("HS DTYPE", hidden_state.dtype)
-        
+        #print("DEVICE h", hidden_state.device, "ctx", context_data.context_features.device, "vs", self.context_to_vslogweights_matrix.device)
+        #print("Device ", context_data.context_logprobs.device)
         if self.detach_context:
-            log_ctx_probs = context_data.context_logprobs.detach().clone()
+            log_ctx_probs = context_data.context_logprobs.detach()
         else:
             log_ctx_probs = context_data.context_logprobs
             
@@ -462,12 +461,14 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         """combination = th.stack([
             th.exp(ls_ctx_probs[:,i].repeat(self.num_values,1) + ls_vs_weights[i,:].unsqueeze(1))
          for i in range(self.num_value_systems)]).sum(dim=0).T
-"""
+""" 
+        #print("LS CTX", ls_ctx_probs.device, "LS VS", ls_vs_weights.device)
         vs_predicted = th.exp(ls_ctx_probs.T.unsqueeze(2) +   # (num_value_systems, batch, 1)   
                                 ls_vs_weights.unsqueeze(1)      # (num_value_systems, 1, num_values)
                                 ).sum(dim=0)                       # (batch, num_values)
+        #print("vs pred", vs_predicted.device)
         assert vs_predicted.shape == (hidden_state.shape[0], self.num_values)
-        assert th.allclose(th.sum(vs_predicted, dim=1), th.ones((hidden_state.shape[0],)), atol=1e-5, rtol=0.01)
+        assert th.allclose(th.sum(vs_predicted, dim=1), th.ones((hidden_state.shape[0],)).to(vs_predicted.device), atol=1e-5, rtol=0.01)
         
         with th.no_grad():
                 vs_per_prob_index = th.softmax(log_value_systems, dim=1)
@@ -485,8 +486,8 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
                 #print("TYPE PREDICTIONS???? 5", should_be.dtype)
                 
                 
-                th.testing.assert_close(vs_predicted, should_be, atol=1e-4,rtol=0.03)
-                th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones(hidden_state.shape[0],), atol=1e-4, rtol=0.03)
+                th.testing.assert_close(vs_predicted, should_be.to(dtype=vs_predicted.dtype), atol=1e-4,rtol=0.03)
+                th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones(hidden_state.shape[0], dtype=vs_predicted.dtype).to(hidden_state.device), atol=1e-4, rtol=0.03)
         enriched_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted, ctx_predicted = context_data.ctx_assignments)
         
         return vs_predicted, enriched_data
@@ -1163,11 +1164,14 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
 
 def context_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
     missing_mask = get_missing_rating_mask(
-        target_probs_p) if check_undefined_label and missing_mask is None else missing_mask
-
+        target_probs_p[..., -1]) if check_undefined_label and missing_mask is None else missing_mask
+    print("shapes", logits_p.shape, target_probs_p.shape, missing_mask.shape, missing_mask.sum())
+    
     if check_undefined_label:
-        logits = logits_p.masked_fill(missing_mask, 0.0)
-        target_probs = target_probs_p.masked_fill(missing_mask, 0.5)
+        logits_last = logits_p[..., -1].masked_fill(missing_mask, 0.0)
+        target_probs_last = target_probs_p[..., -1].masked_fill(missing_mask, 0.5)
+        logits = th.cat((logits_p[..., :-1], logits_last.unsqueeze(-1)), dim=-1)
+        target_probs = th.cat((target_probs_p[..., :-1], target_probs_last.unsqueeze(-1)), dim=-1)
     else:
         logits = logits_p
         target_probs = target_probs_p
@@ -1395,7 +1399,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
                                                activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     
     ctx_loss = 0
-    if ContextImplementations(config.context_implementation) != ContextImplementations.NO_CONTEXT:
+    if ContextImplementations(config.context_implementation) != ContextImplementations.NO_CONTEXT and False:
         if 'ctx' not in others.keys():
                 raise ValueError("Program expected a CtxData object returned by the forward method.")
         if config.loss_management.requires_grad_for_context_loss(epoch=epoch):
@@ -1606,7 +1610,7 @@ class MORMForClassification(PreTrainedModel):
         self.training_variables.requires_grad_(False)
         
     def train_initialization(self, train_subdataset: Dataset):
-        #return
+        return
         prev_config_loss_func_type = self.config.loss_func_type
         self.config.loss_func_type = MOLossFunctions.DEFAULT.value
         dataset_ctxs = np.array(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name])
@@ -1728,9 +1732,7 @@ class MORMForClassification(PreTrainedModel):
         targets = [dataset_score[~missing_mask][pred_valid==c] for c in range(len(kmeans.cluster_centers_))]
         ctx_features_per_cluster = [dataset_ctxs_th[~missing_mask][pred_valid==c] for c in range(len(kmeans.cluster_centers_))]
         
-        print("PARAMS CTX", list(self.value_system_layer.context_logprobabilities.parameters())[0:2])
-        print("MATRIX1", self.value_system_layer.context_to_vslogweights_matrix)
-        print("MATRIX1", self.value_system_layer.get_value_systems())
+        
         for t in pbar:
             loss_total = 0
             optimizer.zero_grad()
@@ -1756,15 +1758,15 @@ class MORMForClassification(PreTrainedModel):
             loss_total.backward()
             optimizer.step()
             pbar.set_postfix({'loss': loss_total.item()})
-        print("PARAMS CTX", list(self.value_system_layer.context_logprobabilities.parameters())[0:2])
-        print("MATRIX2", self.value_system_layer.context_to_vslogweights_matrix)
-        print("MATRIX2", self.value_system_layer.get_value_systems())
+        #print("PARAMS CTX", list(self.value_system_layer.context_logprobabilities.parameters())[0:2])
+        #print("MATRIX2", self.value_system_layer.context_to_vslogweights_matrix)
+        #print("MATRIX2", self.value_system_layer.get_value_systems())
         
         self.train(False)
 
     
 
-    def create_training_variables(self, config: MORMForClassificationConfig, model_device: th.Device) -> None:
+    def create_training_variables(self, config: MORMForClassificationConfig, model_device: str) -> None:
         training_variables_dtype = th.float32
         self.training_variables = MORMTrainingVariables(n_values=config.num_values, initial_lambda=1.0,
                                                         device=model_device, dtype=training_variables_dtype, grounding_loss_tendency_update_ratio=config.grounding_loss_tendency_update_ratio,
@@ -1830,7 +1832,7 @@ class MORMForClassification(PreTrainedModel):
                 num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
         else:
             raise NotImplementedError(f"This type of context implementation is not implemented yet. {config.context_implementation}")
-    def create_reward_networks(self, config: MORMForClassificationConfig, model_device: th.Device):
+    def create_reward_networks(self, config: MORMForClassificationConfig, model_device: str):
         if len(config.hidden_sizes) > 0:
                 # This constructs one NN per value to avoid that changing one value loss parameter chagnes also affect others.
             constructor = self.construct_reward_head

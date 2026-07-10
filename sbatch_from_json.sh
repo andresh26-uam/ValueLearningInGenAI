@@ -2,10 +2,13 @@
 set -euo pipefail
 
 scriptvsl="${1}"
+echo scriptvsl: $scriptvsl
 config_file="${2}"
+echo config_file: $config_file
 if [[ $# -gt 0 ]]; then
-    shift
+    shift 2
 fi
+
 
 if [[ ! -f "$config_file" ]]; then
     echo "Config file not found: $config_file" >&2
@@ -29,10 +32,11 @@ while [[ $# -gt 0 ]]; do
             extra_args+=("$1")
             ;;
         *)
+            echo $1
             extra_args+=("$1")
             ;;
     esac
     shift
 done
 
-sbatch --gpus="$gpu_request" sbatch_script.sh $script_vsl --config_file="$config_file" "${extra_args[@]}"
+sbatch --gpus="$gpu_request" sbatch_script.sh $scriptvsl --config_file="$config_file" "${extra_args[@]}"

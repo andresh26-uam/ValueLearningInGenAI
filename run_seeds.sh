@@ -1,8 +1,8 @@
 #!/bin/bash
 
-GPUS="H100:1"
+GPUS="L40S:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
-CPU=True
+CPU=False
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
@@ -14,7 +14,7 @@ fi
 #DATASET=ultra
 #CONFIG=run_configs/smol_ctx_linear.json
 DATASET=ultra
-CONFIG=run_configs/smol_ultra_ctx.json
+CONFIG=run_configs/llama_ultra_ctx.json
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
 if [[ "$DATASET" == "ultra" ]]; then
@@ -53,7 +53,9 @@ if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
 elif [[ "$CONFIG" == "run_configs/features_synth_ctx.json" ]]; then
     NAME=LinearGR_Synth1_BAsicDetached_NotSharp
 elif [[ "$CONFIG" == "run_configs/smol_ultra_ctx.json" ]]; then
-    NAME=LinearGR_ultra_NO_INIT_BASIC_SMOOTH
+    NAME=LinearGR_smolultra_NO_INIT_NO_CTX_BASIC_SMOOTH
+elif [[ "$CONFIG" == "run_configs/llama_ultra_ctx.json" ]]; then
+    NAME=LinearGR_llamaultra_NO_INIT_NO_CTX_BASIC_SMOOTH
 elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
@@ -88,6 +90,6 @@ echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --debug
+  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --recalculate_features
 done
 

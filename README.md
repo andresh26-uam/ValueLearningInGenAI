@@ -27,7 +27,7 @@ Trained models will be published shortly.
 ### Preprocessing preference datasets
 We need to preprocess the datasets before training, and calculate the last hidden states of every prompt to speed up the training process. WARNING: DO NOT USE ACCELERATE HERE!!
 - `python -O vsl-rm/pkualignment_preprocess.py` OR `python vsl-rm/ultrafeedback_preprocess.py` (These will parse the datasets into a common format for training purposes)
-- `python -O vsl-rm/no_context_vsl.py --do_train=False --use_embeddings --recalculate_embeddings --retokenize --dataset=<ultra_or_pku>` (This will generate the embeddings of each prompt-response pair and save them for training)
+- `python -O vsl-rm/no_context_vsl.py --do_train=False --use_extracted_features --recalculate_features --repostprocess --dataset=<ultra_or_pku>` (This will generate the embeddings of each prompt-response pair and save them for training)
 
 ### Training
 We use SLURM commands in our available setup, but you can use this general command instead. Have the environment variable PYTHONOPTIMIZE=1 to avoid assertions and substantially decrease runtime.

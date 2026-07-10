@@ -416,4 +416,5 @@ def save_processeddataset(processed_path: str, ds: Dataset, validation_indices: 
         with test_indices_path.open("w", encoding="utf-8") as f:
             json.dump(test_indices, f)
     
-    assert set(validation_indices).isdisjoint(set(test_indices))
+    if validation_indices is not None:
+        assert set(validation_indices).isdisjoint(set(test_indices))
