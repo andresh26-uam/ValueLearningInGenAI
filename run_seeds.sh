@@ -2,7 +2,9 @@
 
 GPUS="L40S:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
-CPU=False
+CPU=True
+DEBUG="--debug"
+DEBUG=""
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
@@ -13,12 +15,20 @@ fi
 
 #DATASET=ultra
 #CONFIG=run_configs/smol_ctx_linear.json
-DATASET=ultra
-CONFIG=run_configs/llama_ultra_ctx.json
+
+DATASET=pku
+CONFIG=run_configs/llama_ctx_linear.json
+CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
+DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
+CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
+NORM=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("layer_normalization", "none"))' "$CONFIG")
+
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
 if [[ "$DATASET" == "ultra" ]]; then
+
   DISCORDANCE_EPSILON=0.25
+  training_initialization_data_size=5000
   NUM_TRAIN_EPOCHS=10
   if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
     NUM_TRAIN_EPOCHS=15
@@ -26,6 +36,7 @@ if [[ "$DATASET" == "ultra" ]]; then
     fi
 elif [[ "$DATASET" == "pku" ]]; then
   DISCORDANCE_EPSILON=0.5
+  training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=100
   if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
     NUM_TRAIN_EPOCHS=150
@@ -33,10 +44,12 @@ elif [[ "$DATASET" == "pku" ]]; then
   fi
 elif [[ "$DATASET" == "apollo" ]]; then
   DISCORDANCE_EPSILON=0.04
+  training_initialization_data_size=2000
   NUM_TRAIN_EPOCHS=5000
   EVAL_EVERY_STEPS="--eval_every_steps=200"
 elif [[ "$DATASET" == "synth" ]]; then
   DISCORDANCE_EPSILON=-1
+  training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=5000
   EVAL_EVERY_STEPS="--eval_every_steps=100"
 
@@ -52,10 +65,8 @@ if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
     NAME=LinearGR_NOTNORMED_BASICSMOOTH_10_Sharp_slow
 elif [[ "$CONFIG" == "run_configs/features_synth_ctx.json" ]]; then
     NAME=LinearGR_Synth1_BAsicDetached_NotSharp
-elif [[ "$CONFIG" == "run_configs/smol_ultra_ctx.json" ]]; then
-    NAME=LinearGR_smolultra_NO_INIT_NO_CTX_BASIC_SMOOTH
-elif [[ "$CONFIG" == "run_configs/llama_ultra_ctx.json" ]]; then
-    NAME=LinearGR_llamaultra_NO_INIT_NO_CTX_BASIC_SMOOTH
+elif [[ "$CONFIG" == "run_configs/llama_ctx_linear.json" ]]; then
+    NAME=LlamaCtxVSLRMv3
 elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
@@ -78,18 +89,18 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv2
+  NAME=SmolCtxVSLRMv3
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test
 fi
 
-
+NAME="${NAME}_${CTX_IMPLEMENTATION}_INITCTX_${DOINIT}_CTX_${CTX_COEFF}_NORM_${NORM}"
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --recalculate_features
+  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --training_initialization_data_size=$training_initialization_data_size $DEBUG
 done
 

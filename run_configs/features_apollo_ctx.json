@@ -3,6 +3,7 @@
     "model_name": "mlp",
     "dataset": "apollo",
     "context_implementation": "BASIC_SMOOTH",
+    "do_initialization": true,
     "max_value_systems": 10,
     "max_contexts": 10,
     "gather_train_metrics": true,

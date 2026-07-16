@@ -1217,8 +1217,8 @@ class CtxMORewardTrainer(MORewardTrainer):
     
 
     def train(self, resume_from_checkpoint: str | bool | None = None, trial: Any | Dict[str, Any] | None = None, ignore_keys_for_eval: list[str] | None = None) -> TrainOutput:
-        
-        if resume_from_checkpoint is None and self.accelerator.is_main_process:
-            self.train_initialization()
+        if self.model.config.do_initialization:
+            if resume_from_checkpoint is None and self.accelerator.is_main_process:
+                self.train_initialization()
 
         return super().train(resume_from_checkpoint, trial, ignore_keys_for_eval)

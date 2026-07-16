@@ -232,7 +232,8 @@ class BasePairwisePreferenceDataset():
             self.data: DatasetDict = self.data.train_test_split(test_size=test_proportion_or_indices, seed=split_seed) # pyright: ignore[reportAttributeAccessIssue]
             self.train_dataset, self.test_dataset = self.data['train'], self.data['test']
             self.train_dataset = self.train_dataset.train_test_split(test_size=eval_proportion_or_indices, seed=split_seed)
-            self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']	
+            self.train_dataset, self.eval_dataset = self.train_dataset['train'], self.train_dataset['test']
+	
         else:
             print("Using custom test and eval indices for dataset splitting.")
             #print(f"Test indices: {test_proportion_or_indices}")
@@ -247,6 +248,9 @@ class BasePairwisePreferenceDataset():
             print(f"Train dataset size: {len(self.train_dataset)}")
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
+        #self.train_dataset = self.train_dataset.select(range(min(len(self.train_dataset), 200)))
+        #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
+        #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
         

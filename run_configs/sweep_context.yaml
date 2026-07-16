@@ -24,6 +24,12 @@ parameters:
     values:
       - ReLU
     distribution: categorical
+  do_initialization: 
+    values:
+    - true
+    - false
+    distribution: categorical
+
   vs_layer_activation:
     values:
       - ReLU

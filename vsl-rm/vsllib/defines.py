@@ -388,7 +388,6 @@ def get_test_indices(dataset_name: SupportedDatasets) -> list[int] | float | Non
     if isinstance(maybe_proportion, float):
         return maybe_proportion
     else:
-        print(dataset_name)
         test_indices_path = Path(PROCESSED_DATASET_PATHS[dataset_name]) / "preprocessed" / "test_indices.json"
         if test_indices_path.exists():
             with test_indices_path.open("r", encoding="utf-8") as f:

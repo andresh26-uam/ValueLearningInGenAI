@@ -240,6 +240,7 @@ class ScriptArguments:
     )
 
     do_train: Optional[bool] = field(default=True)
+    ctx_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
 
     hidden_size: Optional[int] = field(
         default=1024, metadata={"help": "The hidden size of the grounding MLP."})
@@ -416,6 +417,10 @@ class ScriptArguments:
         default=1000,
         metadata={"help": "The maximum number of examples to use for training initialization step when assigning value systems to contexts. If the training dataset is larger than this, we will sample a subset of this size for the k-means clustering."},
     )
+    do_initialization: Optional[bool] = field(
+        default=True,
+        metadata={"help": "Whether to do the training initialization step when assigning value systems to contexts. If False, we will skip this step and use the initial value system assignments."},
+    )
     context_implementation: Optional[str] = field(
         default="NO_CONTEXT",
         metadata={"help": "Choose between ContextImplementations in defines.py"}
@@ -565,7 +570,6 @@ def kmeans_clustering(dataset_ctxs: np.ndarray, K=None, max_iter=10000)-> KMeans
         
             
         assert K is not None
-        print(dataset_ctxs.shape)
         if dataset_ctxs.shape[0] == 0:
             raise ValueError("No context embeddings were found in the dataset, so KMeans cannot be fitted.")
 
@@ -713,7 +717,7 @@ def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "te
     path.parent.mkdir(parents=True, exist_ok=True)
 
     fieldnames = sorted(metrics.keys())
-    print(f"Writing metrics", metrics)
+    #print(f"Writing metrics", metrics)
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

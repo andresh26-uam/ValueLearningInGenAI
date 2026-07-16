@@ -1,7 +1,10 @@
 {
-    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
-    "dataset": "ultra",
+    "model_name": "RLHFlow/ArmoRM-Llama3-8B-v0.1",
+    "dataset": "pku",
     "context_implementation": "BASIC_SMOOTH",
+    "do_initialization": false,
+    "ctx_coefficient": 100.0,
+    "training_initialization_data_size": 5000,
     "max_value_systems": 10,
     "max_contexts": 10,
     "gather_train_metrics": true,
@@ -15,32 +18,32 @@
     "gradient_accumulation_steps": 4,
     "lambda_decay": 0.001,
 
-    "activate_discordance_epsilon_for_loss": false,
+    "activate_discordance_epsilon_for_loss": true,
 
     "hidden_size": 4,
     "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
-    "layer_activation": "Tanh",
+    "layer_activation": "none",
     "layer_normalization": "none",
     "final_layer_activation": "none",
 
     "vs_hidden_size": 1024,
-    "vs_num_hidden_layers": 1,
+    "vs_num_hidden_layers": 3,
     "vs_layer_dropout": 0.0,
-    "vs_layer_activation": "Tanh",
+    "vs_layer_activation": "SiLU",
     
 
     "use_validation_for_tendencies": false,
     "update_tendencies_every_n_steps": 20,
 
-    "rew_center_coefficient": 0.000,
+    "rew_center_coefficient": 0.01,
     
-    "learning_rate": 0.0003,
+    "learning_rate": 0.001,
     "grounding_learning_rate": 0.0003,
     "context_learning_rate": 0.0003,
-    "lagrange_learning_rate": 0.1,
+    "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,
-    "max_grad_norm": 10.0,
+    "max_grad_norm": 0.1,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
     "use_exponential_moving_average_or_optimum_targets": "optimum",
     "grad_on_only_worst_value": false,
@@ -48,7 +51,7 @@
     "use_ideal_grounding_model": false,
     "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
-    "weight_decay": 0.01,
+    "weight_decay": 0.003,
     "bf16": false,
     "num_train_epochs": 1000,
     "gradient_checkpointing": false,
@@ -57,5 +60,5 @@
     "save_every_steps": 1000000000,
     "eval_every_steps": 100,
 
-    "run_name": "CtxApollo"
+    "run_name": "ctx"
 }

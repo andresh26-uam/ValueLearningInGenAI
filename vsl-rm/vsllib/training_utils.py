@@ -117,7 +117,8 @@ class MORewardDataCollator:
             key: th.stack([th.tensor(feature[key],dtype=self.dtype) for feature in merged_features])
             for key in merged_features[0]
         }
-        
+        if __debug__:
+            print("INPUT", batch["context"][0])
         
         
         batch["return_loss"] = True
@@ -475,14 +476,14 @@ class MORMTrainingVariables(th.nn.Module):
                 
                 print("LAGRANGE MULTIPLIERS", self.lagrange_multipliers)
                 print("VS COEFF", self.vs_coeff)
-                print("MULTS", self.get_multipliers(used_only=False))
+                #print("MULTS", self.get_multipliers(used_only=False))
                 
                 print("---------")
-                print("CHR TENDENCY", coherences_tendency)
-                print("REPR TENDENCY", representativeness_tendency)
-                print("GROUNDING LOSSES TENDENCY", grounding_loss_tendency)
-                print("VS LOSSES TENDENCY", vs_loss_tendency)
-                print("---------")
+                #print("CHR TENDENCY", coherences_tendency)
+                #print("REPR TENDENCY", representativeness_tendency)
+                #print("GROUNDING LOSSES TENDENCY", grounding_loss_tendency)
+                #print("VS LOSSES TENDENCY", vs_loss_tendency)
+                #print("---------")
             
             """with th.no_grad():
                 if add_vs_loss and need_backward:
@@ -511,10 +512,7 @@ class MORMTrainingVariables(th.nn.Module):
     def post_optimizer_step(self) -> None:
         
         self.zero_grad(set_to_none=True)
-        if __debug__:
-            print("--------")
-            print("OPT STEPS", self.training_steps_so_far, self.update_tendencies_every_n_steps)
-            print("--------")
+        
         
         self.training_steps_so_far +=1
         #self.lagrange_multipliers.data.clamp_(min=0.1)

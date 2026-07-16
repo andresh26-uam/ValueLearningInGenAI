@@ -138,6 +138,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         mo_config = MORMForClassificationConfig(
+            do_initialization=script_args.do_initialization,
+            ctx_coefficient=script_args.ctx_coefficient,
             training_initialization_data_size=script_args.training_initialization_data_size,
             max_contexts=script_args.max_contexts,
             max_value_systems=script_args.max_value_systems,

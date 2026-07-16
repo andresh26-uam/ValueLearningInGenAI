@@ -1,7 +1,9 @@
 {
-    "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
-    "dataset": "ultra",
-    "context_implementation": "BASIC_SMOOTH",
+    "task_type": "feature_based",
+    "model_name": "mlp",
+    "dataset": "synth",
+    "context_implementation": "BASIC_DETACHED",
+    "do_initialization": true,
     "max_value_systems": 10,
     "max_contexts": 10,
     "gather_train_metrics": true,
@@ -10,9 +12,9 @@
     "use_cpu": false,
     
     "deepspeed": null,
-    "per_device_train_batch_size": 32,
-    "per_device_eval_batch_size": 32,
-    "gradient_accumulation_steps": 4,
+    "per_device_train_batch_size": 512,
+    "per_device_eval_batch_size": 512,
+    "gradient_accumulation_steps": 1,
     "lambda_decay": 0.001,
 
     "activate_discordance_epsilon_for_loss": false,
@@ -24,8 +26,8 @@
     "layer_normalization": "none",
     "final_layer_activation": "none",
 
-    "vs_hidden_size": 1024,
-    "vs_num_hidden_layers": 1,
+    "vs_hidden_size": 10,
+    "vs_num_hidden_layers": 2,
     "vs_layer_dropout": 0.0,
     "vs_layer_activation": "Tanh",
     
