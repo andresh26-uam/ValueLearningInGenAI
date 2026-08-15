@@ -434,6 +434,7 @@ def main() -> None:
         test_proportion_or_indices = get_test_indices(script_args.dataset)
         eval_proportion_or_indices = get_validation_indices(script_args.dataset)
 
+        
         if script_args.task_type == "nlp_based":
             dc = MORewardDataCollatorWithPadding(
             tokenizer=tokenizer,
@@ -442,7 +443,9 @@ def main() -> None:
             use_embeddings=bool(script_args.use_extracted_features),
         )
             embed_model = model.full_model if script_args.use_extracted_features else None
-
+            print("EMBED MODEL:", embed_model)
+            print("FEATURES:", script_args.use_extracted_features)
+            input()
             dataset = PairwisePreferenceDataset(
                             train_path,
                             tokenizer,
@@ -464,8 +467,8 @@ def main() -> None:
             dataset = FeatureBasedPreferenceDataset(train_path, 
                                                     from_disk=True,
                                                 extra_keep_keys=extra_keep_keys,
-                                                repostprocess=script_args.repostprocess,
-                                                recalculate_features=script_args.recalculate_features,
+                                                repostprocess=False,
+                                                recalculate_features=False,
                                                 use_extracted_features=script_args.use_extracted_features,
                                                 
                                                 collator=dc,

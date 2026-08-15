@@ -186,6 +186,7 @@ class BasePairwisePreferenceDataset():
         
         
         if ((self.data[0].get("embedding_1", None) is None) or repostprocess) and use_extracted_features:
+            print("KEYS?", self.data[0].keys())
             print("RECALCULATING EMBEDDINGS WITH MODEL")
             recalculate_features = True
 

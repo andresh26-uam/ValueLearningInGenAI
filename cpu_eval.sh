@@ -1,23 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_ALIAS="mlp"
-DATASET_ALIAS="apollo"
-TASK_TYPE="nlp_based"
+MODEL_ALIAS="smol"
+DATASET_ALIAS="pku"
+#TASK_TYPE="nlp_based"
 TASK_TYPE="feature_based" # This one for apollo
-
-EXTRA_ARGS=("--task_type={$TASK_TYPE} --use_cpu")
+if [[ $MODEL_ALIAS == "armo" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+if [[ $MODEL_ALIAS == "smol" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+EXTRA_ARGS=("--task_type=$TASK_TYPE")
+EXTRA_ARGS+=("--use_cpu")
 
 resolve_model_name() {
     case "$1" in
         armo)
-            printf '%s' 'ArmoRM-Llama3-8B-v0.1'
+            printf '%s' 'RLHFlow/ArmoRM-Llama3-8B-v0.1'
             ;;
         smol)
-            printf '%s' 'SmolLM-135M-Instruct'
+            printf '%s' 'HuggingFaceTB/SmolLM-135M-Instruct'
             ;;
         llama)
-            printf '%s' 'ArmoRM-Llama3-8B-v0.1'
+            printf '%s' 'RLHFlow/ArmoRM-Llama3-8B-v0.1'
             ;;
         *)
             printf '%s' "$1"

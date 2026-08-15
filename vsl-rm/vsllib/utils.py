@@ -15,7 +15,7 @@ from typing import Any, Optional, Dict, Tuple
 import os
 import random
 
-
+import math
 
 
 import numpy as np
@@ -206,6 +206,162 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
 
         return data
 
+
+
+import numpy as np
+from scipy.optimize import minimize
+from scipy.spatial.distance import pdist
+
+
+
+def sample_example_profiles_scipy(profile_variety, n_values=3,
+                            repulsion_power=2,
+                            n_restarts=50,
+                            seed=0):
+
+    if n_values < 1:
+        raise ValueError("n_values must be >= 1")
+
+    if n_values == 1:
+        return [(1.0,)] * profile_variety
+
+    rng = np.random.default_rng(seed)
+
+    def softmax(z):
+        z = z.reshape(profile_variety, n_values)
+        z = z - z.max(axis=1, keepdims=True)
+        e = np.exp(z)
+        return e / e.sum(axis=1, keepdims=True)
+
+    def objective(z):
+        P = softmax(z)
+
+        D = pdist(P)
+
+        # avoid division by zero
+        D = np.maximum(D, 1e-12)
+
+        return np.sum(D ** (-repulsion_power))
+
+    best_x = None
+    best_energy = np.inf
+
+    for _ in range(n_restarts):
+
+        # Dirichlet initialization
+        P0 = rng.dirichlet(np.ones(n_values),
+                           size=profile_variety)
+
+        Z0 = np.log(P0)
+        Z0 = Z0.ravel()
+
+        result = minimize(
+            objective,
+            Z0,
+            method="L-BFGS-B",
+            options={
+                "maxiter": 10000,
+                "ftol": 1e-12,
+            },
+        )
+
+        if result.fun < best_energy:
+            best_energy = result.fun
+            best_x = result.x
+
+    P = softmax(best_x)
+
+    # deterministic ordering
+    P = P[np.lexsort(P.T[::-1])]
+
+    ret = [
+        tuple(round(float(v), 4) for v in row)
+        for row in P
+    ]
+    return ret
+
+
+def sample_example_profiles_exact(profile_variety: int, n_values: int = 3):
+    """
+    Return exactly `profile_variety` profiles distributed as evenly
+    as possible on the (n_values-1)-simplex.
+
+    Each profile sums to 1.
+    """
+
+    if n_values < 1:
+        raise ValueError("n_values must be >= 1")
+
+    if n_values == 1:
+        return [(1.0,)] * profile_variety
+
+    # ------------------------------------------------------------------
+    # Generate simplex lattice (Das-Dennis reference directions)
+    # ------------------------------------------------------------------
+
+    def lattice_count(H):
+        return math.comb(H + n_values - 1, n_values - 1)
+
+    H = 1
+    while lattice_count(H) < profile_variety:
+        H += 1
+
+    def compositions(total, parts):
+        if parts == 1:
+            yield (total,)
+            return
+
+        for i in range(total + 1):
+            for rest in compositions(total - i, parts - 1):
+                yield (i,) + rest
+
+    lattice = np.array(
+        [np.array(c, dtype=float) / H
+         for c in compositions(H, n_values)],
+        dtype=float,
+    )
+
+    # ------------------------------------------------------------------
+    # If needed, downsample using farthest-point sampling
+    # ------------------------------------------------------------------
+
+    if len(lattice) > profile_variety:
+
+        selected = []
+
+        # Start with simplex vertices when possible
+        vertices = np.eye(n_values)
+
+        for v in vertices:
+            idx = np.argmin(np.linalg.norm(lattice - v, axis=1))
+            if idx not in selected:
+                selected.append(idx)
+            if len(selected) == profile_variety:
+                break
+
+        while len(selected) < profile_variety:
+            chosen = lattice[selected]
+
+            dists = np.min(
+                np.linalg.norm(
+                    lattice[:, None, :] - chosen[None, :, :],
+                    axis=2,
+                ),
+                axis=1,
+            )
+
+            dists[selected] = -1
+            selected.append(np.argmax(dists))
+
+        lattice = lattice[selected]
+
+    profiles = [
+        tuple(round(float(x), 3) for x in row)
+        for row in lattice
+    ]
+    profiles.sort()
+    
+    return profiles
 @dataclass
 class ScriptArguments:
     """
@@ -241,7 +397,7 @@ class ScriptArguments:
 
     do_train: Optional[bool] = field(default=True)
     ctx_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
-
+    sharp_context_classification: Optional[bool] = field(default=True, metadata={"help": "Whether to use sharp classification for the context loss. If True, will use a hard classification for the context loss. If False, will use a soft classification for the context loss."})
     hidden_size: Optional[int] = field(
         default=1024, metadata={"help": "The hidden size of the grounding MLP."})
     vs_hidden_size: Optional[int] = field(

@@ -17,7 +17,7 @@ fi
 #CONFIG=run_configs/smol_ctx_linear.json
 
 DATASET=pku
-CONFIG=run_configs/llama_ctx_linear.json
+CONFIG=run_configs/smol_ctx_linear.json
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
 CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
@@ -89,7 +89,7 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv3
+  NAME=SmolCtxVSLRMv4EQUAL_WEIGHTS
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test

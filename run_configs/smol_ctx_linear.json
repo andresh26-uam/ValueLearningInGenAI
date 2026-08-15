@@ -3,8 +3,9 @@
     "dataset": "pku",
     "context_implementation": "BASIC_SMOOTH",
     "do_initialization": false,
-    "ctx_coefficient": 0.0,
+    "ctx_coefficient": 100.0,
     "training_initialization_data_size": 5000,
+    "sharp_context_classification": true,
     "max_value_systems": 10,
     "max_contexts": 10,
     "gather_train_metrics": true,
@@ -38,9 +39,9 @@
 
     "rew_center_coefficient": 0.01,
     
-    "learning_rate": 0.001,
-    "grounding_learning_rate": 0.0003,
-    "context_learning_rate": 0.0003,
+    "learning_rate": 0.0001,
+    "grounding_learning_rate": 0.0001,
+    "context_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,
     "max_grad_norm": 0.1,

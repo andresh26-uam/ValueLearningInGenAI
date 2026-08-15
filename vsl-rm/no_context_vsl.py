@@ -32,7 +32,7 @@ for candidate in (
         sys.path.insert(0, str(candidate))
         break
 
-from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, seed_everything
+from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, sample_example_profiles_exact, sample_example_profiles_scipy, seed_everything
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
@@ -139,6 +139,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
+            sharp_context_classification=script_args.sharp_context_classification,
             ctx_coefficient=script_args.ctx_coefficient,
             training_initialization_data_size=script_args.training_initialization_data_size,
             max_contexts=script_args.max_contexts,
@@ -287,6 +288,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
 
 if __name__ == "__main__":
+    
+    
     accelerate_state = PartialState()
     using_accelerate = accelerate_state.num_processes > 1
     is_main_accelerate_process = accelerate_state.is_main_process if using_accelerate else True
