@@ -397,6 +397,7 @@ class ScriptArguments:
 
     do_train: Optional[bool] = field(default=True)
     ctx_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
+    vs_selection_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
     sharp_context_classification: Optional[bool] = field(default=True, metadata={"help": "Whether to use sharp classification for the context loss. If True, will use a hard classification for the context loss. If False, will use a soft classification for the context loss."})
     hidden_size: Optional[int] = field(
         default=1024, metadata={"help": "The hidden size of the grounding MLP."})
@@ -405,6 +406,8 @@ class ScriptArguments:
     )
     vs_layer_dropout: float = field(default=0,  metadata={"help": "The dropout probability of the models used for predicting value systems."})
     vs_layer_activation: Optional[str] = field(default="ReLU", metadata={
+                                            "help": f"The activation function to use for the hidden layers of the value system prediction models. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"})
+    vs_weight_initialization: Optional[str] = field(default="dirichlet", metadata={
                                             "help": f"The activation function to use for the hidden layers of the value system prediction models. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"})
     
     vs_num_hidden_layers: Optional[int] = field(default=0, metadata={

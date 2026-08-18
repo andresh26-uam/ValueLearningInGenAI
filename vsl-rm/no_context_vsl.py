@@ -137,10 +137,12 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         else:
 
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
+        
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
             sharp_context_classification=script_args.sharp_context_classification,
             ctx_coefficient=script_args.ctx_coefficient,
+            vs_selection_coefficient=script_args.vs_selection_coefficient,
             training_initialization_data_size=script_args.training_initialization_data_size,
             max_contexts=script_args.max_contexts,
             max_value_systems=script_args.max_value_systems,
@@ -219,7 +221,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH, ContextImplementations.BASIC_DETACHED]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH, ContextImplementations.BASIC_DETACHED]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(

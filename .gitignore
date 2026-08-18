@@ -217,3 +217,5 @@ models/
 
 sweeps/
 results/
+
+gmm_*.png

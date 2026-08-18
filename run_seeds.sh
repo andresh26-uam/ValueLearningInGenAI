@@ -4,7 +4,8 @@ GPUS="L40S:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=True
 DEBUG="--debug"
-DEBUG=""
+#DEBUG=""
+SAVE=" --do_save=False"
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
   GPUS=""
@@ -21,7 +22,10 @@ CONFIG=run_configs/smol_ctx_linear.json
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
 CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
+VS_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_selection_coefficient", 0.0))' "$CONFIG")
+
 NORM=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("layer_normalization", "none"))' "$CONFIG")
+VS_WEIGHT_INIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_weight_initialization", "dirichlet"))' "$CONFIG")
 
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
@@ -36,7 +40,7 @@ if [[ "$DATASET" == "ultra" ]]; then
     fi
 elif [[ "$DATASET" == "pku" ]]; then
   DISCORDANCE_EPSILON=0.5
-  training_initialization_data_size=1000
+  training_initialization_data_size=10000
   NUM_TRAIN_EPOCHS=100
   if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
     NUM_TRAIN_EPOCHS=150
@@ -89,18 +93,18 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv4EQUAL_WEIGHTS
+  NAME=SmolCtxVSLRMv5_HARD_NOTDETACH_100ctxs
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test
 fi
 
-NAME="${NAME}_${CTX_IMPLEMENTATION}_INITCTX_${DOINIT}_CTX_${CTX_COEFF}_NORM_${NORM}"
+NAME="${NAME}_${CTX_IMPLEMENTATION}_INITVS_${VS_WEIGHT_INIT}_INITCTX_${DOINIT}_VS_${VS_COEFF}_CTX_${CTX_COEFF}_NORM_${NORM}"
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
 for seed in 42; do
-  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --training_initialization_data_size=$training_initialization_data_size $DEBUG
+  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --training_initialization_data_size=$training_initialization_data_size $DEBUG $SAVE
 done
 

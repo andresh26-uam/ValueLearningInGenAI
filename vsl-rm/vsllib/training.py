@@ -1182,6 +1182,7 @@ class CtxMORewardTrainer(MORewardTrainer):
     def train_initialization(self) -> None:
         if self.model.config.training_initialization_data_size != "all":
             training_initialization_data_size = min(len(self.train_dataset), self.model.config.training_initialization_data_size)
+            print("DATA SEt INIT SIZe", training_initialization_data_size, "wanted", self.model.config.training_initialization_data_size, "total dataset size", len(self.train_dataset))
             indices_ = np.random.choice(len(self.train_dataset), size=training_initialization_data_size, replace=False)
             subset = self.train_dataset.select(indices_)
         else:

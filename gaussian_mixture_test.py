@@ -136,108 +136,6 @@ class GaussianMixtureContextProbability(nn.Module):
         )
 
 
-    def forwardmaybe(self, x):
-
-        """
-        x:
-            [...,D]
-
-        returns:
-            log p(x)
-            [...]
-        """
-
-        if x.ndim == 1:
-            x = x.unsqueeze(0)
-
-
-        # x:
-        #   [B,1,D]
-        #
-        # mu:
-        #   [1,K,D]
-        #
-
-        diff = (
-            x.unsqueeze(-2)
-            -
-            self.centroids
-        )
-
-
-        L = self.get_scale_tril()
-
-
-        #
-        # Solve:
-        #
-        # L z = x-mu
-        #
-        # diff:
-        #   [B,K,D]
-        #
-        # L:
-        #   [K,D,D]
-        #
-
-        z = th.linalg.solve_triangular(
-            L.unsqueeze(0),
-            diff.unsqueeze(-1),
-            upper=False
-        ).squeeze(-1)
-
-
-        mahalanobis = (
-            z.pow(2)
-            .sum(dim=-1)
-        )
-
-
-        log_det = (
-            2.0 *
-            th.log(
-                th.diagonal(L, dim1=-2, dim2=-1)
-            )
-            .sum(dim=-1)
-        )
-
-
-        normalization = (
-            self.input_size *
-            th.log(
-                th.tensor(
-                    2.0 * th.pi,
-                    device=x.device,
-                    dtype=x.dtype
-                )
-            )
-        )
-
-
-        component_log_prob = (
-            -0.5 *
-            (
-                mahalanobis
-                +
-                log_det.unsqueeze(0)
-                +
-                normalization
-            )
-        )
-
-
-        log_weights = th.log_softmax(
-            self.mixture_logits,
-            dim=0
-        )
-
-        
-        return th.logsumexp(
-            component_log_prob
-            +
-            log_weights,
-            dim=-1
-        )
     def get_scale_tril(self):
 
         """
@@ -482,6 +380,7 @@ class FastGaussianMixture(nn.Module):
                 norm
             )
         )
+        
         logits = th.log_softmax(self.logits, dim=0)
 
         return th.logsumexp(
@@ -649,7 +548,7 @@ class GMMDataset(Dataset):
     def __getitem__(self, idx):
         return self.x[idx]
 def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.0):
-    optimizer = torch.optim.Adam(gmm.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(gmm.parameters(), lr=lr, weight_decay=0.0)
 
     start_time = time.time()
     history = []
@@ -664,13 +563,22 @@ def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.
             logits = th.log_softmax(gmm.logits, dim=0)
             k = len(gmm.centroids)
             #if l_entropy != 0.0:
-            responsibilities = th.log_softmax(component_log_prob, dim=1)#*th.exp(logits)
+            # WORKS responsibilities = th.log_softmax(component_log_prob, dim=1)#*th.exp(logits)"""
+            """
+            WORKS
+            entropy_loss = -(
+                                responsibilities *
+                                responsibilities.exp()
+                            ).sum(dim=1).mean()
+            """
+            responsibilities = th.log_softmax(component_log_prob, dim=1) #+ logits
+            entropy_loss = -(
+                                responsibilities *
+                                responsibilities.exp()
+                            ).sum(dim=1).mean()
             #avg_resp = responsibilities.mean(dim=0)
             # Mean entropy over the batch
-            entropy_loss = -(
-                    responsibilities *
-                    responsibilities.exp()
-                ).sum(dim=1).mean()
+            
             
             
             
@@ -706,6 +614,71 @@ def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.
 
     print(f"FINISHED IN {time.time() - start_time:.2f} seconds")
     
+    plot(gmm, history, file_name)
+
+
+def train_exp(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.0):
+    """Expectation-maximization training for the diagonal Gaussian mixture.
+
+    This keeps the legacy heuristic gradient routine in `train()` and adds a
+    separate EM-style optimizer that re-estimates the component weights,
+    means, and diagonal variances from soft responsibilities.
+    """
+    del lr, l2_lambda, l_entropy
+
+    start_time = time.time()
+    history = []
+    bar = trange(epochs)
+
+    for e in bar:
+        total_resp = th.zeros(
+            gmm.num_components,
+            device=gmm.centroids.device,
+            dtype=gmm.centroids.dtype,
+        )
+        total_weighted_x = th.zeros_like(gmm.centroids)
+        total_weighted_x2 = th.zeros_like(gmm.centroids)
+        total_nll = 0.0
+        total_n = 0
+
+        for data_batch in loader:
+            data_batch = data_batch.to(device=gmm.centroids.device, dtype=gmm.centroids.dtype)
+            logp, component_log_prob = gmm(data_batch)
+            log_pi = th.log_softmax(gmm.logits, dim=0)
+            log_resp = component_log_prob + log_pi.unsqueeze(0)
+            responsibilities = th.softmax(log_resp, dim=1)
+
+            nk = responsibilities.sum(dim=0).clamp_min(1e-12)
+            total_resp += nk
+            total_weighted_x += responsibilities.t() @ data_batch
+            total_weighted_x2 += (responsibilities.unsqueeze(-1) * data_batch.unsqueeze(1).pow(2)).sum(dim=0)
+
+            total_nll += (-logp).sum().item()
+            total_n += len(data_batch)
+
+        nk = total_resp.clamp_min(1e-12)
+        new_pi = nk / nk.sum().clamp_min(1e-12)
+
+        with th.no_grad():
+            gmm.logits.copy_(th.log(new_pi.clamp_min(1e-12)))
+            gmm.centroids.copy_(total_weighted_x / nk.unsqueeze(-1))
+
+            second_moment = total_weighted_x2 / nk.unsqueeze(-1)
+            variance = second_moment - gmm.centroids.pow(2)
+            gmm.log_var.copy_(variance.clamp_min(1e-6).log())
+
+        epoch_loss = total_nll / max(total_n, 1)
+        history.append(epoch_loss)
+
+        if e % 100 == 0:
+            plot(gmm, history, file_name)
+
+        bar.set_postfix(
+            loss=f"{epoch_loss:.4f}",
+            time=f"{time.time() - start_time:.2f}",
+        )
+
+    print(f"FINISHED IN {time.time() - start_time:.2f} seconds")
     plot(gmm, history, file_name)
 
 import numpy as np
@@ -806,7 +779,7 @@ def plot(gmm, history, file_name):
     plt.close()
 
 if __name__ == "__main__":
-    seed = 45376
+    seed = 453765
     th.manual_seed(seed)
 
     # make gmm
@@ -833,7 +806,7 @@ if __name__ == "__main__":
     k = 32
     dataset = GMMDataset(x)
     random_state = 426
-    kmeans = KMeans(n_clusters=k, n_init="auto", random_state=random_state)
+    kmeans = KMeans( n_clusters=k, tol=0.000001, n_init="auto", random_state=random_state, max_iter=3000)
     kmeans.fit(dataset)
 
     centroids = th.tensor(kmeans.cluster_centers_).cpu()
@@ -842,7 +815,7 @@ if __name__ == "__main__":
     cov = "diag"
     batch_norm = False
     lr = 5e-1
-    batch_size = 500
+    batch_size = 32
     epochs = 1000
 
     loader = DataLoader(dataset, batch_size)
@@ -857,4 +830,6 @@ if __name__ == "__main__":
 
     #
     #train(lr, epochs, loader, gmm, "gmm_kaggle") #40/s
+    # WORKS train(lr, epochs, loader, gmm_copilot, "gmm_copilot", l_entropy=-0.02, l2_lambda=0.05) # ~50/s
     train(lr, epochs, loader, gmm_copilot, "gmm_copilot", l_entropy=-0.02, l2_lambda=0.05) # ~50/s
+        #train(lr, epochs, loader, gmm_copilot, "gmm_copilot_em")

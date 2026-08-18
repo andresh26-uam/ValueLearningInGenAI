@@ -232,7 +232,7 @@ class ContextImplementations(enum.Enum):
     BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
     BASIC_DETACHED = "BASIC_DETACHED"
-    SINGLE_LEVEL_GMM = "GMM"
+    GMM = "GMM"
     NESTED_GMM = "NESTED_GMM"
 
 class MOLossFunctionsCategories():
@@ -242,12 +242,18 @@ class MOLossFunctionsCategories():
                                            MOLossFunctions.DEFAULT,
                                            MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
                                            MOLossFunctions.CTX_DEFAULT]
-    REQUIRES_GRAD_FOR_CONTEXT_LOSS = [
+    REQUIRES_GRAD_FOR_VALUE_SYSTEM_SELECTION_LOSS = [
                                            MOLossFunctions.ONLY_VALUE_SYSTEM, 
                                            MOLossFunctions.DEFAULT,
                                            MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
                                            MOLossFunctions.CTX_DEFAULT
                                            ]
+    REQUIRES_GRAD_FOR_CONTEXT_LOSS = [
+                                            MOLossFunctions.ONLY_VALUE_SYSTEM, 
+                                            MOLossFunctions.DEFAULT,
+                                            MOLossFunctions.DEFAULT_BUT_STATIC_LAGRANGE,
+                                            MOLossFunctions.CTX_DEFAULT
+                                            ]
     EPOCH_DEPENDENT_GRAD_REQUIREMENTS = [MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM]
 
     REQUIRES_GRAD_FOR_ONLY_SOME_GROUNDING_LOSSES = [MOLossFunctions.ONLY_VALUES_IN_KWARGS]
@@ -292,7 +298,7 @@ class MOLossManagement():
                 n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
                 return epoch>=n_epochs_for_grounding
         return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS)
-    def requires_grad_for_context_loss(self, epoch: int = 0, **kwargs) -> bool:
+    def requires_grad_for_value_system_selection_loss(self, epoch: int = 0, **kwargs) -> bool:
         if epoch == "EVAL":
                     return False # Assumedly, evaluation step.
         if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
@@ -301,7 +307,17 @@ class MOLossManagement():
             if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
                 n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
                 return epoch>=n_epochs_for_grounding
-        return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_LOSS)
+        return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_VALUE_SYSTEM_SELECTION_LOSS)
+    def requires_grad_for_context_loss(self, epoch: int = 0, **kwargs) -> bool:
+            if epoch == "EVAL":
+                        return False # Assumedly, evaluation step.
+            if self.loss_func_type in MOLossFunctionsCategories.EPOCH_DEPENDENT_GRAD_REQUIREMENTS:
+                if epoch is None:
+                     raise ValueError("Epoch must be provided for loss functions with epoch-dependent grad requirements.")
+                if self.loss_func_type == MOLossFunctions.FIRST_GROUNDING_THEN_VALUE_SYSTEM:
+                    n_epochs_for_grounding = int(self.loss_func_kwargs.get('n_epochs_for_grounding', 0))
+                    return epoch>=n_epochs_for_grounding
+            return self._in_category(MOLossFunctionsCategories.REQUIRES_GRAD_FOR_CONTEXT_LOSS)
 
     def requires_grad_for_all_grounding_losses(self, epoch: int = 0, **kwargs) -> bool:
         if epoch == "EVAL":
