@@ -90,6 +90,10 @@ class MORewardTrainer(Trainer):
         """
         This overrides the original logging process to include new train metrics.
         """
+        if self.training_step % self.args.logging_steps*10 == 0 or self.training_step == self.args.logging_steps:
+            path = os.path.join(self.args.output_dir, "images")
+            os.makedirs(path, exist_ok=True)
+            self.model.plot_matrices(t=self.training_step, filename=os.path.join(path,  f"context_matrices_{self.training_step}"))
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
 
@@ -1045,24 +1049,15 @@ class CtxMORewardTrainer(MORewardTrainer):
 
             if self.model.value_system_layer is not None:
                 assert isinstance(self.model.value_system_layer, AbstractCtxDependentAlignmentLayer)
-                """contexts_to_vc = self.get_context_ids_mapped_to_value_system(vi)
-            vs_tuple = transform_weights_to_tuple(vc)
-            data={
-                "contexts": contexts_to_vc,
-                "share_of_data": float(th.sum(self.running_context_training_data.frequencies[contexts_to_vc]).numpy())}
-            for iv, v in enumerate(vs_tuple):
-                data[f"vs_w{iv}"] = v
-            per_vs_contexts[f"vs_{vi}"] = data"""
                 
                 w_info = self.model.value_system_layer.get_value_system_info()
-                
-                """for i in range(self.model.num_values):
-                    train_metrics[f"vs_weight_{i}"] = to_float(w[i])"""
+
                 for vs_key, vs_data in w_info.items():
                     if str(vs_key).startswith("vs"):
                         train_metrics[vs_key] = dict()
                         train_metrics[vs_key]["ncontexts"] = len(vs_data["contexts"])
-                        train_metrics[vs_key]["share"] = vs_data["share_of_data"]
+                        train_metrics[vs_key]["share_ctx"] = vs_data["share_of_ctxdata"]
+                        train_metrics[vs_key]["share_vs"] = vs_data["share_of_vsdata"]
                         for k,v in vs_data.items():
                             if "vs_w" in k:
                                 train_metrics[vs_key][k] = v # Weights of this VS.
@@ -1180,14 +1175,15 @@ class CtxMORewardTrainer(MORewardTrainer):
     
 
     def train_initialization(self) -> None:
+
+        
         if self.model.config.training_initialization_data_size != "all":
             training_initialization_data_size = min(len(self.train_dataset), self.model.config.training_initialization_data_size)
-            print("DATA SEt INIT SIZe", training_initialization_data_size, "wanted", self.model.config.training_initialization_data_size, "total dataset size", len(self.train_dataset))
             indices_ = np.random.choice(len(self.train_dataset), size=training_initialization_data_size, replace=False)
             subset = self.train_dataset.select(indices_)
         else:
             subset = self.train_dataset
-        self.model.train_initialization(subset)
+        self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
     
     def evaluate_contexts(self, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "") -> None:
 

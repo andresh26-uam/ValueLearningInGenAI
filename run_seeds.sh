@@ -4,7 +4,7 @@ GPUS="L40S:1"
 GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=True
 DEBUG="--debug"
-#DEBUG=""
+DEBUG=""
 SAVE=" --do_save=False"
 if [[ "$CPU" == "True" ]]; then
   GPUDIRECTIVE=""
@@ -18,7 +18,7 @@ fi
 #CONFIG=run_configs/smol_ctx_linear.json
 
 DATASET=pku
-CONFIG=run_configs/smol_ctx_linear.json
+CONFIG=run_configs/smol_ctx_linear_baseline_smooth.json
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
 CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
@@ -70,7 +70,7 @@ if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
 elif [[ "$CONFIG" == "run_configs/features_synth_ctx.json" ]]; then
     NAME=LinearGR_Synth1_BAsicDetached_NotSharp
 elif [[ "$CONFIG" == "run_configs/llama_ctx_linear.json" ]]; then
-    NAME=LlamaCtxVSLRMv3
+    NAME=LlamaCtxVSLRMv5
 elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
@@ -93,7 +93,10 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv5_HARD_NOTDETACH_100ctxs
+  NAME=SmolCtxVSLRMv7_INITTEST_CONTEXTPARAM
+  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
+  NAME=SmolCtxVSLRMv6_NOCONTEXT_NOWD_NORC
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test

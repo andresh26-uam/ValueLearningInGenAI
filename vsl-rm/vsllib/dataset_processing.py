@@ -10,8 +10,9 @@ from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
+from sklearn.preprocessing import StandardScaler
 import torch as th
-from vsllib.defines import NO_RATING_MASK
+from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, NO_RATING_MASK
 from vsllib.utils import convert_to_tensors
 
 # IMport HF_TOKEN from .env
@@ -23,6 +24,8 @@ from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, l
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
+
+
 
 def maybe_strip_bos_token(text: str, bos_token: Optional[str]) -> str:
     if bos_token:
@@ -77,7 +80,7 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
     with th.no_grad():
         model_device = device
-        for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", "context_embedding")]):
+        for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", CONTEXT_EMBEDDING_FEATURE_NAME)]):
             if ic == 2 and not use_context:
                 continue
             merged_features = {
@@ -148,9 +151,13 @@ class BasePairwisePreferenceDataset():
                 suggested_epsilon = min(suggested_epsilon, smallest_diff_in_pair)
         return suggested_epsilon/2.0
 
-    def __init__(self, path: str, sub_path: str = "postproc", from_disk: bool = True, extra_keep_keys: list = None, repostprocess: bool = False, recalculate_features: bool = False, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
+    def postprocessor_method_after_save(self):
+        pass
+
+    def __init__(self, path: str, context_feature_name: str = CONTEXT_FEATURE_NAME, sub_path: str = "postproc", from_disk: bool = True, extra_keep_keys: list = None, repostprocess: bool = False, recalculate_features: bool = False, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
         
         self.data: Dataset 
+        self.context_feature_name = context_feature_name
         self._cached_context_embeddings=None
         print(f"Loading dataset from {path} with from_disk={from_disk}")
 
@@ -217,13 +224,14 @@ class BasePairwisePreferenceDataset():
                 self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
         
-        
+        self.postprocessor_method_after_save()
         
         if cleanup_cache_files:
             removed_cache_files = self.data.cleanup_cache_files()
             print(f"Removed {removed_cache_files} dataset cache files")
             
         assert self.data[0].get("labels") is not None, "Labels are required in the dataset for training."
+
 
         
         if isinstance(test_proportion_or_indices, float):
@@ -253,6 +261,7 @@ class BasePairwisePreferenceDataset():
         #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
         #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
 
+
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
         
         self.data = self.data.map(
@@ -266,13 +275,8 @@ class BasePairwisePreferenceDataset():
         
 
     def get_all_contexts_embeddings(self, recalculate=False) -> List[th.Tensor]:
-        if self._cached_context_embeddings is None or recalculate:
-            contexts = []
-            for i in range(len(self.data)):
-                if self.data[i].get("context_embedding", None) is not None:
-                    contexts.append(self.data[i]["context_embedding"].detach().cpu().numpy())
-            self._cached_context_embeddings = np.stack(contexts)
-        return self._cached_context_embeddings
+        return self.data[self.context_feature_name]
+    
     def __len__(self):
         return len(self.data)
     
@@ -303,11 +307,11 @@ def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys:
             ctx = sample['state']
         
         sample['context'] = ctx
-        if sample.get("context_features", None) is None:
-            sample['context_features'] = ctx
+        if sample.get(CONTEXT_FEATURE_NAME, None) is None:
+            sample[CONTEXT_FEATURE_NAME] = ctx
             
         
-        keep_keys.extend(["context_features", "context"])
+        keep_keys.extend([CONTEXT_FEATURE_NAME, "context"])
     
     sample["grounding_features_1"] = sample.get("grounding_features_1", sample["option1"])
     sample["grounding_features_2"] = sample.get("grounding_features_2", sample["option2"])
@@ -336,7 +340,7 @@ def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_con
     
     with th.no_grad():
         model_device = device
-        for ic, case in enumerate([("option1", "grounding_features_1"), ("option2", "grounding_features_2"), ("context", "context_features")]):
+        for ic, case in enumerate([("option1", "grounding_features_1"), ("option2", "grounding_features_2"), ("context", CONTEXT_FEATURE_NAME)]):
             if ic == 2 and not use_context:
                 continue
             merged_features = {
@@ -355,14 +359,26 @@ def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_con
 class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
 
 
-    def __init__(self, path: str, from_disk: bool = True, extra_keep_keys: List = None, repostprocess: bool = False, recalculate_features: bool = False, collator: MORewardDataCollator = None, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: float | List[int] = 0.05, test_proportion_or_indices: float | List[int] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
+    def __init__(self, path: str, from_disk: bool = True, normalize_context: bool = False, extra_keep_keys: List = None, repostprocess: bool = False, recalculate_features: bool = False, collator: MORewardDataCollator = None, use_extracted_features: bool = True, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: float | List[int] = 0.05, test_proportion_or_indices: float | List[int] = 0.1, pp_kwargs: Dict = {}, fe_kwargs: Dict = {}):
         fe_kwargs.update({"collator": collator})
         sub_path = "postproc"
         self.postprocessor_method = postprocess_sample
         self.feature_extractor_method = feature_extract_sample
-        super().__init__(path, sub_path, from_disk, extra_keep_keys, repostprocess, recalculate_features, use_extracted_features, use_context, split_seed, cleanup_cache_files, eval_proportion_or_indices, test_proportion_or_indices, pp_kwargs, fe_kwargs)
+        super().__init__(context_feature_name = CONTEXT_FEATURE_NAME, path=path, sub_path=sub_path, from_disk=from_disk, extra_keep_keys=extra_keep_keys, 
+                         repostprocess=repostprocess, recalculate_features=recalculate_features, 
+                         use_extracted_features=use_extracted_features, use_context=use_context, 
+                         split_seed=split_seed, cleanup_cache_files=cleanup_cache_files, 
+                         eval_proportion_or_indices= eval_proportion_or_indices, 
+                         test_proportion_or_indices=test_proportion_or_indices, pp_kwargs=pp_kwargs, fe_kwargs=fe_kwargs)
         
         
+    def postprocessor_method_after_save(self):
+        normalizer = StandardScaler()
+        ctx_features = self.get_all_contexts_embeddings()
+        ctx_features = normalizer.fit_transform(ctx_features)
+
+
+    
 
 class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
     
@@ -424,9 +440,31 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                             num_proc=num_proc
                         )
         return self.data
-                
-    def __init__(self, path: str, tokenizer, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
-    
+
+    def postprocessor_method_after_save(self) -> None:
+        
+        if self.normalize_context:
+            print("NORMALIZING")
+            def _normalize_context_batch(batch: Dict[str, Any]) -> Dict[str, Any]:
+                contexts = np.asarray(batch[self.context_feature_name], dtype=np.float32)
+                norms = np.linalg.norm(contexts, ord=2, axis=1, keepdims=True)
+                if np.any(norms == 0):
+                    raise ValueError("Normalization failed: found zero-norm context embeddings.")
+                batch[self.context_feature_name] = contexts / norms
+                return batch
+
+            self.data = self.data.map(
+                _normalize_context_batch,
+                batched=True,
+                load_from_cache_file=False,
+            )
+
+            normalized_contexts = np.asarray(self.data[self.context_feature_name], dtype=np.float32)
+            normalized_norms = np.linalg.norm(normalized_contexts, ord=2, axis=1)
+            assert np.allclose(normalized_norms, np.ones_like(normalized_norms)), "Normalization failed: not all context embeddings have unit norm."
+        
+    def __init__(self, path: str, tokenizer, normalize_context=False, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+        self.normalize_context = normalize_context
         pp_kwargs = {
             "tokenizer": tokenizer,
         }
@@ -437,8 +475,10 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
         }
         self.postprocessor_method = tokenize_sample
         self.feature_extractor_method = embed_sample
+
+        
         super().__init__(path=path,
-                         
+                         context_feature_name = CONTEXT_EMBEDDING_FEATURE_NAME,
                          from_disk=from_disk,
                          sub_path=model_reference.config._name_or_path.replace('/', '_') if model_reference is not None else "only_tokenized",
                          extra_keep_keys=extra_keep_keys,

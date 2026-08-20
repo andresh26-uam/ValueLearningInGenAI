@@ -41,7 +41,7 @@ from transformers import (
 )
 from triton.language import assume
 
-from vsllib.defines import MODEL_DIR, MODEL_PRESETS, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
+from vsllib.defines import MODEL_DIR, MODEL_PRESETS, ContextImplementations, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
 
 
 def seed_everything(seed: int, deterministic: bool = True):
@@ -518,6 +518,10 @@ class ScriptArguments:
         default=1,
         metadata={"help": "How often to update the loss/metric tendencies for the Lagrange multiplier updates."},
     )
+    normalize_context_features: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to normalize the context embeddings before clustering. When using GMM, this is set to true independetly of the given value."},
+    )
     use_validation_for_tendencies: Optional[bool] = field(
         default=False,
         metadata={"help": "Whether to use the validation set for calculating the loss/metric tendencies for the Lagrange multiplier updates. If False, will use the training set."},
@@ -572,8 +576,8 @@ class ScriptArguments:
         default=10,
         metadata={"help": "The maximum number of contexts to use. If the dataset has more contexts than this, we will use the ones with the most examples."},
     )
-    training_initialization_data_size: Optional[int] = field( 
-        default=1000,
+    training_initialization_data_size: Optional[str] = field( 
+        default="all",
         metadata={"help": "The maximum number of examples to use for training initialization step when assigning value systems to contexts. If the training dataset is larger than this, we will sample a subset of this size for the k-means clustering."},
     )
     do_initialization: Optional[bool] = field(
@@ -583,6 +587,14 @@ class ScriptArguments:
     context_implementation: Optional[str] = field(
         default="NO_CONTEXT",
         metadata={"help": "Choose between ContextImplementations in defines.py"}
+    )
+    detach_context_selection_for_value_system_selection: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to detach the context selection from the value system selection. If True, the context selection will not be used for the value system selection."},
+    )
+    detach_vs_selection_for_value_system_weight_training: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to detach the value system selection from the context selection. If True, the value system selection will not be used for the context selection."},
     )
 
 
@@ -657,6 +669,17 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
     if script_args.discordance_epsilon < 0:
         script_args.discordance_epsilon = None
     script_args.update_tendencies_every_n_steps = script_args.eval_every_steps if script_args.use_validation_for_tendencies else script_args.update_tendencies_every_n_steps
+
+    if ContextImplementations(script_args.context_implementation) == ContextImplementations.GMM:
+        
+        script_args.normalize_context_features = True
+    try:
+        script_args.training_initialization_data_size = int(script_args.training_initialization_data_size)
+    except ValueError:
+        if script_args.training_initialization_data_size != "all":
+            raise ValueError(
+                f"training_initialization_data_size must be an integer or 'all', got {script_args.training_initialization_data_size}")
+        script_args.training_initialization_data_size = "all"
     
     return script_args, preset
 

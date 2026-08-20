@@ -430,6 +430,72 @@ class FastGaussianMixture(nn.Module):
                 th.randn_like(std) * std,
                 ids
             )
+
+    def initialize_from_data(
+        self,
+        centroids: th.Tensor,
+        data: th.Tensor,
+        assignments: th.Tensor,
+        min_var: float = 1e-8,
+    ):
+        """Initialize diagonal-GMM parameters from hard cluster assignments.
+
+        Args:
+            centroids: [K, D] centroids to copy into the model.
+            data: [B, D] data points.
+            assignments: [B] hard cluster ids in [0, K-1].
+            min_var: diagonal variance floor for stability.
+        """
+
+        with th.no_grad():
+            self.set_centroids(centroids)
+
+            data = data.to(device=self.centroids.device, dtype=self.centroids.dtype)
+            assignments = assignments.to(device=self.centroids.device, dtype=th.long)
+
+            if data.ndim != 2 or data.shape[1] != self.input_size:
+                raise ValueError(
+                    f"Expected data shape [B, {self.input_size}], got {tuple(data.shape)}"
+                )
+            if assignments.ndim != 1 or assignments.shape[0] != data.shape[0]:
+                raise ValueError("assignments must be [B] with the same B as data")
+
+            total_points = data.shape[0]
+            if total_points == 0:
+                raise ValueError("Cannot initialize from empty data")
+
+            counts = th.bincount(assignments, minlength=self.num_components).to(self.centroids.dtype)
+            probs = (counts / counts.sum().clamp_min(1.0)).clamp_min(1e-12)
+            self.logits.copy_(th.log(probs))
+
+            per_centroid_var = th.empty(
+                self.num_components,
+                self.input_size,
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            )
+
+            fallback_var = th.full(
+                (self.input_size,),
+                min_var,
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            )
+
+            for k in range(self.num_components):
+                mask = assignments == k
+                n_k = int(mask.sum().item())
+
+                if n_k > 1:
+                    points_k = data[mask]
+                    centered = points_k - self.centroids[k]
+                    var_k = centered.pow(2).mean(dim=0).clamp_min(min_var)
+                    per_centroid_var[k] = var_k
+                else:
+                    per_centroid_var[k] = fallback_var
+
+            self.log_var.copy_(th.log(per_centroid_var))
+
     def sample_with_predicted_cluster(self, n: int):
 
         with th.no_grad():
@@ -472,7 +538,240 @@ class FastGaussianMixture(nn.Module):
             log_prob, _ = th.max(log_post, dim=-1)
 
             return samples, log_prob, predicted_ids
-        
+
+
+class FastGaussianMixtureLowerTri(nn.Module):
+
+    def __init__(
+        self,
+        input_size: int,
+        num_components: int,
+        min_variance: float = 1e-6,
+        device=None,
+        dtype=None,
+    ):
+        super().__init__()
+        self.input_size = input_size
+        self.num_components = num_components
+        self.min_variance = min_variance
+
+        # Unnormalized mixture weights.
+        self.logits = nn.Parameter(
+            th.zeros(num_components, device=device, dtype=dtype)
+        )
+
+        # Mean for each Gaussian component.
+        self.centroids = nn.Parameter(
+            th.randn(
+                num_components,
+                input_size,
+                device=device,
+                dtype=dtype,
+            ) * 1e-3
+        )
+
+        # Diagonal values for each Cholesky factor (stored in log-space).
+        self.log_diag_scales = nn.Parameter(
+            th.zeros(
+                num_components,
+                input_size,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+        # Strictly-lower-triangular entries for each Cholesky factor.
+        self.tril_unconstrained = nn.Parameter(
+            th.zeros(
+                num_components,
+                input_size,
+                input_size,
+                device=device,
+                dtype=dtype,
+            )
+        )
+
+    def set_centroids(self, centroids: th.Tensor):
+
+        with th.no_grad():
+
+            centroids = centroids.to(
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            )
+
+            if centroids.shape != self.centroids.shape:
+                raise ValueError(
+                    f"Expected {self.centroids.shape}, got {centroids.shape}"
+                )
+
+            self.centroids.copy_(centroids)
+
+    def get_scale_tril(self) -> th.Tensor:
+        """Builds one lower-triangular Cholesky factor per component."""
+
+        L = th.tril(self.tril_unconstrained, diagonal=-1)
+        diag = th.exp(self.log_diag_scales).clamp_min(self.min_variance)
+        L = L + th.diag_embed(diag)
+        return L
+
+    def _component_log_prob(self, x: th.Tensor) -> th.Tensor:
+        """Returns log p(x | k) for all samples and components."""
+
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+
+        if x.shape[-1] != self.input_size:
+            raise ValueError(
+                f"Expected last dim {self.input_size}, got {x.shape[-1]}"
+            )
+
+        diff = x[:, None, :] - self.centroids[None, :, :]
+        L = self.get_scale_tril()
+        cov = th.matmul(L, L.transpose(-1, -2))
+        precision = th.linalg.inv(cov)
+
+        mahalanobis = th.einsum("bkd,kde,bke->bk", diff, precision, diff)
+
+        diag = th.diagonal(L, dim1=-2, dim2=-1)
+        log_det = 2.0 * th.log(diag).sum(dim=-1)
+
+        norm = self.input_size * th.log(
+            th.tensor(2 * th.pi, device=x.device, dtype=x.dtype)
+        )
+
+        return -0.5 * (mahalanobis + log_det.unsqueeze(0) + norm)
+
+    def forward(self, x: th.Tensor):
+        component_log_prob = self._component_log_prob(x)
+        log_weights = th.log_softmax(self.logits, dim=0)
+
+        mixture_log_prob = th.logsumexp(
+            component_log_prob + log_weights.unsqueeze(0),
+            dim=1,
+        )
+
+        return mixture_log_prob, component_log_prob
+
+    def sample(self, n: int):
+
+        with th.no_grad():
+
+            ids = th.multinomial(
+                th.softmax(self.logits, dim=0),
+                n,
+                replacement=True,
+            )
+
+            L = self.get_scale_tril()[ids]
+            eps = th.randn(
+                n,
+                self.input_size,
+                device=L.device,
+                dtype=L.dtype,
+            )
+
+            samples = self.centroids[ids] + th.bmm(L, eps.unsqueeze(-1)).squeeze(-1)
+
+            return samples, ids
+
+    def sample_with_predicted_cluster(self, n: int):
+
+        with th.no_grad():
+            samples, _ = self.sample(n)
+            component_log_prob = self._component_log_prob(samples)
+            log_post = component_log_prob + th.log_softmax(self.logits, dim=0).unsqueeze(0)
+
+            predicted_ids = log_post.argmax(dim=-1)
+            log_prob, _ = th.max(log_post, dim=-1)
+
+            return samples, log_prob, predicted_ids
+    def initialize_from_data(
+        self,
+        centroids: th.Tensor,
+        data: th.Tensor,
+        assignments: th.Tensor,
+        min_var: float = 1e-8,
+    ):
+        """Initialize mixture parameters from hard cluster assignments.
+
+        Args:
+            centroids: [K, D] centroids to copy into the model.
+            data: [B, D] data points.
+            assignments: [B] hard cluster ids in [0, K-1].
+            min_var: diagonal floor for numerical stability.
+        """
+
+        with th.no_grad():
+            self.set_centroids(centroids)
+
+            data = data.to(device=self.centroids.device, dtype=self.centroids.dtype)
+            assignments = assignments.to(device=self.centroids.device, dtype=th.long)
+
+            if data.ndim != 2 or data.shape[1] != self.input_size:
+                raise ValueError(
+                    f"Expected data shape [B, {self.input_size}], got {tuple(data.shape)}"
+                )
+            if assignments.ndim != 1 or assignments.shape[0] != data.shape[0]:
+                raise ValueError(
+                    "assignments must be [B] with the same B as data"
+                )
+
+            total_points = data.shape[0]
+            if total_points == 0:
+                raise ValueError("Cannot initialize from empty data")
+
+            counts = th.bincount(assignments, minlength=self.num_components).to(self.centroids.dtype)
+            probs = (counts / counts.sum().clamp_min(1.0)).clamp_min(1e-12)
+            self.logits.copy_(th.log(probs))
+
+            diag_scales = th.empty(
+                self.num_components,
+                self.input_size,
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            )
+            tril_values = th.zeros(
+                self.num_components,
+                self.input_size,
+                self.input_size,
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            )
+
+            fallback_cov = th.eye(
+                self.input_size,
+                device=self.centroids.device,
+                dtype=self.centroids.dtype,
+            ) * min_var
+
+            for k in range(self.num_components):
+                mask = assignments == k
+                n_k = int(mask.sum().item())
+
+                if n_k > 1:
+                    points_k = data[mask]
+                    centered = points_k - self.centroids[k]
+                    cov_k = (centered.transpose(0, 1) @ centered) / float(n_k)
+                elif n_k == 1:
+                    cov_k = fallback_cov
+                else:
+                    cov_k = fallback_cov
+
+                cov_k = cov_k + th.eye(
+                    self.input_size,
+                    device=cov_k.device,
+                    dtype=cov_k.dtype,
+                ) * min_var
+
+                L_k = th.linalg.cholesky(cov_k)
+                diag_scales[k] = th.diagonal(L_k, dim1=-2, dim2=-1).clamp_min(min_var)
+                tril_values[k] = th.tril(L_k, diagonal=-1)
+
+            self.log_diag_scales.copy_(th.log(diag_scales))
+            self.tril_unconstrained.copy_(tril_values)
+                
+
 class GaussianMixture(nn.Module):
     def __init__(self, num_components, dim, cov="full", batch_norm=False):
         super().__init__()
@@ -560,39 +859,43 @@ def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.
         for data_batch in loader:
             entropy_loss = 0.0
             logp, component_log_prob = gmm(data_batch)
-            logits = th.log_softmax(gmm.logits, dim=0)
-            k = len(gmm.centroids)
-            #if l_entropy != 0.0:
-            # WORKS responsibilities = th.log_softmax(component_log_prob, dim=1)#*th.exp(logits)"""
-            """
-            WORKS
-            entropy_loss = -(
-                                responsibilities *
-                                responsibilities.exp()
-                            ).sum(dim=1).mean()
-            """
-            responsibilities = th.log_softmax(component_log_prob, dim=1) #+ logits
-            entropy_loss = -(
-                                responsibilities *
-                                responsibilities.exp()
-                            ).sum(dim=1).mean()
-            #avg_resp = responsibilities.mean(dim=0)
-            # Mean entropy over the batch
-            
-            
-            
-            
-            l2 = (
-                #(gmm.centroids-gmm.centroids.mean(dim=0)).square().sum()
-                #+ gmm.log_var.square().sum()
-                -(logits*th.exp(logits)).mean()
-            )
-            l3 = (gmm.centroids-gmm.centroids.mean(dim=0)).square().mean()
             nll = -logp.mean() 
-            #l_entropy=0
-            #l2_lambda=0
-            loss = nll + l_entropy*entropy_loss*k + l2_lambda*l2*k
 
+            if l_entropy != 0.0 or l2_lambda != 0.0:
+                logits = th.log_softmax(gmm.logits, dim=0)
+                k = len(gmm.centroids)
+                #if l_entropy != 0.0:
+                # WORKS responsibilities = th.log_softmax(component_log_prob, dim=1)#*th.exp(logits)"""
+                """
+                WORKS
+                entropy_loss = -(
+                                    responsibilities *
+                                    responsibilities.exp()
+                                ).sum(dim=1).mean()
+                """
+                responsibilities = th.log_softmax(component_log_prob, dim=1) #+ logits
+                entropy_loss = -(
+                                    responsibilities *
+                                    responsibilities.exp()
+                                ).sum(dim=1).mean()
+                #avg_resp = responsibilities.mean(dim=0)
+                # Mean entropy over the batch
+                
+                
+                
+                
+                l2 = (
+                    #(gmm.centroids-gmm.centroids.mean(dim=0)).square().sum()
+                    #+ gmm.log_var.square().sum()
+                    -(logits*th.exp(logits)).mean()
+                )
+                
+                
+                #l_entropy=0
+                #l2_lambda=0
+                loss = nll + l_entropy*entropy_loss*k + l2_lambda*l2*k
+            else:
+                loss = nll
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -814,7 +1117,7 @@ if __name__ == "__main__":
 
     cov = "diag"
     batch_norm = False
-    lr = 5e-1
+    lr = 0.05
     batch_size = 32
     epochs = 1000
 
@@ -823,13 +1126,18 @@ if __name__ == "__main__":
     gmm = GaussianMixture(k, dim, cov=cov, batch_norm=batch_norm)
     gmm.set_centroids(centroids)
     print("MU", gmm.centroids)
-    gmm_copilot = FastGaussianMixture(dim, k, device="cpu", dtype=th.float32)
-    gmm_copilot.set_centroids(centroids)
+
+    use_tril = False
+    if use_tril:
+        gmm_copilot = FastGaussianMixtureLowerTri(dim, k, device="cpu", dtype=th.float32)
+    else:
+        gmm_copilot = FastGaussianMixture(dim, k, device="cpu", dtype=th.float32)
+    gmm_copilot.initialize_from_data(centroids, dataset.x, assignments=th.tensor(kmeans.labels_))
     print("Centroids", gmm_copilot.centroids)
     #gmm_copilot.initialize_from_data(x)
 
     #
     #train(lr, epochs, loader, gmm, "gmm_kaggle") #40/s
     # WORKS train(lr, epochs, loader, gmm_copilot, "gmm_copilot", l_entropy=-0.02, l2_lambda=0.05) # ~50/s
-    train(lr, epochs, loader, gmm_copilot, "gmm_copilot", l_entropy=-0.02, l2_lambda=0.05) # ~50/s
+    train(lr, epochs, loader, gmm_copilot, f"gmm_{"tril" if use_tril else "fast"}", l_entropy=-0.05, l2_lambda=0.0) # ~50/s
         #train(lr, epochs, loader, gmm_copilot, "gmm_copilot_em")

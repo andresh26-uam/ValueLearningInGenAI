@@ -143,6 +143,9 @@ VALUE_SYSTEM_OUTPUT = {
     'RLHFlow/ArmoRM-Llama3-8B-v0.1': 'score',
 }
 
+CONTEXT_EMBEDDING_FEATURE_NAME = "context_embedding"
+CONTEXT_FEATURE_NAME = "context_features"
+
 MIN_EPSILON = 4.0e-2
 SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-MIN_EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
 # 0.00999.
@@ -231,7 +234,6 @@ class ContextImplementations(enum.Enum):
     BASIC = "BASIC"
     BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
-    BASIC_DETACHED = "BASIC_DETACHED"
     GMM = "GMM"
     NESTED_GMM = "NESTED_GMM"
 

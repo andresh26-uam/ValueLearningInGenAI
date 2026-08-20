@@ -70,6 +70,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_extracted_features) 
 
             dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
+                                                normalize_context=script_args.normalize_context_features,
                                                 from_disk=True,
                                                 extra_keep_keys=extra_keep_keys,
                                                 retokenize=script_args.repostprocess,
@@ -88,6 +89,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             dc = MORewardDataCollator(dtype=torch_dtype)
             dataset = FeatureBasedPreferenceDataset(dataset_path, 
                                                     from_disk=True,
+                                                normalize_context=script_args.normalize_context_features,
                                                 extra_keep_keys=extra_keep_keys,
                                                 repostprocess=script_args.repostprocess,
                                                 recalculate_features=script_args.recalculate_features,
@@ -141,7 +143,10 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
             sharp_context_classification=script_args.sharp_context_classification,
+            detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
+            detach_context_selection_for_value_system_selection=script_args.detach_context_selection_for_value_system_selection,
             ctx_coefficient=script_args.ctx_coefficient,
+            vs_weight_initialization=script_args.vs_weight_initialization,
             vs_selection_coefficient=script_args.vs_selection_coefficient,
             training_initialization_data_size=script_args.training_initialization_data_size,
             max_contexts=script_args.max_contexts,
@@ -221,7 +226,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH, ContextImplementations.BASIC_DETACHED]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
