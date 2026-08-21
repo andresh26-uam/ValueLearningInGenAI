@@ -235,6 +235,7 @@ class ContextImplementations(enum.Enum):
     BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
     GMM = "GMM"
+    GMM_AND_CLASSIFIER = "GMM_AND_CLASSIFIER"
     NESTED_GMM = "NESTED_GMM"
 
 class MOLossFunctionsCategories():

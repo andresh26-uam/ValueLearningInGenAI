@@ -37,6 +37,17 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 
 logger = logging.get_logger(__name__)
 
+def random_argmax(x: th.Tensor, dim: int = -1) -> th.Tensor:
+    with th.no_grad():
+        max_val = x.amax(dim=dim, keepdim=True)
+        mask = x == max_val
+
+        # Random number only determines ordering among maxima.
+        r = th.rand(x.shape, device=x.device, dtype=th.float32)
+        r.masked_fill_(~mask, -1.0)
+
+        return r.argmax(dim=dim)
+t = th.tensor([[1.0, 2.0, 3.0, 3.0], [3.0, 2.0, 1.0, 3.0], [1.0, 3.0, 2.0, 3.0]])
 
 def compute_per_centroid_variance(
     data: th.Tensor,
@@ -456,10 +467,9 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         
         
         self.weight_initialization = weight_initialization
-        self.context_logprobabilities = self._construct_context_logprobabilities(input_shape, ctx_hidden_sizes, ctx_intermediate_activation, dropout, device, dtype)
+        self.context_logits = self._construct_context_logprobabilities(input_shape, ctx_hidden_sizes, ctx_intermediate_activation, dropout, device, dtype)
         #print("CTX PARAMS", [p.dtype for p in self.context_logprobabilities.parameters()])
         #exit(0)
-        self.log_softmaxvs = th.nn.LogSoftmax(dim=1)
         
 
         # Dirichlet concentration (uniform prior; tune if needed)
@@ -486,7 +496,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             logweights = th.log(weights)
             
             # Register as parameter
-        self.vs_selection_to_logweights_matrix = nn.Parameter(    logweights,    requires_grad=True,)
+        self.vs_selection_to_logit_vsweights_matrix = nn.Parameter(    logweights,    requires_grad=True,)
         self.detach_vs_selection_for_value_system_weight_training = detach_vs_selection_for_value_system_weight_training
         
         #/(self.num_contexts*self.num_value_systems)
@@ -497,12 +507,12 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
     
 
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
-        return (self.vs_selection_to_logweights_matrix,)
+        return (self.vs_selection_to_logit_vsweights_matrix,)
     def context_parameters(self) -> Iterable[nn.Parameter]:
-        return self.context_logprobabilities.parameters()
+        return self.context_logits.parameters()
     
     def get_value_systems(self) -> Tuple[Iterable[Any], Iterable[th.Tensor]]:
-        value_systems = th.nn.functional.softmax(self.vs_selection_to_logweights_matrix, dim=1)
+        value_systems = th.nn.functional.softmax(self.vs_selection_to_logit_vsweights_matrix, dim=1)
         vs_indices = list(range(self.num_value_systems))
         return vs_indices, value_systems
 
@@ -514,11 +524,12 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
         #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
         
-        context_logprobs = self.context_logprobabilities(hidden_state)
+        context_logprobs = th.log_softmax(self.context_logits(hidden_state), dim=1)
         
         #raise ValueError("...")
         #print("WHAT", context_logprobs.dtype)
-        vs_assignments = th.argmax(context_logprobs, dim=1)
+        
+        vs_assignments = random_argmax(context_logprobs, dim=1)
         
         assert vs_assignments.shape == (len(hidden_state),)
         
@@ -528,8 +539,8 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             ctx_assignments=vs_assignments,
             context_logprobs=context_logprobs,
             vs_logprobs=context_logprobs,
-            vs_possibilities=self.vs_selection_to_logweights_matrix,
-            ctx_possibilities=self.vs_selection_to_logweights_matrix
+            vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
+            ctx_possibilities=self.vs_selection_to_logit_vsweights_matrix
         )
         
 
@@ -582,11 +593,11 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         else:
             vs_logprobs = context_data.vs_logprobs
             
-        
-        log_value_systems = self.vs_selection_to_logweights_matrix
-        ls_vs_probs = self.log_softmaxvs(vs_logprobs)
-        
-        ls_vs_weights = self.log_softmaxvs(log_value_systems)
+        log_value_systems = self.vs_selection_to_logit_vsweights_matrix
+        ls_vs_probs = vs_logprobs
+        assert th.allclose(th.sum(ls_vs_probs.exp(), dim=1), th.ones((hidden_state.shape[0],)).to(ls_vs_probs.device), atol=1e-4, rtol=0.01)
+
+        ls_vs_weights = th.log_softmax(log_value_systems, dim=1)
         assert ls_vs_probs.shape==(hidden_state.shape[0], self.num_value_systems)
         assert ls_vs_weights.shape==(self.num_value_systems, self.num_values)
 
@@ -633,7 +644,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         
         vs_assignments = context_data.vs_assignments
-        vs_predicted = th.softmax(self.vs_selection_to_logweights_matrix[vs_assignments], dim=1)
+        vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
 
         if __debug__:
             with th.no_grad():
@@ -654,9 +665,9 @@ class BasicHarshCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return [ ]#.extend([*super().context_parameters()])
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        context_logprobs = self.context_logprobabilities(hidden_state)
-        vs_assignments = th.argmax(context_logprobs, dim=1)
-        vs_predicted = th.softmax(self.vs_selection_to_logweights_matrix[vs_assignments], dim=1)
+        context_logprobs = self.context_logits(hidden_state)
+        vs_assignments = random_argmax(context_logprobs, dim=1)
+        vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
         #vs_predicted = self.context_to_vslogweights_matrix[vs_assignments]
         return vs_predicted, context_data
 class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
@@ -998,14 +1009,19 @@ class FastGaussianMixture(nn.Module):
             return samples, log_prob, predicted_ids
 class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
+
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+            return self.value_system_from_context_train(hidden_state, context_data)
+    
     def __init__(self, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_gmm: bool = False, **kwargs: Any) -> None:
         
         super().__init__(input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, dropout=dropout, dtype=dtype, 
                          detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training,  weight_initialization=weight_initialization, **kwargs)
         self.detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection
         self.direct_gmm = direct_gmm
+        self.assume_vs_logprobs_are_normalized = True
         if not direct_gmm:
-            self.context_to_vs_logprobabilities = nn.Parameter(
+            self.context_to_vs_logits = nn.Parameter(
                             th.randn(
                                 (num_contexts,num_value_systems),
                                 device=device,
@@ -1014,7 +1030,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                         )
         else:
             assert num_contexts==num_value_systems, "Direct GMM requires num_contexts==num_value_systems"
-            self.context_to_vs_logprobabilities = nn.Parameter(
+            self.context_to_vs_logits = nn.Parameter(
                             th.eye(
                                 num_contexts,
                                 device=device,
@@ -1024,24 +1040,24 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             
     def initialize_gmm(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor):
         with th.no_grad():
-            self.context_logprobabilities.initialize_from_data(centroids, data, assignments)
+            self.context_logits.initialize_from_data(centroids, data, assignments)
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None):
         return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype)
-
+        
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_gmm:
-            return self.context_logprobabilities.parameters()
+            return self.context_logits.parameters()
         else:
-            return (*self.context_logprobabilities.parameters(), self.context_to_vs_logprobabilities,)
+            return (*self.context_logits.parameters(), self.context_to_vs_logits,)
         
     
 
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
             #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
             #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
-            self.context_logprobabilities: FastGaussianMixture
-            assert isinstance(self.context_logprobabilities, FastGaussianMixture)
-            gmm_logprob, per_component_logprob, component_logprobs = self.context_logprobabilities.forward_all(hidden_state)
+            self.context_logits: FastGaussianMixture
+            assert isinstance(self.context_logits, FastGaussianMixture)
+            gmm_logprob, per_component_logprob, component_logprobs = self.context_logits.forward_all(hidden_state)
             #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
             #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
             #HARD: context_logprobs = per_component_logprob + component_logprobs
@@ -1050,13 +1066,13 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                 context_logprobs = context_logprobs.detach()
                 
             assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
-            assert hidden_state.shape[1] == self.context_logprobabilities.input_size
+            assert hidden_state.shape[1] == self.context_logits.input_size
             assert hidden_state[0].norm() <= 1.0001
             #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
             #print("IT GOES:", context_logprobs)
             #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
             
-            ctx_assignments = th.argmax(context_logprobs, dim=1)
+            ctx_assignments = random_argmax(context_logprobs, dim=1)
             #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
             #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
             #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
@@ -1067,7 +1083,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             # p(v|x) = sum_c p(v|c) p(c|x), computed stably in log-space.
             log_p_context_given_x = context_logprobs
             if not self.direct_gmm:
-                log_p_vs_given_context = th.log_softmax(self.context_to_vs_logprobabilities, dim=1)
+                log_p_vs_given_context = th.log_softmax(self.context_to_vs_logits, dim=1)
                 
                 vs_logprobs = th.logsumexp(
                     log_p_context_given_x.unsqueeze(-1) + log_p_vs_given_context.unsqueeze(0),
@@ -1078,7 +1094,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
             if __debug__:
                 with th.no_grad():
-                    probs_aux = th.softmax(context_logprobs.detach(), dim=1) @ th.softmax(self.context_to_vs_logprobabilities, dim=1)
+                    probs_aux = th.exp(context_logprobs.detach()) @ th.exp(log_p_vs_given_context)
                     vs_logprobs_aux = th.log(probs_aux.clamp_min(1e-30))
 
                 #print(vs_logprobs.shape)
@@ -1087,7 +1103,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
                 
                 assert th.allclose(vs_logprobs, vs_logprobs_aux, atol=1e-4, rtol=0.03), f"VS logprobs mismatch: {vs_logprobs[0:5]} vs {vs_logprobs_aux[0:5]}"
-            vs_assignments = th.argmax(vs_logprobs, dim=1)
+            vs_assignments = random_argmax(vs_logprobs, dim=1)
             
             assert vs_assignments.shape == (len(hidden_state),)
             
@@ -1097,12 +1113,103 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                 ctx_assignments=ctx_assignments,
                 context_logprobs=context_logprobs,
                 vs_logprobs=vs_logprobs,
-                vs_possibilities=self.vs_selection_to_logweights_matrix,
-                ctx_possibilities=self.context_logprobabilities.centroids,
-                extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs, self.context_to_vs_logprobabilities)
+                vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
+                ctx_possibilities=self.context_logits.centroids,
+                extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs, self.context_to_vs_logits)
                 
             )
+
+class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLayer):
+
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_gmm: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, dropout=dropout, device=device, dtype=dtype,
+                         detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training,
+                         detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection,
+                         weight_initialization=weight_initialization,
+                         direct_gmm=direct_gmm,
+                         **kwargs)
+        self.vs_log_probabilities = nn.Sequential(*construct_layers(
+            input_dim=self.input_shape,
+            hidden_sizes=ctx_hidden_sizes,
+            intermediate_activation=ctx_intermediate_activation,
+            final_activation="none",
+            final_activation_kwargs={},
+            n_outputs=self.num_value_systems,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+        ))
+    def value_system_parameters(self) -> Iterable[nn.Parameter]:
+        return (self.vs_selection_to_logit_vsweights_matrix, *self.vs_log_probabilities.parameters())
+    def context_parameters(self) -> Iterable[nn.Parameter]:
+        return self.context_logits.parameters()
     
+    def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None):
+        self.vs_log_probabilities = nn.Sequential(*construct_layers(
+            input_dim=self.input_shape,
+            hidden_sizes=ctx_hidden_sizes,
+            intermediate_activation=ctx_intermediate_activation,
+            final_activation="none",
+            final_activation_kwargs={},
+            n_outputs=self.num_value_systems,
+            dropout=dropout,
+            device=device,
+            dtype=dtype,
+        ))
+        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype)
+            
+    
+    def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
+               
+                #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
+                #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
+                self.context_logits: FastGaussianMixture
+                assert isinstance(self.context_logits, FastGaussianMixture)
+                gmm_logprob, per_component_logprob, component_logprobs = self.context_logits.forward_all(hidden_state)
+                #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
+                #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
+                #HARD: context_logprobs = per_component_logprob + component_logprobs
+                context_logprobs = th.log_softmax(per_component_logprob + component_logprobs, dim=1)
+                if self.detach_context_selection_for_value_system_selection:
+                    context_logprobs = context_logprobs.detach()
+                    
+                assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+                assert hidden_state.shape[1] == self.context_logits.input_size
+                assert hidden_state[0].norm() <= 1.0001
+                #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
+                #print("IT GOES:", context_logprobs)
+                #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
+                
+                ctx_assignments = random_argmax(context_logprobs, dim=1)
+                #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
+                #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
+                #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
+                #raise ValueError("...")
+                #print("WHAT", context_logprobs.dtype)
+                assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+
+                vs_logprobs = self.vs_log_probabilities(hidden_state)
+    
+                if __debug__:
+                    
+                    #print(vs_logprobs.shape)
+                    assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
+    
+                vs_assignments = random_argmax(vs_logprobs, dim=1)
+                
+                assert vs_assignments.shape == (len(hidden_state),)
+                
+                return CtxData(
+                    context_features=hidden_state,
+                    vs_assignments=vs_assignments,
+                    ctx_assignments=ctx_assignments,
+                    context_logprobs=context_logprobs,
+                    vs_logprobs=vs_logprobs,
+                    vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
+                    ctx_possibilities=self.context_logits.centroids,
+                    extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs)
+                    
+                )
 
 class MORMForClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
@@ -1734,15 +1841,12 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
         logs1 = ctx.extra_for_custom_loss[0][jidx]
         logs2 = ctx.extra_for_custom_loss[0][kidx]
         assert th.allclose(logs1, logs2), f"Expected vs_logprobs to be the same for each pair, but got {logs1} and {logs2}"
-        if ContextImplementations(config.context_implementation) == ContextImplementations.GMM:
-            """
-            extra_for_custom_loss = (gmm_logprob,per_component_logprob,component_logprobs)
-                
-            """
+        if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
+            
             if __debug__:
                 with th.no_grad():
                     context_logprobabilities = ctx.extra_for_custom_loss[1][jidx] + ctx.extra_for_custom_loss[2]
-                    assert th.allclose(logs1, th.logsumexp(context_logprobabilities, dim=1)), f"Expected vs_logprobs to be the same for each pair, but got {logs1} and {logs2}"
+                    assert th.allclose(logs1, th.logsumexp(context_logprobabilities, dim=1))
             ctx_prediction_loss = -logs1.mean() # TODO entropy reg...
         
         #print("VS P L", vs_prediction_loss, ctx.vs_logprobs.shape)
@@ -1751,12 +1855,22 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
         return 0, ctx
 
 def entropy_loss_logits(config: MORMForClassificationConfig, ctx: CtxData) -> th.Tensor:
-   
-    context_to_vs_logprobs = ctx.extra_for_custom_loss[3]
-    assert context_to_vs_logprobs.shape == (config.max_contexts, config.max_value_systems), f"Expected entropy_matrix shape {(config.max_contexts, config.max_value_systems)}, got {context_to_vs_logprobs.shape}"
-    _,_,mi = compute_mutual_information(context_to_vs_logprobs)
+
+    if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ]:
+        context_to_vs_logits = ctx.extra_for_custom_loss[3]
+
+        assert context_to_vs_logits.shape == (config.max_contexts, config.max_value_systems), f"Expected entropy_matrix shape {(config.max_contexts, config.max_value_systems)}, got {context_to_vs_logits.shape}"
+
+        _,_,mi = compute_mutual_information(context_to_vs_logits)
+    elif ContextImplementations(config.context_implementation) in [ContextImplementations.GMM_AND_CLASSIFIER, ]:
+        vs_log_probs = ctx.vs_logprobs
+        ctx_log_probs = ctx.context_logprobs
+
+
+        _,_,mi = compute_mutual_information_from_alternative_distributions(vs_log_probs, ctx_log_probs)
 
     return -mi, CtxData.from_previous(ctx, extra_for_custom_loss=(*ctx.extra_for_custom_loss, mi))
+    
     
 def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
     missing_mask = get_missing_rating_mask(
@@ -1796,44 +1910,57 @@ def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.T
             #exit(0)
         target_probs_vs = target_probs_p[..., -1]
         missing_mask_vs = missing_mask[..., -1] if missing_mask is not None else None
-        if sharp_classification:
-            with th.no_grad():
-                losses = []
-                for i in range(predicted_logits_with_each_vs.shape[-1]):
-                    pred_logits_i = predicted_logits_with_each_vs[..., i]
-                    
-                    pred_logits_i_app = apply_discordance_epsilon_to_logits(missing_mask_vs, target_probs_vs, pred_logits_i, discordance_epsilon=discordance_epsilon, activate_discordance_epsilon_for_loss=activate_disc_epsilon_for_loss)
+        
+        with th.no_grad():
+            losses = []
+            for i in range(predicted_logits_with_each_vs.shape[-1]):
+                pred_logits_i = predicted_logits_with_each_vs[..., i]
                 
-                    loss = th.nn.functional.binary_cross_entropy_with_logits(pred_logits_i_app, target_probs_vs, reduction='none')
-                    if rew_center_coefficient != 0 and gr_rew_sum is not None:
-                        gr_rew_sum_for_each_vs_i = gr_rew_sum_for_each_vs[..., i]
-                        centering = th.mean((gr_rew_sum_for_each_vs_i)**2)
-                        loss += rew_center_coefficient * centering
-                    losses.append(loss)
-                losses = th.stack(losses, dim=-1)
-                assert losses.shape == (logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],), f"Expected losses shape {(logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],)}, got {losses.shape}"
-
-                best_one_hot = th.zeros_like(losses, device=losses.device)
-                best_indices = th.argmin(losses, dim=-1)
-                best_one_hot.scatter_(-1, best_indices.unsqueeze(-1), 1.0)
-            assert th.allclose(logs1, logs2), f"Expected vs_logprobs to be the same for each pair, but got {logs1} and {logs2}"
-            vs_prediction_loss = th.nn.functional.binary_cross_entropy_with_logits(logs1, best_one_hot.detach(), reduction='mean')
-            vs_pred_diff = th.abs(th.softmax(logs1, dim=-1) - best_one_hot.detach()).mean()
+                pred_logits_i_app = apply_discordance_epsilon_to_logits(missing_mask_vs, target_probs_vs, pred_logits_i, discordance_epsilon=discordance_epsilon, activate_discordance_epsilon_for_loss=activate_disc_epsilon_for_loss)
             
+                loss = th.nn.functional.binary_cross_entropy_with_logits(pred_logits_i_app, target_probs_vs, reduction='none')
+                if rew_center_coefficient != 0 and gr_rew_sum is not None:
+                    gr_rew_sum_for_each_vs_i = gr_rew_sum_for_each_vs[..., i]
+                    centering = th.mean((gr_rew_sum_for_each_vs_i)**2)
+                    loss += rew_center_coefficient * centering
+                losses.append(loss)
+            losses = th.stack(losses, dim=-1)
+            assert losses.shape == (logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],), f"Expected losses shape {(logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],)}, got {losses.shape}"
+            if not sharp_classification:
+                
+                target_probs = th.softmax(-losses, dim=-1)
+            else:
+                #Assign 1 to the value systems with the lowest losses, and 0 to the others
+                
+                target_probs = th.where(losses == losses.min(dim=-1, keepdim=True).values, th.ones_like(losses), th.zeros_like(losses))
+                target_probs/=target_probs.sum(dim=-1, keepdim=True)
+            assert th.allclose(target_probs.sum(dim=-1), th.ones_like(target_probs[..., 0])), f"Expected target_probs to sum to 1.0, but got {target_probs.sum(dim=-1)}"
+            #best_one_hot = th.zeros_like(losses, device=losses.device)
+            
+            #best_indices = th.argmin(losses, dim=-1)
+
+            #best_one_hot.scatter_(-1, best_indices.unsqueeze(-1), 1.0)
+            assert th.allclose(logs1, logs2), f"Expected vs_logprobs to be the same for each pair, but got {logs1} and {logs2}"
+            assert th.allclose(th.exp(logs1), th.softmax(logs1,dim=1)), f"Expected log_softmax logs1"
+
+        vs_prediction_loss = -(target_probs * logs1).sum(dim=-1).mean()
+        #THIS IS WRONG WHEN VS_LOGRPROBS IS LOGSOFTMAX!!!! vs_prediction_loss = th.nn.functional.binary_cross_entropy_with_logits(logs1, best_one_hot.detach(), reduction='mean')
+        vs_pred_diff = th.abs(th.exp(logs1) - target_probs.detach()).mean()
+        """
         else:
             ls_p = th.nn.functional.logsigmoid(predicted_logits_with_each_vs)
-            logsumexp = th.logsumexp(ls_p + th.nn.functional.log_softmax(logs1, dim=-1), dim=-1)
+            logsumexp = th.logsumexp(ls_p + logs1, dim=-1)
             probs_per_vs_via_log = th.exp(logsumexp)
             
             if __debug__:
-                probs_per_vs =  (th.softmax(logs1, dim=-1) * th.sigmoid(predicted_logits_with_each_vs)).sum(dim=-1) 
+                probs_per_vs =  (th.exp(logs1, dim=-1) * th.sigmoid(predicted_logits_with_each_vs)).sum(dim=-1) 
                 assert th.allclose(probs_per_vs_via_log, probs_per_vs, atol=1e-5), f"Expected log_probs_per_vs and probs_per_vs to be close, but got {probs_per_vs_via_log} and {probs_per_vs}"
             with th.no_grad():
                 vs_pred_diff = th.abs(probs_per_vs_via_log - target_probs_vs).mean()
                 
             
             vs_prediction_loss = th.nn.functional.binary_cross_entropy_with_logits(probs_per_vs_via_log, target_probs_vs, reduction='mean')
-
+        """
         #print("VS P L", vs_prediction_loss, ctx.vs_logprobs.shape)
         return vs_prediction_loss, CtxData.from_previous(ctx, vs_pred_loss=vs_prediction_loss, vs_pred_diff=vs_pred_diff )
     else:
@@ -2029,7 +2156,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
                                                         activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     entropy_loss = 0.0
     
-    if ContextImplementations(config.context_implementation) == ContextImplementations.GMM and entropy_coefficient > 0.0 and not config.direct_gmm:
+    if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER] and entropy_coefficient > 0.0 and not config.direct_gmm:
         ctx_data = CtxData.from_dict(others['ctx']) if ctx_data is None else ctx_data
         if 'ctx' not in others.keys():
                 raise ValueError("Program expected a CtxData object returned by the forward method.")
@@ -2056,7 +2183,6 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
             print("CTXP", ctx_data.context_logprobs[0:4])
             print("VSP", ctx_data.vs_logprobs[0:4])
             print("CTXPexp", th.exp(ctx_data.context_logprobs)[0:4])
-            print("CTXPsoft", th.softmax(ctx_data.context_logprobs, dim=1)[0:4])
             print("CTX_LOSS", ctx_loss)
             print("VS_SELECTION_LOSS", vs_selection_loss)
             print("VS_LOSS", vs_loss)
@@ -2088,9 +2214,9 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
         return th.cat([gr_loss, vs_loss.reshape(-1)])
 
 
-def compute_mutual_information(context_to_vs_logprobabilities: th.Tensor):
+def compute_mutual_information(context_to_vs_logit_probs: th.Tensor):
     context_log_probs = th.log_softmax(
-                context_to_vs_logprobabilities, dim=1
+                context_to_vs_logit_probs, dim=1
             )
     context_probs = context_log_probs.exp()
     value_system_probs = context_probs.mean(dim=0)  # axis 1: value systems
@@ -2104,6 +2230,35 @@ def compute_mutual_information(context_to_vs_logprobabilities: th.Tensor):
     mutual_information = value_system_entropy - conditional_value_system_entropy
             
     return context_log_probs,context_probs,mutual_information
+
+def compute_mutual_information_from_alternative_distributions(log_probs1: th.Tensor, log_probs2: th.Tensor):
+    assert th.allclose(log_probs1.exp().sum(dim=-1), th.ones_like(log_probs1[..., 0])), f"Expected log_probs1 to sum to 1.0, but got {log_probs1.exp().sum(dim=-1)}"
+    assert th.allclose(log_probs2.exp().sum(dim=-1), th.ones_like(log_probs2[..., 0])), f"Expected log_probs2 to sum to 1.0, but got {log_probs2.exp().sum(dim=-1)}"
+    
+    probs1 = th.exp(logits1)
+    probs2 = th.exp(logits2)
+
+    # Conditional entropy 1 given 2:
+    total = 0.0
+    for v1 in range(logits1.shape[1]): 
+        for v2 in range(logits2.shape[1]):
+            probability_of_V1_and_V2 = th.mean(probs1[:, v1] * probs2[:, v2])
+            conditional_probability_of_V1_given_V2 = th.mean(probs1[:, v1] * probs2[:, v2]) / th.mean(probs2[:, v2])
+
+            assert th.allclose(th.log(conditional_probability_of_V1_given_V2), log_probs1[:, v1].mean() - log_probs2[:, v2].mean(), atol=1e-5), f"Expected log(conditional_probability_of_V1_given_V2) to be close to log_probs1.mean() - log_probs2.mean(), but got {th.log(conditional_probability_of_V1_given_V2)} and {log_probs1[:, v1].mean() - log_probs2[:, v2].mean()}"
+            sumando = probability_of_V1_and_V2 * th.log(conditional_probability_of_V1_given_V2)
+            total = sumando + total
+    conditional_value_system_entropy1to2 = -total
+
+    entropy1 = -th.sum(
+                probs1 * log_probs1
+            )
+    
+    mutual_information = entropy1 - conditional_value_system_entropy1to2
+
+    
+            
+    return mutual_information
 
 def mo_compute_loss_func(outputs, labels, config: MORMForClassificationConfig=None, training_variables=None, **kwargs):
     # assert config is not None, "Config must be provided to mo_compute_loss_func"
@@ -2283,7 +2438,7 @@ class MORMForClassification(PreTrainedModel):
         if ContextImplementations(self.config.context_implementation) in [ContextImplementations.BASIC_HARSH, ContextImplementations.DIRECT_VS, ContextImplementations.BASIC_SMOOTH]:
             self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
         # "Pretrain" the network to assign to each cluster the best value system. (given current initialization)
-        elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.NESTED_GMM]:
+        elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.NESTED_GMM, ContextImplementations.GMM_AND_CLASSIFIER ]:
             assert isinstance(self.value_system_layer, BasicGmmCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of BasicGmmCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
             self.value_system_layer.initialize_gmm(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long))
             if self.config.do_initialization:
@@ -2295,13 +2450,13 @@ class MORMForClassification(PreTrainedModel):
         self.config.loss_func_type = prev_config_loss_func_type
     def train_context_log_probs_network_to_predict_KmeansClusters(self, pred_one_hot: np.ndarray, dataset_ctxs_th: th.Tensor):
         self.train()
-        optimizer = th.optim.AdamW(self.value_system_layer.context_logprobabilities.parameters(), lr=self.config.lr_context, weight_decay=0.0003)
+        optimizer = th.optim.AdamW(self.value_system_layer.context_logits.parameters(), lr=self.config.lr_context, weight_decay=0.0003)
         lossfun = th.nn.CrossEntropyLoss(label_smoothing=0.1)
         loss = 1000.0
         pbar = tqdm.tqdm(range(500))
         for t in pbar:
             optimizer.zero_grad()
-            f = self.value_system_layer.context_logprobabilities(dataset_ctxs_th)
+            f = self.value_system_layer.context_logits(dataset_ctxs_th)
             loss = lossfun(f, pred_one_hot)
             loss.backward()
             optimizer.step()
@@ -2370,7 +2525,7 @@ class MORMForClassification(PreTrainedModel):
         
         self.train()
         #optimizer = th.optim.AdamW((self.value_system_layer.context_to_vslogweights_matrix,*self.grounding_parameters()), lr=0.005, weight_decay=0.01)
-        optimizer = th.optim.AdamW((*self.value_system_layer.context_logprobabilities.parameters(),), lr=self.config.lr_value_system, weight_decay=0.001)
+        optimizer = th.optim.AdamW((*self.value_system_layer.context_logits.parameters(),), lr=self.config.lr_value_system, weight_decay=0.001)
          
             
         loss = 1000.0
@@ -2560,14 +2715,14 @@ class MORMForClassification(PreTrainedModel):
             weight_decay = args.weight_decay if args.weight_decay is not None else 0.0001
 
             if freeze_ctx or self.config.direct_gmm:
-                assert self.value_system_layer.context_to_vs_logprobabilities.shape == (self.value_system_layer.context_to_vs_logprobabilities.shape[0], self.value_system_layer.context_to_vs_logprobabilities.shape[0])
+                assert self.value_system_layer.context_to_vs_logits.shape == (self.value_system_layer.context_to_vs_logits.shape[0], self.value_system_layer.context_to_vs_logits.shape[0])
                 if freeze_ctx:
                     with th.no_grad():
-                        self.value_system_layer.context_to_vs_logprobabilities.copy_(th.eye(self.value_system_layer.context_to_vs_logprobabilities.shape[0], device=self.value_system_layer.context_to_vs_logprobabilities.device, dtype=self.value_system_layer.context_to_vs_logprobabilities.dtype, requires_grad=True)*1000.0)
-                optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logweights_matrix,), lr=lr, weight_decay=weight_decay)
+                        self.value_system_layer.context_to_vs_logits.copy_(th.eye(self.value_system_layer.context_to_vs_logits.shape[0], device=self.value_system_layer.context_to_vs_logits.device, dtype=self.value_system_layer.context_to_vs_logits.dtype, requires_grad=True)*1000.0)
+                optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=lr, weight_decay=weight_decay)
                             
             else:
-                optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logweights_matrix, self.value_system_layer.context_to_vs_logprobabilities,), lr=lr, weight_decay=weight_decay)
+                optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, self.value_system_layer.context_to_vs_logits,), lr=lr, weight_decay=weight_decay)
              
                 
             loss = 1000.0
@@ -2633,9 +2788,16 @@ class MORMForClassification(PreTrainedModel):
                     loss_total += self.config.rew_center_coefficient*th.mean((rew_sum)**2)
 
                 # Maximize H(value system) - H(value system | context).
-                context_log_probs, context_probs, mutual_information = compute_mutual_information(self.value_system_layer.context_to_vs_logprobabilities)
-                joint_entropy = th.sum(
-                    context_probs * context_log_probs)
+                if ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM,]:
+                    context_log_probs, context_probs, mutual_information = compute_mutual_information(self.value_system_layer.context_to_vs_logits)
+                elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM_AND_CLASSIFIER,]:
+                    ctx1: CtxData = other1["ctx"]
+                    ctx2: CtxData = other1["ctx"]
+                    assert th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0).shape == (len(batch_indices)*2, self.value_system_layer.num_value_systems)
+                    assert th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0).shape == (len(batch_indices)*2, self.value_system_layer.num_contexts)
+                    mutual_information = compute_mutual_information_from_alternative_distributions(th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0), th.cat([ctx1.context_logprobs, ctx2.context_logprobs], dim=0))
+                    print("MUTUAL INFORMATION", mutual_information.item())
+                    exit(0)
                 if entropy_coef > 0:
                     loss_total = loss_total - entropy_coef * mutual_information
                 
@@ -2698,9 +2860,9 @@ class MORMForClassification(PreTrainedModel):
                         self.value_system_layer.context_to_vs_logprobabilities, dim=1
                     ).detach()
         vs_weights = th.softmax(
-                        self.value_system_layer.vs_selection_to_logweights_matrix, dim=1
+                        self.value_system_layer.vs_selection_to_logit_vsweights_matrix, dim=1
                     ).detach()
-        selected_vs = th.argmax(context_to_vs, dim=1)
+        selected_vs = random_argmax(context_to_vs, dim=1)
         selected_vs_weights = vs_weights[selected_vs].cpu().numpy()
         averaged_vs_weights = (context_to_vs @ vs_weights).cpu().numpy()
         context_to_vs = context_to_vs.cpu().numpy()
@@ -2801,7 +2963,19 @@ class MORMForClassification(PreTrainedModel):
                 ctx_hidden_sizes=config.vs_layer_hidden_sizes,
                 ctx_intermediate_activation=config.vs_layer_intermediate_activation,
                 num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
-        
+        elif ContextImplementations(config.context_implementation) == ContextImplementations.GMM_AND_CLASSIFIER:
+                    
+                    return BasicGmmCtxDependentAlignmentLayer(
+                        input_shape=config.input_size_vs,
+                        direct_gmm=config.direct_gmm,
+                        detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
+                        detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
+                        weight_initialization = config.vs_weight_initialization,
+                        num_contexts=config.max_contexts,
+                        num_value_systems=config.max_value_systems,
+                        ctx_hidden_sizes=config.vs_layer_hidden_sizes,
+                        ctx_intermediate_activation=config.vs_layer_intermediate_activation,
+                        num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC_HARSH:
             return BasicHarshCtxDependentAlignmentLayer(
                 input_shape=config.input_size_vs,
