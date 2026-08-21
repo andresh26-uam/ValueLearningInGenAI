@@ -7,7 +7,7 @@
     "vs_weight_initialization": "dirichlet",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": false,
-    "ctx_coefficient": 0.01,
+    "ctx_coefficient": 1.0,
     "vs_selection_coefficient": 100.0,
     "entropy_coefficient": 0.001,
 

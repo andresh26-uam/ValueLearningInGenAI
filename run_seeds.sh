@@ -23,7 +23,7 @@ DATASET=synth
 CONFIG=run_configs/features_synth_ctx.json
 
 DATASET=pku
-CONFIG=run_configs/smol_ctx_linear_baseline_smooth.json
+CONFIG=run_configs/smol_ctx_linear.json
 
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")

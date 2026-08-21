@@ -2854,10 +2854,9 @@ class MORMForClassification(PreTrainedModel):
             self.train(False)
 
     def plot_matrices(self, t: int, filename, low_res=False, save_npy=True):
-        context_to_vs = None
-        if hasattr(self.value_system_layer, "context_to_vs_logprobabilities"):
-            context_to_vs = th.softmax(
-                        self.value_system_layer.context_to_vs_logprobabilities, dim=1
+        self.value_system_layer: BasicGmmCtxDependentAlignmentLayer
+        context_to_vs = th.softmax(
+                        self.value_system_layer.context_to_vs_logits, dim=1
                     ).detach()
         vs_weights = th.softmax(
                         self.value_system_layer.vs_selection_to_logit_vsweights_matrix, dim=1
