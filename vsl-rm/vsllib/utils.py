@@ -32,8 +32,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
-
+from tsnecuda import TSNE
+#from sklearn.manifold import TSNE
 
 
 from transformers import (
@@ -397,6 +397,8 @@ class ScriptArguments:
 
     do_train: Optional[bool] = field(default=True)
     ctx_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
+    entropy_coefficient: Optional[float] = field(default=0.0, metadata={"help": "The coefficient for the entropy/mutual information penalty on context-to-vs selection. This is only used if the context implementation is GMM."})
+
     vs_selection_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
     sharp_context_classification: Optional[bool] = field(default=True, metadata={"help": "Whether to use sharp classification for the context loss. If True, will use a hard classification for the context loss. If False, will use a soft classification for the context loss."})
     hidden_size: Optional[int] = field(
@@ -587,6 +589,10 @@ class ScriptArguments:
     context_implementation: Optional[str] = field(
         default="NO_CONTEXT",
         metadata={"help": "Choose between ContextImplementations in defines.py"}
+    )
+    direct_gmm: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to consider a value system for each gmm-obtained context (no context-to-vs matrix)"},
     )
     detach_context_selection_for_value_system_selection: Optional[bool] = field(
         default=False,

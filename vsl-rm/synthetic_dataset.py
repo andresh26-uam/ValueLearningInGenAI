@@ -14,7 +14,8 @@ from huggingface_hub import hf_hub_download
 
 from datasets import Dataset as HFDataset
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
+#from sklearn.manifold import TSNE
+from tsnecuda import TSNE
 from tqdm import tqdm
 from vsllib.defines import SYNTH_PROCESSED_PATH, NO_RATING_MASK, OASST_PROCESSED_PATH, OASSTFL_PROCESSED_PATH, SYNTH_PROCESSED_PATH, VALUES_OASST, VALUES_OASST_ORIG, DOWNLOADED_DATASETS_PATH, DatasetNames, save_processeddataset
 

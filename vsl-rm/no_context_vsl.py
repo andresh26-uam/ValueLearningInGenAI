@@ -142,10 +142,13 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
+
+            direct_gmm=script_args.direct_gmm,
             sharp_context_classification=script_args.sharp_context_classification,
             detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
             detach_context_selection_for_value_system_selection=script_args.detach_context_selection_for_value_system_selection,
             ctx_coefficient=script_args.ctx_coefficient,
+            entropy_coefficient=script_args.entropy_coefficient,
             vs_weight_initialization=script_args.vs_weight_initialization,
             vs_selection_coefficient=script_args.vs_selection_coefficient,
             training_initialization_data_size=script_args.training_initialization_data_size,
@@ -219,6 +222,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         print("Script arguments: ")
 
         pprint(vars(script_args))
+        
         # exit(0)
         if ContextImplementations(mo_config.context_implementation) == ContextImplementations.NO_CONTEXT:
             trainer_class = MORewardTrainer 
@@ -274,8 +278,9 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         
         print("EVALUATING")
         if not script_args.use_frozen_base_model:
-            trainer.evaluate()
-        print("EVALUATED")
+            ret = trainer.evaluate()
+        print("EVALUATED: ")
+        pprint(ret)
         trainer.train()
         print("TRAINING FINISHED")
         trainer.evaluate()
@@ -359,6 +364,7 @@ if __name__ == "__main__":
         warmup_steps=0,
         label_names=["labels"],
         report_to="wandb" if is_main_accelerate_process else "none",
+        #report_to="none",
         max_grad_norm=script_args.max_grad_norm,
         run_name=script_args.run_name,
         use_cpu=script_args.use_cpu,

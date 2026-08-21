@@ -90,10 +90,6 @@ class MORewardTrainer(Trainer):
         """
         This overrides the original logging process to include new train metrics.
         """
-        if self.training_step % self.args.logging_steps*10 == 0 or self.training_step == self.args.logging_steps:
-            path = os.path.join(self.args.output_dir, "images")
-            os.makedirs(path, exist_ok=True)
-            self.model.plot_matrices(t=self.training_step, filename=os.path.join(path,  f"context_matrices_{self.training_step}"))
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
         if self.model.training and not is_eval_log:
 
@@ -1043,8 +1039,14 @@ class CtxMORewardTrainer(MORewardTrainer):
         This overrides the original logging process to include new train metrics.
         """
         is_eval_log = any(k.startswith("eval_") for k in logs.keys())
-        if self.model.training and not is_eval_log:
 
+        if self.model.training and not is_eval_log:
+            if self.state.global_step % 1000 == 0:
+                path = os.path.join(self.args.output_dir, "images")
+                os.makedirs(path, exist_ok=True)
+                if ContextImplementations(self.model.config.context_implementation) == ContextImplementations.GMM:
+                    self.model.plot_matrices(t=self.state.global_step, filename=os.path.join(path,  f"context_matrices_{self.state.global_step}"), low_res=True)
+                    
             train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
 
             if self.model.value_system_layer is not None:

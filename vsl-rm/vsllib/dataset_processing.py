@@ -442,7 +442,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
         return self.data
 
     def postprocessor_method_after_save(self) -> None:
-        
+        #self.normalize_context = False
         if self.normalize_context:
             print("NORMALIZING")
             def _normalize_context_batch(batch: Dict[str, Any]) -> Dict[str, Any]:
