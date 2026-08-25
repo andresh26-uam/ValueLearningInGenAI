@@ -3,12 +3,12 @@
     "dataset": "pku",
     "context_implementation": "GMM",
     "do_initialization": true,
-    "direct_gmm": true,
+    "direct_gmm": false,
     "vs_weight_initialization": "dirichlet",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": false,
-    "ctx_coefficient": 10.0,
-    "vs_selection_coefficient": 0.0,
+    "ctx_coefficient": 1.0,
+    "vs_selection_coefficient": -100.0,
     "entropy_coefficient": 0.0,
 
     "training_initialization_data_size": "all",
@@ -46,8 +46,8 @@
 
     "rew_center_coefficient": 0.001,
     
-    "learning_rate": 0.0001,
-    "grounding_learning_rate": 0.0001,
+    "learning_rate": 0.0002,
+    "grounding_learning_rate": 0.0002,
     "context_learning_rate": 0.005,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.1,

@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from copy import deepcopy
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets import Column, Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
@@ -260,7 +260,7 @@ class BasePairwisePreferenceDataset():
         #self.train_dataset = self.train_dataset.select(range(min(len(self.train_dataset), 200)))
         #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
         #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
-
+        self.get_all_contexts_embeddings()
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=32, num_proc=4):
         
@@ -275,7 +275,9 @@ class BasePairwisePreferenceDataset():
         
 
     def get_all_contexts_embeddings(self, recalculate=False) -> List[th.Tensor]:
-        return self.data[self.context_feature_name]
+        
+        return np.asarray(self.data[self.context_feature_name])
+        
     
     def __len__(self):
         return len(self.data)
@@ -364,6 +366,7 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
         sub_path = "postproc"
         self.postprocessor_method = postprocess_sample
         self.feature_extractor_method = feature_extract_sample
+        self.normalize_context = normalize_context
         super().__init__(context_feature_name = CONTEXT_FEATURE_NAME, path=path, sub_path=sub_path, from_disk=from_disk, extra_keep_keys=extra_keep_keys, 
                          repostprocess=repostprocess, recalculate_features=recalculate_features, 
                          use_extracted_features=use_extracted_features, use_context=use_context, 
@@ -373,9 +376,11 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
         
         
     def postprocessor_method_after_save(self):
-        normalizer = StandardScaler()
-        ctx_features = self.get_all_contexts_embeddings()
-        ctx_features = normalizer.fit_transform(ctx_features)
+        if self.normalize_context:
+            print("NORMALIZING")
+            normalizer = StandardScaler()
+            ctx_features = self.get_all_contexts_embeddings()
+            ctx_features = normalizer.fit_transform(ctx_features)
 
 
     

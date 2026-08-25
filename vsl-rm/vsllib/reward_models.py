@@ -5,6 +5,7 @@ import dis
 from http.client import NO_CONTENT
 from operator import truediv
 from re import A
+from click import Context
 from regex import P
 from sympy import Abs
 from tokenizers.decoders import CTC
@@ -36,8 +37,26 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 
 
 logger = logging.get_logger(__name__)
+TEMPERATURE = 1.0
+ACTIVATE_TEMPERATURE_VS =  False
+TEMPERATURE_GMM = 50.0
+ACTIVATE_TEMPERATURE_GMM = False
+def calculate_training_constants(args: TrainingArguments, total_dataset_size: int, len_dataset: int, epoch_multiplier=0.1) -> Tuple[tqdm.tqdm, int, int, int]:
+        
+            
+        iterations_total = int((total_dataset_size//args.train_batch_size)*args.num_train_epochs*epoch_multiplier)
+        print("Iterations total:", iterations_total)
+            
+                
+        pbar = tqdm.tqdm(range(iterations_total))
+        batch_size = min(args.train_batch_size, len_dataset)
+        if batch_size <= 0:
+            raise ValueError("No valid examples available for value-system pretraining")
+        batches_per_epoch = (len_dataset + batch_size - 1) // batch_size
+        return pbar,iterations_total,batch_size,batches_per_epoch
 
 def random_argmax(x: th.Tensor, dim: int = -1) -> th.Tensor:
+    #return th.argmax(x, dim) # TODO !!!!!!!
     with th.no_grad():
         max_val = x.amax(dim=dim, keepdim=True)
         mask = x == max_val
@@ -105,7 +124,7 @@ def compute_per_centroid_variance(
     return variance
 
 
-def construct_layers(input_dim, hidden_sizes, intermediate_activation, dropout, device, dtype, n_outputs, final_activation, final_activation_kwargs):
+def construct_layers(input_dim: int, hidden_sizes: Tuple, intermediate_activation: str, dropout: float, device, dtype, n_outputs: int, final_activation: str, final_activation_kwargs: dict):
     layers=[]
     try:
         intermediate_activation = VALUE_LAYER_ACTIVATIONS[
@@ -171,7 +190,7 @@ class LinearAlignmentLayer(th.nn.Linear, AlignmentLayer):
         # assert input.shape[-1] == self.n_values, f"Expected output shape to have last dimension {self.n_values}, but got {output.shape}"
         # return output
 
-    def get_alignment_layer(self):
+    def get_alignment_layer(self) -> nn.Parameter:
         return self.weight
         # assert th.allclose(w_bounded, th.nn.functional.softmax(self.weight))
 
@@ -447,7 +466,10 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
             raise NotImplementedError("2d (or more) input context shapes not implemeted")
 
 
-
+@th.compiler.disable
+def sample_dirichlet(alpha: th.Tensor, dims: tuple = (1,)) -> th.Tensor:
+    
+    return th.distributions.Dirichlet(alpha).sample(dims)
 class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
 
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None):
@@ -473,16 +495,13 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         
 
         # Dirichlet concentration (uniform prior; tune if needed)
-        
-        if device is not None and th.device(device).type == "meta":
+        if list(self.context_logits.parameters())[0].is_meta:
             logweights = th.empty((num_value_systems, num_values), device=device, dtype=dtype)
         else:
+            print(device, "DEV?")
             if self.weight_initialization == "dirichlet":
                 alpha = th.ones(num_values, device=device, dtype=dtype)
-                # Create distribution
-                dirichlet = th.distributions.Dirichlet(alpha)
-                # Sample: shape (num_contexts, num_values)
-                weights = dirichlet.sample((num_value_systems,))  # rows sum to 1
+                weights = sample_dirichlet(alpha, (num_value_systems,))  # rows sum to 1
             elif self.weight_initialization == "equal":
                 weights = th.ones((num_value_systems, num_values), device=device, dtype=dtype)/num_values
             elif self.weight_initialization == "span":
@@ -524,7 +543,11 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
         #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
         
-        context_logprobs = th.log_softmax(self.context_logits(hidden_state), dim=1)
+        if TEMPERATURE > 0.0 and ACTIVATE_TEMPERATURE_VS:
+            logit = self.context_logits(hidden_state)/TEMPERATURE
+        else:
+            logit = self.context_logits(hidden_state)
+        context_logprobs = th.log_softmax(logit, dim=1)
         
         #raise ValueError("...")
         #print("WHAT", context_logprobs.dtype)
@@ -736,6 +759,7 @@ class FastGaussianMixture(nn.Module):
         input_size: int,
         num_components: int,
         l_entropy = 1e-1,
+        activate_threshold: bool = False,
         device=None,
         dtype=None
     ):
@@ -743,7 +767,7 @@ class FastGaussianMixture(nn.Module):
         self.l_entropy = l_entropy
         self.input_size = input_size
         self.num_components = num_components
-
+        self.activate_threshold = activate_threshold
         self.logits = nn.Parameter(
             th.zeros(num_components, device=device, dtype=dtype)
         )
@@ -767,7 +791,7 @@ class FastGaussianMixture(nn.Module):
         )
 
 
-    def forward_all(self, x):
+    def forward_all(self, x) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
 
         # x: [B,D]
 
@@ -818,20 +842,24 @@ class FastGaussianMixture(nn.Module):
         )
         logits = th.log_softmax(self.logits, dim=0)
 
+        if self.activate_threshold:
+            csum = (component_log_prob
+                    +
+                    logits)/TEMPERATURE_GMM
+        else:
+            csum = component_log_prob + logits
         return th.logsumexp(
-            component_log_prob
-            +
-            logits,
+            csum,
             dim=1
-        ), component_log_prob, logits
+        ), component_log_prob, logits, csum
 
     def forward(self, x: th.Tensor):
-        point_logprob, per_component_logprob, component_logprobs = self.forward_all(x)
+        point_logprob, per_component_logprob, component_logprobs, csum = self.forward_all(x)
         #per_component_logprob: [B, K]
         #component_logprobs: [K]
         #assert th.testing.assert_close(th.sum(ind_probs, dim=1) , th.ones((x.shape[0],), device=x.device, dtype=x.dtype), rtol=1e-3, atol=1e-3)
 
-        return per_component_logprob + component_logprobs
+        return point_logprob
         #return per_component_logprob + component_logprobs
 
     def component_generation_logprob(self, batch: th.Tensor) -> th.Tensor:
@@ -942,7 +970,7 @@ class FastGaussianMixture(nn.Module):
     
                 self.log_var.copy_(th.log(per_centroid_var))
 
-    def sample(self, n):
+    def sample(self, n: int) -> Tuple[th.Tensor, th.Tensor]:
 
         with th.no_grad():
 
@@ -1042,7 +1070,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         with th.no_grad():
             self.context_logits.initialize_from_data(centroids, data, assignments)
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None):
-        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype)
+        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_TEMPERATURE_GMM)
         
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_gmm:
@@ -1057,11 +1085,11 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
             self.context_logits: FastGaussianMixture
             assert isinstance(self.context_logits, FastGaussianMixture)
-            gmm_logprob, per_component_logprob, component_logprobs = self.context_logits.forward_all(hidden_state)
+            gmm_logprob, per_component_logprob, component_logprobs, csum = self.context_logits.forward_all(hidden_state)
             #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
             #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
             #HARD: context_logprobs = per_component_logprob + component_logprobs
-            context_logprobs = th.log_softmax(per_component_logprob + component_logprobs, dim=1)
+            context_logprobs = th.log_softmax(csum, dim=1)
             if self.detach_context_selection_for_value_system_selection:
                 context_logprobs = context_logprobs.detach()
                 
@@ -1128,7 +1156,7 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                          weight_initialization=weight_initialization,
                          direct_gmm=direct_gmm,
                          **kwargs)
-        self.vs_log_probabilities = nn.Sequential(*construct_layers(
+        self.vs_logits_network = nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
             hidden_sizes=ctx_hidden_sizes,
             intermediate_activation=ctx_intermediate_activation,
@@ -1140,12 +1168,12 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
             dtype=dtype,
         ))
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
-        return (self.vs_selection_to_logit_vsweights_matrix, *self.vs_log_probabilities.parameters())
+        return (self.vs_selection_to_logit_vsweights_matrix, *self.vs_logits_network.parameters())
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return self.context_logits.parameters()
     
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None):
-        self.vs_log_probabilities = nn.Sequential(*construct_layers(
+        self.vs_logits_network = nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
             hidden_sizes=ctx_hidden_sizes,
             intermediate_activation=ctx_intermediate_activation,
@@ -1156,26 +1184,27 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
             device=device,
             dtype=dtype,
         ))
-        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype)
+        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_TEMPERATURE_GMM)
             
     
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
-               
+                
                 #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
                 #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
                 self.context_logits: FastGaussianMixture
                 assert isinstance(self.context_logits, FastGaussianMixture)
-                gmm_logprob, per_component_logprob, component_logprobs = self.context_logits.forward_all(hidden_state)
+                gmm_logprob, per_component_logprob, component_logprobs, csum = self.context_logits.forward_all(hidden_state)
                 #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
                 #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
                 #HARD: context_logprobs = per_component_logprob + component_logprobs
-                context_logprobs = th.log_softmax(per_component_logprob + component_logprobs, dim=1)
+                context_logprobs = th.log_softmax(csum, dim=1)
+                
                 if self.detach_context_selection_for_value_system_selection:
                     context_logprobs = context_logprobs.detach()
                     
                 assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
                 assert hidden_state.shape[1] == self.context_logits.input_size
-                assert hidden_state[0].norm() <= 1.0001
+                
                 #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
                 #print("IT GOES:", context_logprobs)
                 #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
@@ -1188,7 +1217,10 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                 #print("WHAT", context_logprobs.dtype)
                 assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
 
-                vs_logprobs = self.vs_log_probabilities(hidden_state)
+                if TEMPERATURE > 0 and ACTIVATE_TEMPERATURE_VS:
+                    vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state)/TEMPERATURE, dim=1)
+                else:
+                    vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state), dim=1)
     
                 if __debug__:
                     
@@ -1620,7 +1652,7 @@ def logits_BT(x: th.Tensor, y: th.Tensor, threshold=50.0, check_undefined_label=
     return returns_diff
 
 
-def get_missing_rating_mask(x_or_probs, y=None):
+def get_missing_rating_mask(x_or_probs: th.Tensor, y: th.Tensor =None) -> th.Tensor:
     if y is not None:
         missing_mask = (x_or_probs == NO_RATING_MASK) | (y == NO_RATING_MASK)
     else:
@@ -1867,7 +1899,7 @@ def entropy_loss_logits(config: MORMForClassificationConfig, ctx: CtxData) -> th
         ctx_log_probs = ctx.context_logprobs
 
 
-        _,_,mi = compute_mutual_information_from_alternative_distributions(vs_log_probs, ctx_log_probs)
+        mi = compute_mutual_information_from_alternative_distributions(vs_log_probs, ctx_log_probs)
 
     return -mi, CtxData.from_previous(ctx, extra_for_custom_loss=(*ctx.extra_for_custom_loss, mi))
     
@@ -2179,7 +2211,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
 
     if th.is_grad_enabled():
         ctx_data: CtxData
-        if ContextImplementations(config.context_implementation) == ContextImplementations.GMM:
+        if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
             print("CTXP", ctx_data.context_logprobs[0:4])
             print("VSP", ctx_data.vs_logprobs[0:4])
             print("CTXPexp", th.exp(ctx_data.context_logprobs)[0:4])
@@ -2234,31 +2266,30 @@ def compute_mutual_information(context_to_vs_logit_probs: th.Tensor):
 def compute_mutual_information_from_alternative_distributions(log_probs1: th.Tensor, log_probs2: th.Tensor):
     assert th.allclose(log_probs1.exp().sum(dim=-1), th.ones_like(log_probs1[..., 0])), f"Expected log_probs1 to sum to 1.0, but got {log_probs1.exp().sum(dim=-1)}"
     assert th.allclose(log_probs2.exp().sum(dim=-1), th.ones_like(log_probs2[..., 0])), f"Expected log_probs2 to sum to 1.0, but got {log_probs2.exp().sum(dim=-1)}"
-    
-    probs1 = th.exp(logits1)
-    probs2 = th.exp(logits2)
+    """
+    log_probs1: [B, N1]
+    log_probs2: [B, N2]
 
-    # Conditional entropy 1 given 2:
-    total = 0.0
-    for v1 in range(logits1.shape[1]): 
-        for v2 in range(logits2.shape[1]):
-            probability_of_V1_and_V2 = th.mean(probs1[:, v1] * probs2[:, v2])
-            conditional_probability_of_V1_given_V2 = th.mean(probs1[:, v1] * probs2[:, v2]) / th.mean(probs2[:, v2])
+    Treats each batch element as an observation and estimates
+    P(V1, V2) from the two distributions.
+    """
 
-            assert th.allclose(th.log(conditional_probability_of_V1_given_V2), log_probs1[:, v1].mean() - log_probs2[:, v2].mean(), atol=1e-5), f"Expected log(conditional_probability_of_V1_given_V2) to be close to log_probs1.mean() - log_probs2.mean(), but got {th.log(conditional_probability_of_V1_given_V2)} and {log_probs1[:, v1].mean() - log_probs2[:, v2].mean()}"
-            sumando = probability_of_V1_and_V2 * th.log(conditional_probability_of_V1_given_V2)
-            total = sumando + total
-    conditional_value_system_entropy1to2 = -total
+    p1 = log_probs1.exp()
+    p2 = log_probs2.exp()
 
-    entropy1 = -th.sum(
-                probs1 * log_probs1
-            )
-    
-    mutual_information = entropy1 - conditional_value_system_entropy1to2
+    joint = th.einsum("bi,bj->ij", p1, p2) / p1.shape[0]
 
-    
-            
-    return mutual_information
+    marginal1 = joint.sum(dim=1, keepdim=True)
+    marginal2 = joint.sum(dim=0, keepdim=True)
+
+    # Only evaluate log where joint > 0.
+    log_ratio = (
+        th.log(joint.clamp_min(th.finfo(joint.dtype).tiny))
+        - th.log(marginal1.clamp_min(th.finfo(joint.dtype).tiny))
+        - th.log(marginal2.clamp_min(th.finfo(joint.dtype).tiny))
+    )
+
+    return (joint * log_ratio).sum()
 
 def mo_compute_loss_func(outputs, labels, config: MORMForClassificationConfig=None, training_variables=None, **kwargs):
     # assert config is not None, "Config must be provided to mo_compute_loss_func"
@@ -2436,7 +2467,8 @@ class MORMForClassification(PreTrainedModel):
 
         #self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
         if ContextImplementations(self.config.context_implementation) in [ContextImplementations.BASIC_HARSH, ContextImplementations.DIRECT_VS, ContextImplementations.BASIC_SMOOTH]:
-            self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
+            # NOT REALLY USEFUL: self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
+            self.pre_train_basic_smooth(train_subdataset, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         # "Pretrain" the network to assign to each cluster the best value system. (given current initialization)
         elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.NESTED_GMM, ContextImplementations.GMM_AND_CLASSIFIER ]:
             assert isinstance(self.value_system_layer, BasicGmmCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of BasicGmmCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
@@ -2571,6 +2603,68 @@ class MORMForClassification(PreTrainedModel):
         self.train(False)
 
 
+    def pre_train_basic_smooth(self, train_subdataset, dataset_ctxs_th, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
+        with th.no_grad():
+            dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
+            dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
+            dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., -1]
+            dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., 0:-1]
+            
+            dataset_gr_scores = scores_to_target_probs(dataset_gr_scores[:,0, :], dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
+            
+            missing_mask_gr = dataset_gr_scores == NO_RATING_MASK 
+            
+            dataset_score=scores_to_target_probs(dataset_score[:,0], dataset_score[:,1], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
+            missing_mask = dataset_score==NO_RATING_MASK
+            #dataset_score_valid = dataset_score.masked_fill(missing_mask, 0.5)
+            dataset_score_gr_valid = dataset_gr_scores.masked_fill(missing_mask_gr, 0.5)
+            
+
+            if eval_set is not None:
+                eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
+                        
+                eval_dataset_grounding_features1 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
+                eval_dataset_grounding_features2 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
+                eval_dataset_score = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., -1]
+                eval_dataset_gr_scores = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., 0:-1]
+                
+                eval_dataset_gr_scores = scores_to_target_probs(eval_dataset_gr_scores[:,0, :], eval_dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
+                
+                eval_missing_mask_gr = eval_dataset_gr_scores == NO_RATING_MASK 
+                
+                eval_dataset_score=scores_to_target_probs(eval_dataset_score[:,0], eval_dataset_score[:,1], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
+                eval_missing_mask = eval_dataset_score==NO_RATING_MASK
+                #dataset_score_valid = dataset_score.masked_fill(missing_mask, 0.5)
+                eval_dataset_score_gr_valid = eval_dataset_gr_scores.masked_fill(eval_missing_mask_gr, 0.5)
+                
+
+        self.train()
+        #optimizer = th.optim.AdamW((self.value_system_layer.context_to_vslogweights_matrix,*self.grounding_parameters()), lr=0.005, weight_decay=0.01)
+        optimizer = th.optim.AdamW((*self.grounding_parameters(),), lr=self.config.lr_grounding, weight_decay=args.weight_decay)
+        #lr 0.0002 very good and weight_decay 0.0001
+        
+        loss = 1000.0
+        print("Grounding pretrain")
+        accuracy = self.grounding_initialization(args=args,
+                                                 total_dataset_size=total_dataset_size,
+                                                 optimizer=optimizer, 
+                                                 dataset_grounding_features1=dataset_grounding_features1, 
+                                                 dataset_grounding_features2=dataset_grounding_features2, 
+                                                 missing_mask_gr=missing_mask_gr, 
+                                                 dataset_score_gr_valid=dataset_score_gr_valid, 
+                                                 eval_dataset_grounding_features1=eval_dataset_grounding_features1,
+                                                 eval_dataset_grounding_features2=eval_dataset_grounding_features2, 
+                                                 eval_missing_mask_gr=eval_missing_mask_gr, 
+                                                 eval_dataset_score_gr_valid=eval_dataset_score_gr_valid, 
+                                                 epoch_multiplier=0.05)
+        print("Initializing Value System Selection Network to Random Probabilities")
+        optimizer = th.optim.AdamW((*self.value_system_layer.context_logits.parameters(),), lr=self.config.lr_context, weight_decay=args.weight_decay)
+        valid_grounding_features1 = dataset_grounding_features1[~missing_mask]
+        valid_grounding_features2 = dataset_grounding_features2[~missing_mask]
+        valid_context_features = dataset_ctxs_th[~missing_mask]
+        self.init_random_selection_of_vs(args, optimizer, total_dataset_size, valid_grounding_features1, valid_grounding_features2, valid_context_features)
+        
+                        
     def pre_train_grounding_and_vs_selection_matrix_for_gmm(self, kmeans: KMeans, train_subdataset: Dataset, pred: np.ndarray, dataset_ctxs_th: th.Tensor, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
             with th.no_grad():
                     dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
@@ -2611,94 +2705,20 @@ class MORMForClassification(PreTrainedModel):
             optimizer = th.optim.AdamW((*self.grounding_parameters(),), lr=self.config.lr_grounding, weight_decay=args.weight_decay)
             #lr 0.0002 very good and weight_decay 0.0001
                 
-            loss = 1000.0
-            len_dataset = len(dataset_grounding_features1)
-            
-            iterations_total = int((total_dataset_size//args.train_batch_size)*args.num_train_epochs*0.1)
-            print("Iterations total:", iterations_total)
-            
-                
-            pbar = tqdm.tqdm(range(iterations_total))
-            batch_size = min(args.train_batch_size, len_dataset)
-            if batch_size <= 0:
-                raise ValueError("No valid examples available for value-system pretraining")
-            batches_per_epoch = (len_dataset + batch_size - 1) // batch_size
-            
             print("Grounding initialization")
 
-
-            eval_accuracy_total = 0
-            for t in pbar:
-                loss_total = 0
-                accuracy_total = 0
-                optimizer.zero_grad()
-                with th.no_grad():
-                    epoch_step = t % batches_per_epoch
-                    if epoch_step == 0 and t >= 0:
-                        perm = th.randperm(
-                            len_dataset, device=dataset_grounding_features1.device
-                        )
-                    start = epoch_step * batch_size
-                    end = min(start + batch_size, len_dataset)
-                    batch_indices = perm[start:end]
-                    batch_indices = batch_indices.reshape((len(batch_indices),))
-                rewards1 = self.reward_heads(dataset_grounding_features1[batch_indices])
-                rewards2 = self.reward_heads(dataset_grounding_features2[batch_indices])
-
-                targets = dataset_score_gr_valid[batch_indices]
-                assert targets.shape == (len(batch_indices), self.num_values)
-                #s1, other1 = self.value_system_layer.forward(rewards1, hidden_state=context_features_in_c)
-                #s2, other2 = self.value_system_layer.forward(rewards2, hidden_state=context_features_in_c)
-                    #print(s1, s2)
-                bt_normal = logits_BT(rewards1, rewards2, check_undefined_label=self.config.check_undefined_label, missing_mask=missing_mask if self.config.check_undefined_label else None, assume_torch=True)
-                assert bt_normal.shape == (len(batch_indices), self.num_values)
-                assert targets.shape == (len(batch_indices), self.num_values)
-                assert missing_mask_gr[batch_indices].shape == (len(batch_indices), self.num_values)
-                bt = apply_discordance_epsilon_to_logits(missing_mask_gr[batch_indices], targets, bt_normal, discordance_epsilon=self.config.discordance_epsilon, activate_discordance_epsilon_for_loss=self.config.activate_discordance_epsilon_for_loss)
-                rew_sum = rewards1+rewards2
-                
-                    #print(th.sum((th.abs(th.sigmoid(-bt)[0:10]-targets_in_c[0:10]))), "wtf")
-                for vi in range(self.num_values):
-                    loss = th.nn.functional.binary_cross_entropy_with_logits(bt[:, vi], targets[: ,vi])
-                    if self.config.rew_center_coefficient > 0.0:
-                        loss += self.config.rew_center_coefficient*th.mean((rew_sum)**2)
-                    loss_total = loss + loss_total
-                    with th.no_grad():
-                        
-                        accuracy = accuracy_logits(bt_normal[:, vi], targets[:, vi], missing_mask=missing_mask_gr[batch_indices][:, vi])
-                        accuracy_total = accuracy + accuracy_total if t > 0 else accuracy
-                loss_total.backward()
-                optimizer.step()
-                if t % int(0.1*iterations_total) == 0 and t > 0:
-                    # Evaluate on eval set:
-                    eval_accuracy_total = 0
-                    if eval_set is not None:
-                        with th.no_grad():
-                            rewards1 = self.reward_heads(eval_dataset_grounding_features1)
-                            rewards2 = self.reward_heads(eval_dataset_grounding_features2)
+            accuracy = self.grounding_initialization(args=args,
+                                                             total_dataset_size=total_dataset_size,
+                                                             optimizer=optimizer, 
+                                                             dataset_grounding_features1=dataset_grounding_features1, 
+                                                             dataset_grounding_features2=dataset_grounding_features2, 
+                                                             missing_mask_gr=missing_mask_gr, 
+                                                             dataset_score_gr_valid=dataset_score_gr_valid, 
+                                                             eval_dataset_grounding_features1=eval_dataset_grounding_features1,
+                                                             eval_dataset_grounding_features2=eval_dataset_grounding_features2, 
+                                                             eval_missing_mask_gr=eval_missing_mask_gr, 
+                                                             eval_dataset_score_gr_valid=eval_dataset_score_gr_valid, epoch_multiplier=0.05)
             
-                            eval_targets = eval_dataset_score_gr_valid
-                            #s1, other1 = self.value_system_layer.forward(rewards1, hidden_state=context_features_in_c)
-                            #s2, other2 = self.value_system_layer.forward(rewards2, hidden_state=context_features_in_c)
-                                #print(s1, s2)
-                            bt_normal = logits_BT(rewards1, rewards2, check_undefined_label=self.config.check_undefined_label, missing_mask=missing_mask if self.config.check_undefined_label else None, assume_torch=True)
-                            bt = apply_discordance_epsilon_to_logits(eval_missing_mask_gr, eval_targets, bt_normal, discordance_epsilon=self.config.discordance_epsilon, activate_discordance_epsilon_for_loss=self.config.activate_discordance_epsilon_for_loss)
-                            rew_sum = rewards1+rewards2
-                            loss_total = 0
-                            eval_accuracy_total = 0
-                            for vi in range(self.num_values):
-                                loss = th.nn.functional.binary_cross_entropy_with_logits(bt[:, vi], eval_targets[: ,vi])
-                                if self.config.rew_center_coefficient > 0.0:
-                                    loss += self.config.rew_center_coefficient*th.mean((rew_sum)**2)
-                                loss_total = loss + loss_total
-                                with th.no_grad():
-                                    accuracy = accuracy_logits(bt_normal[:, vi], eval_targets[:, vi], missing_mask=eval_missing_mask_gr[:, vi], discordance_epsilon=self.config.discordance_epsilon)
-                                    eval_accuracy_total = accuracy + eval_accuracy_total
-                            eval_accuracy_total = eval_accuracy_total.item()
-                            print(f"Eval accuracy: {eval_accuracy_total/self.num_values}, Eval loss: {loss_total.item()}")
-                pbar.set_postfix({'loss': loss_total.item(), 'accuracy': (accuracy_total/float(self.num_values)).item(), "eval": (eval_accuracy_total/float(self.num_values)) if eval_set is not None else 0.0})
-                
-            self.train()
 
             assert isinstance(self.value_system_layer, BasicGmmCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of BasicGmmCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
             #optimizer = th.optim.AdamW((self.value_system_layer.context_to_vslogweights_matrix,*self.grounding_parameters()), lr=0.005, weight_decay=0.01)
@@ -2711,10 +2731,16 @@ class MORMForClassification(PreTrainedModel):
             #weight_decay = args.weight_decay if args.weight_decay is not None else 0.001
             #entropy_coef = 0.001
             entropy_coef = self.config.entropy_coefficient if self.config.entropy_coefficient is not None else 0.001
+            
             lr = self.config.lr_context if self.config.lr_context is not None else 0.005
             weight_decay = args.weight_decay if args.weight_decay is not None else 0.0001
 
-            if freeze_ctx or self.config.direct_gmm:
+            valid_grounding_features1 = dataset_grounding_features1[~missing_mask]
+            valid_grounding_features2 = dataset_grounding_features2[~missing_mask]
+            valid_targets = dataset_score[~missing_mask]
+            valid_context_features = dataset_ctxs_th[~missing_mask]
+            
+            if (freeze_ctx or self.config.direct_gmm) and ContextImplementations(self.config.context_implementation) == ContextImplementations.GMM:
                 assert self.value_system_layer.context_to_vs_logits.shape == (self.value_system_layer.context_to_vs_logits.shape[0], self.value_system_layer.context_to_vs_logits.shape[0])
                 if freeze_ctx:
                     with th.no_grad():
@@ -2722,16 +2748,26 @@ class MORMForClassification(PreTrainedModel):
                 optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=lr, weight_decay=weight_decay)
                             
             else:
-                optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, self.value_system_layer.context_to_vs_logits,), lr=lr, weight_decay=weight_decay)
-             
-                
+                if ContextImplementations(self.config.context_implementation) == ContextImplementations.GMM:
+                    optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, self.value_system_layer.context_to_vs_logits,), lr=lr, weight_decay=weight_decay)
+                elif ContextImplementations(self.config.context_implementation) == ContextImplementations.GMM_AND_CLASSIFIER:
+                    
+                    # PRETRAIN vs_logits_network to be uniform.
+                    #optimizer = th.optim.AdamW((self.value_system_layer.context_to_vslogweights_matrix,*self.grounding_parameters()), lr=0.005, weight_decay=0.01)
+                    optimizer = th.optim.AdamW((*self.value_system_layer.vs_logits_network.parameters(),), lr=self.config.lr_value_system, weight_decay=args.weight_decay)
+                    print("Initializing Value System Selection Network to Random Probabilities")
+                    self.init_random_selection_of_vs(args, optimizer, total_dataset_size, valid_grounding_features1, valid_grounding_features2, valid_context_features)
+
+                    self.value_system_layer: GmmAndClassifierCtxDependentAlignmentLayer
+                    optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, *self.value_system_layer.vs_logits_network.parameters(),), lr=self.config.lr_value_system, weight_decay=weight_decay)
+                             
+            self.train()
             loss = 1000.0
+            len_dataset = len(dataset_grounding_features1)
+            pbar,iterations_total,batch_size,batches_per_epoch = calculate_training_constants(args, total_dataset_size, len_dataset, epoch_multiplier=0.1)
+            
             pbar = tqdm.tqdm(range(iterations_total))
-            valid_grounding_features1 = dataset_grounding_features1[~missing_mask]
-            len_dataset = len(valid_grounding_features1)
-            valid_grounding_features2 = dataset_grounding_features2[~missing_mask]
-            valid_targets = dataset_score[~missing_mask]
-            valid_context_features = dataset_ctxs_th[~missing_mask]
+            
 
             if eval_set is not None:
                 eval_valid_grounding_features1 = eval_dataset_grounding_features1[~eval_missing_mask]
@@ -2791,13 +2827,15 @@ class MORMForClassification(PreTrainedModel):
                 if ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM,]:
                     context_log_probs, context_probs, mutual_information = compute_mutual_information(self.value_system_layer.context_to_vs_logits)
                 elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM_AND_CLASSIFIER,]:
-                    ctx1: CtxData = other1["ctx"]
-                    ctx2: CtxData = other1["ctx"]
+                    #with th.no_grad():
+                    ctx1: CtxData = CtxData.from_dict(other1["ctx"])
+                    ctx2: CtxData = CtxData.from_dict(other2["ctx"])
+                    
                     assert th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0).shape == (len(batch_indices)*2, self.value_system_layer.num_value_systems)
                     assert th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0).shape == (len(batch_indices)*2, self.value_system_layer.num_contexts)
                     mutual_information = compute_mutual_information_from_alternative_distributions(th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0), th.cat([ctx1.context_logprobs, ctx2.context_logprobs], dim=0))
-                    print("MUTUAL INFORMATION", mutual_information.item())
-                    exit(0)
+                    
+                        #input()
                 if entropy_coef > 0:
                     loss_total = loss_total - entropy_coef * mutual_information
                 
@@ -2825,6 +2863,7 @@ class MORMForClassification(PreTrainedModel):
                         s1, other1 = self.value_system_layer.forward(rewards1, hidden_state=eval_valid_context_features)
                         s2, other2 = self.value_system_layer.forward(rewards2, hidden_state=eval_valid_context_features)
                             #print(s1, s2)
+                        ctx_data_eval = CtxData.from_dict(other1["ctx"])
                         
                         vs_rewards1 = s1.squeeze(1)
                         vs_rewards2 = s2.squeeze(1)
@@ -2842,9 +2881,14 @@ class MORMForClassification(PreTrainedModel):
                             eval_accuracy = accuracy_logits(bt_normal, eval_targets, missing_mask=None, discordance_epsilon=self.config.discordance_epsilon).item()
                             #eval_accuracy = ((th.sigmoid(bt_normal) > 0.5) == (eval_targets > 0.5)).float().mean().item()
                     os.makedirs("pretrain_plots", exist_ok=True)
-                    self.plot_matrices(t, filename=f"___step_{t}_fr_{freeze_ctx}_wd_{weight_decay}_lr_{lr}_entropy_coef_{entropy_coef}_acc_{eval_accuracy if eval_set is not None else 0.0}", low_res=True, save_npy=False)
+                    if ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM,]:
+                        self.plot_matrices(t, filename=f"pretrain_plots/___GMM_step_{t}_fr_{freeze_ctx}_wd_{weight_decay}_lr_{lr}_entropy_coef_{entropy_coef}_acc_{eval_accuracy if eval_set is not None else 0.0}", low_res=True, save_npy=False)
+                    elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM_AND_CLASSIFIER,]:
+                        self.plot_matrices(t, filename=f"pretrain_plots/___GC_step_{t}_fr_{freeze_ctx}_wd_{weight_decay}_lr_{lr}_entropy_coef_{entropy_coef}_acc_{eval_accuracy if eval_set is not None else 0.0}", low_res=True, save_npy=False, ctx_data=ctx_data_eval)
                 if t% int(0.1*iterations_total) ==0 :
                     print(f"Eval accuracy: {eval_accuracy}, Eval loss: {loss_total.item()}")
+                    if t > 1:
+                        print("MUTUAL INFORMATION", mutual_information.item())
                 pbar.set_postfix({'loss': loss_total.item(), "accuracy": accuracy.item(), "eval": eval_accuracy, "mutual_information": mutual_information.item()})
                 
             #print("PARAMS CTX", list(self.value_system_layer.context_logprobabilities.parameters())[0:2])
@@ -2853,15 +2897,149 @@ class MORMForClassification(PreTrainedModel):
             
             self.train(False)
 
-    def plot_matrices(self, t: int, filename, low_res=False, save_npy=True):
+    def grounding_initialization(self, args: TrainingArguments, total_dataset_size: int, optimizer: th.optim.Optimizer, dataset_grounding_features1: th.Tensor, dataset_grounding_features2: th.Tensor, missing_mask_gr: th.Tensor, dataset_score_gr_valid, eval_dataset_grounding_features1=None, eval_dataset_grounding_features2=None, eval_missing_mask_gr=None, eval_dataset_score_gr_valid=None, epoch_multiplier=0.1):
+        self.train()
+
+        len_dataset = len(dataset_grounding_features1)
+        pbar,iterations_total,batch_size,batches_per_epoch = calculate_training_constants(args, total_dataset_size, len_dataset, epoch_multiplier=epoch_multiplier)
+                
+        eval_accuracy_total = 0
+        for t in pbar:
+            loss_total = 0
+            accuracy_total = 0
+            optimizer.zero_grad()
+            with th.no_grad():
+                epoch_step = t % batches_per_epoch
+                if epoch_step == 0 and t >= 0:
+                    perm = th.randperm(
+                            len_dataset, device=dataset_grounding_features1.device
+                        )
+                start = epoch_step * batch_size
+                end = min(start + batch_size, len_dataset)
+                batch_indices = perm[start:end]
+                batch_indices = batch_indices.reshape((len(batch_indices),))
+            rewards1 = self.reward_heads(dataset_grounding_features1[batch_indices])
+            rewards2 = self.reward_heads(dataset_grounding_features2[batch_indices])
+
+            targets = dataset_score_gr_valid[batch_indices]
+            assert targets.shape == (len(batch_indices), self.num_values)
+                #s1, other1 = self.value_system_layer.forward(rewards1, hidden_state=context_features_in_c)
+                #s2, other2 = self.value_system_layer.forward(rewards2, hidden_state=context_features_in_c)
+                    #print(s1, s2)
+            bt_normal = logits_BT(rewards1, rewards2, check_undefined_label=self.config.check_undefined_label, missing_mask=missing_mask_gr if self.config.check_undefined_label else None, assume_torch=True)
+            assert bt_normal.shape == (len(batch_indices), self.num_values)
+            assert targets.shape == (len(batch_indices), self.num_values)
+            assert missing_mask_gr[batch_indices].shape == (len(batch_indices), self.num_values)
+            bt = apply_discordance_epsilon_to_logits(missing_mask_gr[batch_indices], targets, bt_normal, discordance_epsilon=self.config.discordance_epsilon, activate_discordance_epsilon_for_loss=self.config.activate_discordance_epsilon_for_loss)
+            rew_sum = rewards1+rewards2
+                
+                    #print(th.sum((th.abs(th.sigmoid(-bt)[0:10]-targets_in_c[0:10]))), "wtf")
+            for vi in range(self.num_values):
+                loss = th.nn.functional.binary_cross_entropy_with_logits(bt[:, vi], targets[: ,vi])
+                if self.config.rew_center_coefficient > 0.0:
+                    loss += self.config.rew_center_coefficient*th.mean((rew_sum)**2)
+                loss_total = loss + loss_total
+                with th.no_grad():
+                    accuracy = accuracy_logits(bt_normal[:, vi], targets[:, vi], missing_mask=missing_mask_gr[batch_indices][:, vi])
+                    accuracy_total = accuracy + accuracy_total if t > 0 else accuracy
+            loss_total.backward()
+            optimizer.step()
+            if t % int(0.1*iterations_total) == 0 and t > 0:
+                    # Evaluate on eval set:
+                eval_accuracy_total = 0
+                if eval_dataset_grounding_features1 is not None:
+                    with th.no_grad():
+                        rewards1 = self.reward_heads(eval_dataset_grounding_features1)
+                        rewards2 = self.reward_heads(eval_dataset_grounding_features2)
+            
+                        eval_targets = eval_dataset_score_gr_valid
+                            #s1, other1 = self.value_system_layer.forward(rewards1, hidden_state=context_features_in_c)
+                            #s2, other2 = self.value_system_layer.forward(rewards2, hidden_state=context_features_in_c)
+                                #print(s1, s2)
+                        bt_normal = logits_BT(rewards1, rewards2, check_undefined_label=self.config.check_undefined_label, missing_mask=missing_mask_gr if self.config.check_undefined_label else None, assume_torch=True)
+                        bt = apply_discordance_epsilon_to_logits(eval_missing_mask_gr, eval_targets, bt_normal, discordance_epsilon=self.config.discordance_epsilon, activate_discordance_epsilon_for_loss=self.config.activate_discordance_epsilon_for_loss)
+                        rew_sum = rewards1+rewards2
+                        loss_total = 0
+                        eval_accuracy_total = 0
+                        for vi in range(self.num_values):
+                            loss = th.nn.functional.binary_cross_entropy_with_logits(bt[:, vi], eval_targets[: ,vi])
+                            if self.config.rew_center_coefficient > 0.0:
+                                loss += self.config.rew_center_coefficient*th.mean((rew_sum)**2)
+                            loss_total = loss + loss_total
+                            with th.no_grad():
+                                accuracy = accuracy_logits(bt_normal[:, vi], eval_targets[:, vi], missing_mask=eval_missing_mask_gr[:, vi], discordance_epsilon=self.config.discordance_epsilon)
+                                eval_accuracy_total = accuracy + eval_accuracy_total
+                        eval_accuracy_total = eval_accuracy_total.item()
+                        print(f"Eval accuracy: {eval_accuracy_total/self.num_values}, Eval loss: {loss_total.item()}")
+            pbar.set_postfix({'loss': loss_total.item(), 'accuracy': (accuracy_total/float(self.num_values)).item(), "eval": (eval_accuracy_total/float(self.num_values)) if eval_dataset_score_gr_valid is not None else 0.0})
+        return eval_accuracy_total/float(self.num_values) if eval_dataset_grounding_features1 is not None else accuracy_total/float(self.num_values)
+
+    
+
+    def init_random_selection_of_vs(self, args: TrainingArguments, optimizer: th.optim.Optimizer, total_dataset_size: int,  grounding_features1, grounding_features2, context_features, epoch_multiplier=0.01):
+        len_dataset = len(grounding_features1)
+        pbar,iterations_total,batch_size,batches_per_epoch  = calculate_training_constants(args, total_dataset_size, len_dataset, epoch_multiplier=epoch_multiplier)
+                    
+        self.train()
+        loss = 1000.0
+                    
+        for t in pbar:
+            with th.no_grad():
+                epoch_step = t % batches_per_epoch
+                if epoch_step == 0 and t >= 0:
+                    perm2 = th.randperm(
+                                    len_dataset, device=grounding_features1.device
+                                )
+                start = epoch_step * batch_size
+                end = min(start + batch_size, len_dataset)
+                batch_indices = perm2[start:end]
+                rewards1 = self.reward_heads(grounding_features1[batch_indices])
+                rewards2 = self.reward_heads(grounding_features2[batch_indices])
+                context_features_ = context_features[batch_indices]
+            optimizer.zero_grad()
+            _,other = self.value_system_layer.forward(rewards1, hidden_state=context_features_)
+            _,other2 = self.value_system_layer.forward(rewards2, hidden_state=context_features_)
+            ctx: CtxData = CtxData.from_dict(other["ctx"])
+            loss = (-((th.ones_like(ctx.vs_logprobs)/ctx.vs_logprobs.shape[1]) + th.randn_like(ctx.vs_logprobs)*0.1*(1.0/ctx.vs_logprobs.shape[1]))*ctx.vs_logprobs).sum(dim=1).mean()
+            loss.backward()
+            optimizer.step()
+            pbar.set_postfix({'loss': loss.item()})
+                    #print("PARAMS CTX", list(self.value_system_layer.context_logprobabilities.parameters())[0:2])
+                    #print("MATRIX2", self.value_system_layer.context_to_vslogweights_matrix)
+                    #print("MATRIX2", self.value_system_layer.get_value_systems())
+                    
+        self.train(False)
+            
+    def plot_matrices(self, t: int, filename, low_res=False, save_npy=True, ctx_data: CtxData = None):
         self.value_system_layer: BasicGmmCtxDependentAlignmentLayer
-        context_to_vs = th.softmax(
-                        self.value_system_layer.context_to_vs_logits, dim=1
-                    ).detach()
+        if isinstance(self.value_system_layer, GmmAndClassifierCtxDependentAlignmentLayer):
+            assert ctx_data is not None, "ctx_data must be provided for GmmAndClassifierCtxDependentAlignmentLayer"
+            log_probs1 = ctx_data.vs_logprobs
+            log_probs2 = ctx_data.context_logprobs
+
+            B = log_probs1.shape[0]
+
+            # log P(V1=i, V2=j)
+            # = log(1/B * sum_b P1_b(i) P2_b(j))
+            log_joint = th.logsumexp(
+                log_probs1[:, :, None] + log_probs2[:, None, :],
+                dim=0,
+            ) - th.log(th.tensor(B, dtype=log_probs1.dtype, device=log_probs1.device))
+
+            # log marginals
+            log_marginal1 = th.logsumexp(log_joint, dim=1, keepdim=True)
+            #log_marginal2 = th.logsumexp(log_joint, dim=0, keepdim=True)
+
+            context_to_vs = th.exp((log_joint - log_marginal1)).detach()
+        else:
+
+            context_to_vs = th.softmax(
+                            self.value_system_layer.context_to_vs_logits, dim=1
+                        ).detach()
         vs_weights = th.softmax(
                         self.value_system_layer.vs_selection_to_logit_vsweights_matrix, dim=1
                     ).detach()
-        selected_vs = random_argmax(context_to_vs, dim=1)
+        selected_vs = th.argmax(context_to_vs, dim=1)
         selected_vs_weights = vs_weights[selected_vs].cpu().numpy()
         averaged_vs_weights = (context_to_vs @ vs_weights).cpu().numpy()
         context_to_vs = context_to_vs.cpu().numpy()
@@ -2964,7 +3142,7 @@ class MORMForClassification(PreTrainedModel):
                 num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
         elif ContextImplementations(config.context_implementation) == ContextImplementations.GMM_AND_CLASSIFIER:
                     
-                    return BasicGmmCtxDependentAlignmentLayer(
+                    return GmmAndClassifierCtxDependentAlignmentLayer(
                         input_shape=config.input_size_vs,
                         direct_gmm=config.direct_gmm,
                         detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,

@@ -89,7 +89,7 @@ class GaussianMixtureContextProbability(nn.Module):
         self.init_params()
 
 
-    def init_params(self):
+    def init_params(self) -> None:
 
         nn.init.normal_(self.centroids, 0, 1e-5)
 
@@ -122,7 +122,7 @@ class GaussianMixtureContextProbability(nn.Module):
 
 
 
-    def get_obs_dist(self):
+    def get_obs_dist(self) -> dist.MultivariateNormal:
 
         scale_tril = make_cov(
             self.log_variances,
@@ -136,7 +136,7 @@ class GaussianMixtureContextProbability(nn.Module):
         )
 
 
-    def get_scale_tril(self):
+    def get_scale_tril(self) -> th.Tensor:
 
         """
         Returns:
@@ -214,7 +214,7 @@ class GaussianMixtureContextProbability(nn.Module):
 
 
 
-    def sample(self, num_samples):
+    def sample(self, num_samples: int)-> tuple[th.Tensor, th.Tensor]:
 
         with th.no_grad():
 
@@ -331,7 +331,7 @@ class FastGaussianMixture(nn.Module):
         )
 
 
-    def forward(self, x):
+    def forward(self, x) -> tuple[th.Tensor, th.Tensor]:
 
         # x: [B,D]
 
@@ -407,7 +407,7 @@ class FastGaussianMixture(nn.Module):
             self.centroids.copy_(centroids)
 
 
-    def sample(self, n):
+    def sample(self, n: int):
 
         with th.no_grad():
 
@@ -773,7 +773,7 @@ class FastGaussianMixtureLowerTri(nn.Module):
                 
 
 class GaussianMixture(nn.Module):
-    def __init__(self, num_components, dim, cov="full", batch_norm=False):
+    def __init__(self, num_components: int, dim: int, cov="full", batch_norm: bool =False) -> None:
         super().__init__()
         assert cov in ["diag", "mvn"]
         self.num_components = num_components
@@ -793,16 +793,16 @@ class GaussianMixture(nn.Module):
             
         self.init_params()
 
-    def set_centroids(self, centroids):
+    def set_centroids(self, centroids: th.Tensor):
         with torch.no_grad():
             cent = centroids.to(device=self.centroids.device, dtype=self.centroids.dtype)
             self.centroids.copy_(cent.unsqueeze(1))
-    def init_params(self):
+    def init_params(self) -> None:
         nn.init.normal_(self.centroids, 0, 1e-5)
         nn.init.normal_(self.logvar, 0, 1e-3)
         nn.init.normal_(self.tril, 0, 0.001)
     
-    def get_obs_dist(self):
+    def get_obs_dist(self) -> dist.Distribution:
         if self.cov == "mvn":
             L = make_cov(self.logvar, self.tril)
         else:
@@ -812,7 +812,7 @@ class GaussianMixture(nn.Module):
             P = pyro_dist.TransformedDistribution(P, [self.bn])
         return P
 
-    def forward(self, x):
+    def forward(self, x: th.Tensor) -> th.Tensor:
         # get dists
         pi = torch.softmax(self.pi_logits, dim=-1)
         P = self.get_obs_dist()
@@ -838,13 +838,13 @@ class GaussianMixture(nn.Module):
 
 
 class GMMDataset(Dataset):
-    def __init__(self, x):
+    def __init__(self, x: th.Tensor):
         self.x = x
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.x)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx) -> th.Tensor:
         return self.x[idx]
 def train(lr: float, epochs, loader, gmm, file_name, l2_lambda=0.0, l_entropy=0.0):
     optimizer = torch.optim.AdamW(gmm.parameters(), lr=lr, weight_decay=0.0)
@@ -991,7 +991,7 @@ from matplotlib.colors import Normalize
 import numpy as np
 import matplotlib.pyplot as plt
 
-def plot(gmm, history, file_name):
+def plot(gmm, history, file_name) -> None:
     # ---- Training history plot ----
     fig, ax = plt.subplots(1, 1, figsize=(6, 6))
     ax.plot(history)

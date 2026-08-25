@@ -31,9 +31,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA
-from tsnecuda import TSNE
-#from sklearn.manifold import TSNE
 
 
 from transformers import (
@@ -370,6 +367,9 @@ class ScriptArguments:
     task_type: Optional[str] = field(
         default="nlp_based", metadata={"help": "Options: nlp_based, feature_based"}
     )
+    report_to: Optional[str] = field(
+        default="wandb", metadata={"help": "Options: wandb, none"}
+    )
     use_frozen_base_model: Optional[bool] = field(
         default=False, metadata={"help": "Whether to use a frozen base model with built-in reward structure (e.g. ArmoRM). If False, we will use the base model as a starting point and train the reward heads from scratch."})
     local_rank: Optional[int] = field(
@@ -676,7 +676,7 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
         script_args.discordance_epsilon = None
     script_args.update_tendencies_every_n_steps = script_args.eval_every_steps if script_args.use_validation_for_tendencies else script_args.update_tendencies_every_n_steps
 
-    if ContextImplementations(script_args.context_implementation) == ContextImplementations.GMM:
+    if ContextImplementations(script_args.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER,]:
         
         script_args.normalize_context_features = True
     try:
@@ -769,6 +769,32 @@ def kmeans_clustering(dataset_ctxs: np.ndarray, K=None, max_iter=10000)-> KMeans
         
         return kmeans
 
+def auto_tsne(full_dataset: np.array, n_random_seeds=3, example_perps=(5, 50)) -> tuple[np.array, TSNE, float, float]:
+        best_metric = None
+        best_reducer = None
+        best_perp = None
+
+        """if full_dataset.shape[1] > 50:
+            tsne_init = PCA(n_components=50).fit_transform(full_dataset)
+        else:
+            tsne_init = "random"
+        """
+        for perp in [*example_perps, 0.01*len(full_dataset), 0.05*len(full_dataset)]:
+            for rs in range(0,n_random_seeds):
+                print(f"TSNE {rs} with perplexity {perp}...")
+                reducer_tsne: TSNE = TSNE(n_components=2, perplexity=perp, random_state=rs, init="pca")
+                reduction_tsne = reducer_tsne.fit_transform(full_dataset) #if full_dataset.shape[1] > 50 else reducer_tsne.fit_transform(full_dataset)
+                    # FROM: https://arxiv.org/pdf/1708.03229
+                metric = 2*reducer_tsne.kl_divergence_ + np.log(len(full_dataset))*perp/len(full_dataset)
+                print("Done")
+                if  best_metric is None or metric < best_metric:
+                    best_metric = metric
+                    best_reducer = reducer_tsne
+                    best_perp = perp
+                    print("Metric: ", metric, "Best so far: ", best_metric)
+                
+        
+        return reduction_tsne, best_reducer, best_perp, best_metric
 
 from matplotlib.backends.backend_pdf import PdfPages
 
@@ -778,7 +804,6 @@ def plot_alternative_clusterings(
     label_sets,
     label_set_names=None,
     dim_reduction="pca",
-    reduction_kwargs={},
     output_path="clusterings.pdf"
 ):
     X = np.asarray(features)
@@ -790,21 +815,7 @@ def plot_alternative_clusterings(
     if len(label_set_names) != len(label_sets):
         raise ValueError("label_set_names must match label_sets length")
 
-    # --- Dimensionality reduction ---
-    if X.shape[1] > 2:
-        if dim_reduction == "pca":
-            reducer = PCA(n_components=2, **reduction_kwargs)
-            X_reduced = reducer.fit_transform(X)
-            title_suffix = "PCA"
-        elif dim_reduction == "tsne":
-            reducer = TSNE(n_components=2, random_state=42, init="pca", **reduction_kwargs)
-            X_reduced = reducer.fit_transform(X)
-            title_suffix = "t-SNE"
-        else:
-            raise ValueError("dim_reduction must be 'pca' or 'tsne'")
-    else:
-        X_reduced = X
-        title_suffix = "Original space"
+    title_suffix = f"({dim_reduction.upper()})" if dim_reduction is not None else ""
 
     n_plots = len(label_sets)
 
@@ -843,7 +854,6 @@ def plot_alternative_clusterings(
                     s=30,
                 )
 
-            # ✅ Use label_set_name as title
             ax.set_title(f"{name} ({title_suffix})")
             ax.set_xlabel("Component 1")
             ax.set_ylabel("Component 2")

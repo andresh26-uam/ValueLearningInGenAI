@@ -346,11 +346,16 @@ def main() -> None:
     
     print("EVAL ARGUMENTS PARSED")
     for script_args in script_args_all:
+        if not os.path.exists(os.path.join(str(script_args.checkpoint_path), "seed_info.json")):
+            print(f"Warning: seed_info.json not found in checkpoint path: {script_args.checkpoint_path}. Using default seeds.")
+            script_args.seed = 42
+            script_args.data_seed = 42
+        else:
+            with open(os.path.join(str(script_args.checkpoint_path), "seed_info.json"), "r", encoding="utf-8") as fp:
+                seed_info = json.load(fp)
+            script_args.seed = seed_info.get("seed", script_args.seed)
+            script_args.data_seed = seed_info.get("dataseed", script_args.data_seed)
         
-        with open(os.path.join(str(script_args.checkpoint_path), "seed_info.json"), "r", encoding="utf-8") as fp:
-            seed_info = json.load(fp)
-        script_args.seed = seed_info.get("seed", script_args.seed)
-        script_args.data_seed = seed_info.get("dataseed", script_args.data_seed)
         seed_everything(int(script_args.seed))
         
         #torch_dtype = torch.bfloat16 if script_args.bf16 else torch.float32
@@ -445,11 +450,12 @@ def main() -> None:
             embed_model = model.full_model if script_args.use_extracted_features else None
             print("EMBED MODEL:", embed_model)
             print("FEATURES:", script_args.use_extracted_features)
-            input()
+            
             dataset = PairwisePreferenceDataset(
                             train_path,
                             tokenizer,
                             from_disk=True,
+                            normalize_context=script_args.normalize_context_features,
                             extra_keep_keys=extra_keep_keys,
                             retokenize=False,
                             recalculate_embeddings=False,
@@ -466,6 +472,7 @@ def main() -> None:
             dc = MORewardDataCollator(dtype=torch_dtype)
             dataset = FeatureBasedPreferenceDataset(train_path, 
                                                     from_disk=True,
+                                                normalize_context=script_args.normalize_context_features,
                                                 extra_keep_keys=extra_keep_keys,
                                                 repostprocess=False,
                                                 recalculate_features=False,
@@ -577,7 +584,8 @@ def main() -> None:
 
         if isinstance(trainer, CtxMORewardTrainer):
             trainer: CtxMORewardTrainer
-            output = trainer.evaluate_contexts(validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir)
+
+            output = trainer.evaluate_contexts(train_set_contexts=dataset.get_all_contexts_embeddings(), validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir)
             save_context_evaluation(output, output_dir=script_args.results_dir)
 
             

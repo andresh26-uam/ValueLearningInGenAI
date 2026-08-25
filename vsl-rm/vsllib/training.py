@@ -1,6 +1,8 @@
 import enum
 from typing import Any, Dict, NamedTuple, Optional
 import numpy as np
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
@@ -15,7 +17,7 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-from vsllib.utils import kmeans_clustering, plot_alternative_clusterings, to_float
+from vsllib.utils import auto_tsne, kmeans_clustering, plot_alternative_clusterings, to_float
 from vsllib.defines import MIN_EPSILON, ContextImplementations
 
 
@@ -1044,7 +1046,7 @@ class CtxMORewardTrainer(MORewardTrainer):
             if self.state.global_step % 1000 == 0:
                 path = os.path.join(self.args.output_dir, "images")
                 os.makedirs(path, exist_ok=True)
-                if ContextImplementations(self.model.config.context_implementation) == ContextImplementations.GMM:
+                if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.GMM, ]:
                     self.model.plot_matrices(t=self.state.global_step, filename=os.path.join(path,  f"context_matrices_{self.state.global_step}"), low_res=True)
                     
             train_metrics = self.model.training_variables._collect_train_metrics_for_logging()
@@ -1187,32 +1189,73 @@ class CtxMORewardTrainer(MORewardTrainer):
             subset = self.train_dataset
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
     
-    def evaluate_contexts(self, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "") -> None:
+    def evaluate_contexts(self, train_set_contexts: np.array, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "") -> None:
+        kmeans = kmeans_clustering(train_set_contexts, K= self.model.config.max_contexts)
+        # --- Dimensionality reduction ---
 
+        validation_data = CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features
+        test_data = CtxData.from_dict(test_output["ctx"], to_tensor=True).context_features
+        
+
+        X = train_set_contexts
+        X_EVAL_TEST = np.concatenate([train_set_contexts, validation_data, test_data], axis=0)
+        assert X_EVAL_TEST.shape == (len(train_set_contexts) + len(validation_data) + len(test_data), train_set_contexts.shape[1])
+        needs_reduction = X.shape[1] > 2
+        if needs_reduction:
+            reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)
+            reducer_pca.fit(X)
+            reduction_tsne, reducer_tsne, best_perp, best_metric = auto_tsne(X_EVAL_TEST)
+        
+            
         output = {"validation": None if validation_output is None else {}, "test": None if test_output is None else {}}
-        for otype, output_per_type in zip(("validation", "test",), (validation_output, test_output)):
+        for otype, output_per_type, context_data in zip(("validation", "test",), (validation_output, test_output), (validation_data, test_data)):
             if output_per_type is not None:
                 ctxdata: CtxData = CtxData.from_dict(output_per_type["ctx"], to_tensor=True)
                 stats = self.model.value_system_layer.calculate_statistics(ctxdata)
                 
                 #dataset_ctxs = np.array(val_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
-
-                kmeans = kmeans_clustering(ctxdata.context_features, K= self.model.config.max_contexts)
-                features = ctxdata.context_features
-                labels_1 = kmeans.labels_
+                features = context_data
+                kmeans_labels = kmeans.predict(features)
+                labels_1 = kmeans_labels
                 labels_2 = ctxdata.vs_assignments
 
-                plot_alternative_clusterings(features, [labels_1, labels_2], 
+                label1_name = f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}"
+                label2_name = f"Value Systems {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"
+                labels = [labels_1, labels_2]
+                labels_set_names = [label1_name, label2_name]
+                if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
+                     labels_3 = ctxdata.ctx_assignments
+                     label3_name = f"Contexts {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"              
+                     labels.append(labels_3)
+                     labels_set_names.append(label3_name)
+
+                
+                plot_alternative_clusterings(reducer_pca.transform(features) if needs_reduction else features, labels, 
                                              dim_reduction="pca", 
                                              reduction_kwargs={"svd_solver": "full", "whiten": True},
-                                             label_set_names=[f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}",f"{self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"], output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
-                plot_alternative_clusterings(features, 
-                                             [labels_1, labels_2], 
-                                             
-                                             dim_reduction="tsne", label_set_names=[f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}",f"{self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"], output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
+                                             label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
 
+                if needs_reduction:
+                    eval_reduction = reduction_tsne[len(train_set_contexts):len(train_set_contexts)+len(validation_data)]
+                    test_reduction = reduction_tsne[len(train_set_contexts)+len(validation_data):]
+                    assert len(test_data) == len(test_reduction)
+                    assert len(validation_data) == len(eval_reduction)
+                    if otype == "validation":
+                        tsne_features = eval_reduction
+                    else:
+                        tsne_features = test_reduction
+                else:
+                    tsne_features = features
+                    
+                plot_alternative_clusterings(tsne_features if needs_reduction else features, 
+                                             labels,
+                                             dim_reduction=f"tsne_p{best_perp}", label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
+
+                 
                 output[otype] = stats.to_dict()
         return output
+
+    
     
 
     def train(self, resume_from_checkpoint: str | bool | None = None, trial: Any | Dict[str, Any] | None = None, ignore_keys_for_eval: list[str] | None = None) -> TrainOutput:

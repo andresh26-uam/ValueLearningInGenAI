@@ -223,14 +223,13 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
         pprint(vars(script_args))
         
-        # exit(0)
         if ContextImplementations(mo_config.context_implementation) == ContextImplementations.NO_CONTEXT:
             trainer_class = MORewardTrainer 
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
@@ -363,7 +362,7 @@ if __name__ == "__main__":
         lr_scheduler_type=script_args.lr_scheduler_type,
         warmup_steps=0,
         label_names=["labels"],
-        report_to="wandb" if is_main_accelerate_process else "none",
+        report_to=script_args.report_to if is_main_accelerate_process else "none",
         #report_to="none",
         max_grad_norm=script_args.max_grad_norm,
         run_name=script_args.run_name,
@@ -379,7 +378,7 @@ if __name__ == "__main__":
     trainer : CtxMORewardTrainer
     dataset : PairwisePreferenceDataset
     @accelerate_state.on_main_process
-    def saving():
+    def saving() -> None:
         
         if script_args.do_save:
 

@@ -70,4 +70,4 @@ echo "Evaluating model: $MODEL_NAME on dataset: $DATASET_ALIAS with extra args: 
 
 bash sbatch_script.sh  vsl-rm/eval_no_context.py \
     --model_name="$MODEL_NAME" \
-    --dataset="$DATASET_ALIAS" --use_cpu "${EXTRA_ARGS[@]}"
+    --dataset="$DATASET_ALIAS" --use_cpu "${EXTRA_ARGS[@]}" --debug

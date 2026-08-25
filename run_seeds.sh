@@ -1,17 +1,20 @@
 #!/bin/bash
 
+
 GPUS="L40S:1"
-GPUDIRECTIVE="--gpus=${GPUS}"
 CPU=True
-DEBUG="--debug"
-#DEBUG=" "
-SAVE="--do_save=False"
+
+DEBUG=()
+SAVE=(--do_save=False)
+REPORT_TO=wandb
+
 if [[ "$CPU" == "True" ]]; then
-  GPUDIRECTIVE=""
-  GPUS=""
-  SCRIPT=cpu_from_json.sh
+    GPUS=""
+    GPUDIRECTIVE=()
+    SCRIPT=cpu_from_json.sh
 else
-  SCRIPT=sbatch_from_json.sh
+    GPUDIRECTIVE=(--gpus="$GPUS")
+    SCRIPT=sbatch_from_json.sh
 fi
 
 #DATASET=ultra
@@ -43,7 +46,6 @@ if [[ "$DATASET" == "ultra" ]]; then
   NUM_TRAIN_EPOCHS=10
   if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
     NUM_TRAIN_EPOCHS=15
-    EVAL_EVERY_STEPS="--eval_every_steps=200"
     fi
 elif [[ "$DATASET" == "pku" ]]; then
   DISCORDANCE_EPSILON=0.5
@@ -51,26 +53,21 @@ elif [[ "$DATASET" == "pku" ]]; then
   NUM_TRAIN_EPOCHS=100
   if [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
     NUM_TRAIN_EPOCHS=150
-    EVAL_EVERY_STEPS="--eval_every_steps=200"
   fi
 elif [[ "$DATASET" == "apollo" ]]; then
   DISCORDANCE_EPSILON=0.04
   training_initialization_data_size=2000
   NUM_TRAIN_EPOCHS=5000
-  EVAL_EVERY_STEPS="--eval_every_steps=200"
 elif [[ "$DATASET" == "synth" ]]; then
   DISCORDANCE_EPSILON=-1
   training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=500
-  EVAL_EVERY_STEPS="--eval_every_steps=100"
-
 else
   echo "Unknown dataset: $DATASET" >&2
   exit 1
 fi
 
 
-EVAL_EVERY_STEPS=""
 echo $CONFIG
 if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
     NAME=LinearGR_NOTNORMED_BASICSMOOTH_10_Sharp_slow
@@ -100,13 +97,13 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv10
+  NAME=SmolCtxVSLRMv11_TEMNOTHING
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
-  NAME=SmolCtxVSLRMv6_NOCONTEXT_NOWD_NORC
+  NAME=SmolCtxVSLRMv11
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline_smooth.json" ]]; then
-  NAME=SmolCtxVSLRMv10
+  NAME=SmolCtxVSLRMv11
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 else
   NAME=test
@@ -117,7 +114,28 @@ echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
-for seed in 42; do
-  bash $SCRIPT $SCRIPT_PYTHON $CONFIG --dataset=$DATASET --run_name="${GPUS}${NAME}" --seed=$seed --num_train_epochs=$NUM_TRAIN_EPOCHS $EVAL_EVERY_STEPS --discordance_epsilon=$DISCORDANCE_EPSILON $GPUDIRECTIVE --training_initialization_data_size=$training_initialization_data_size $DEBUG $SAVE
-done
 
+
+for seed in 42; do
+    args=(
+        "$SCRIPT_PYTHON"
+        "$CONFIG"
+        "--dataset=$DATASET"
+        "--run_name=${GPUS}${NAME}"
+        "--seed=$seed"
+        "--num_train_epochs=$NUM_TRAIN_EPOCHS"
+        "--discordance_epsilon=$DISCORDANCE_EPSILON"
+        "--training_initialization_data_size=$training_initialization_data_size"
+        "--report_to=$REPORT_TO"
+    )
+
+    args+=("${GPUDIRECTIVE[@]}")
+    args+=("${DEBUG[@]}")
+    args+=("${SAVE[@]}")
+
+    printf 'Running:'
+    printf ' %q' bash "$SCRIPT" "${args[@]}"
+    printf '\n'
+
+    bash "$SCRIPT" "${args[@]}"
+done
