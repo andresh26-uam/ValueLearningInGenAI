@@ -37,9 +37,10 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 
 
 logger = logging.get_logger(__name__)
-THRESHOLD = 50.0
-ACTIVATE_THRESHOLD_VS =  True
-THRESHOLD_CTX = 50.0
+THRESHOLD = 0.0
+ACTIVATE_THRESHOLD_VS =  False
+THRESHOLD_CTX = 500.0
+TEMP_GMM = 100.0
 ACTIVATE_TEMPERATURE_GMM = True
 def calculate_training_constants(args: TrainingArguments, total_dataset_size: int, len_dataset: int, epoch_multiplier=0.1) -> Tuple[tqdm.tqdm, int, int, int]:
         
@@ -842,16 +843,17 @@ class FastGaussianMixture(nn.Module):
         )
         logits = th.log_softmax(self.logits, dim=0)
 
-        if self.activate_threshold:
-            csum = th.clamp(component_log_prob
-                    +
-                    logits, min=-THRESHOLD_CTX, max=THRESHOLD_CTX)
+        thresholded_gmm_logit = th.clamp((component_log_prob
+                            +
+                            logits)/TEMP_GMM, min=-THRESHOLD_CTX, max=THRESHOLD_CTX)
+        if not self.activate_threshold:
+            logit_sumexp = component_log_prob + logits
         else:
-            csum = component_log_prob + logits
+            logit_sumexp = thresholded_gmm_logit
         return th.logsumexp(
-            csum,
+            logit_sumexp,
             dim=1
-        ), component_log_prob, logits, csum
+        ), component_log_prob, logits, thresholded_gmm_logit
 
     def forward(self, x: th.Tensor):
         point_logprob, per_component_logprob, component_logprobs, csum = self.forward_all(x)
@@ -1085,11 +1087,11 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
             self.context_logits: FastGaussianMixture
             assert isinstance(self.context_logits, FastGaussianMixture)
-            gmm_logprob, per_component_logprob, component_logprobs, csum = self.context_logits.forward_all(hidden_state)
+            gmm_logprob, per_component_logprob, component_logprobs, thresholded_gmm_logit = self.context_logits.forward_all(hidden_state)
             #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
             #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
             #HARD: context_logprobs = per_component_logprob + component_logprobs
-            context_logprobs = th.log_softmax(csum, dim=1)
+            context_logprobs = th.log_softmax(thresholded_gmm_logit, dim=1)
             if self.detach_context_selection_for_value_system_selection:
                 context_logprobs = context_logprobs.detach()
                 
@@ -1193,11 +1195,11 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                 #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
                 self.context_logits: FastGaussianMixture
                 assert isinstance(self.context_logits, FastGaussianMixture)
-                gmm_logprob, per_component_logprob, component_logprobs, csum = self.context_logits.forward_all(hidden_state)
+                gmm_logprob, per_component_logprob, component_logprobs, thresholded_logit = self.context_logits.forward_all(hidden_state)
                 #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
                 #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
                 #HARD: context_logprobs = per_component_logprob + component_logprobs
-                context_logprobs = th.log_softmax(csum, dim=1)
+                context_logprobs = th.log_softmax(thresholded_logit, dim=1)
                 
                 if self.detach_context_selection_for_value_system_selection:
                     context_logprobs = context_logprobs.detach()
