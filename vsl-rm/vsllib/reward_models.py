@@ -7,7 +7,7 @@ from operator import truediv
 from re import A
 from click import Context
 from regex import P
-from sympy import Abs
+from sympy import Abs, true
 from tokenizers.decoders import CTC
 import tqdm
 from typing_extensions import Self
@@ -37,10 +37,10 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 
 
 logger = logging.get_logger(__name__)
-TEMPERATURE = 1.0
-ACTIVATE_TEMPERATURE_VS =  False
-TEMPERATURE_GMM = 50.0
-ACTIVATE_TEMPERATURE_GMM = False
+THRESHOLD = 50.0
+ACTIVATE_THRESHOLD_VS =  True
+THRESHOLD_CTX = 50.0
+ACTIVATE_TEMPERATURE_GMM = True
 def calculate_training_constants(args: TrainingArguments, total_dataset_size: int, len_dataset: int, epoch_multiplier=0.1) -> Tuple[tqdm.tqdm, int, int, int]:
         
             
@@ -543,8 +543,8 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
         #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
         
-        if TEMPERATURE > 0.0 and ACTIVATE_TEMPERATURE_VS:
-            logit = self.context_logits(hidden_state)/TEMPERATURE
+        if THRESHOLD > 0.0 and ACTIVATE_THRESHOLD_VS:
+            logit = th.clamp(self.context_logits(hidden_state), min=-THRESHOLD, max=THRESHOLD)
         else:
             logit = self.context_logits(hidden_state)
         context_logprobs = th.log_softmax(logit, dim=1)
@@ -843,9 +843,9 @@ class FastGaussianMixture(nn.Module):
         logits = th.log_softmax(self.logits, dim=0)
 
         if self.activate_threshold:
-            csum = (component_log_prob
+            csum = th.clamp(component_log_prob
                     +
-                    logits)/TEMPERATURE_GMM
+                    logits, min=-THRESHOLD_CTX, max=THRESHOLD_CTX)
         else:
             csum = component_log_prob + logits
         return th.logsumexp(
@@ -1217,8 +1217,8 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                 #print("WHAT", context_logprobs.dtype)
                 assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
 
-                if TEMPERATURE > 0 and ACTIVATE_TEMPERATURE_VS:
-                    vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state)/TEMPERATURE, dim=1)
+                if THRESHOLD > 0 and ACTIVATE_THRESHOLD_VS:
+                    vs_logprobs = th.log_softmax(th.clamp(self.vs_logits_network(hidden_state), min=-THRESHOLD, max=THRESHOLD), dim=1)
                 else:
                     vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state), dim=1)
     
@@ -1240,7 +1240,6 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                     vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
                     ctx_possibilities=self.context_logits.centroids,
                     extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs)
-                    
                 )
 
 class MORMForClassificationConfig(PretrainedConfig):

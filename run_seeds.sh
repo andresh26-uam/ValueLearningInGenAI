@@ -97,7 +97,7 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv11_TEMNOTHING
+  NAME=SmolCtxVSLRMv11_TH50BOTH
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
   NAME=SmolCtxVSLRMv11
