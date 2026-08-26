@@ -288,7 +288,7 @@ class MORMTrainingVariables(th.nn.Module):
     def _apply(self, fn, recurse=True) -> Any:
         """This is a custom implementation of the _apply method to ensure that when the training variables are moved to a different device or dtype,
         the cached metrics and losses are also moved accordingly, as they are stored as lists of tensors."""
-        def move_list(lst):
+        def move_list(lst: list):
             if lst is None:
                 return None
             return [fn(x) if isinstance(x, th.Tensor) else x for x in lst]

@@ -11,7 +11,8 @@ from transformers.trainer import *
 from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
-from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth, rewards_and_labels_to_logits_and_targets
+from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, rewards_and_labels_to_logits_and_targets
+from vsllib.model_utils import MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
 

@@ -36,7 +36,8 @@ from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_toke
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
-from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, MORMForClassificationConfig, mo_compute_loss_func
+from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, mo_compute_loss_func
+from vsllib.model_utils import MORMForClassificationConfig
 from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, ContextImplementations, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 

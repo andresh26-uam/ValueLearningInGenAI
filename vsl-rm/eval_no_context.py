@@ -49,8 +49,10 @@ from vsllib.defines import (
 from vsllib.reward_models import (
     MORMForClassification,
     MORMForSequenceClassification,
-    MORMForClassificationConfig,
     mo_compute_loss_func,
+)
+from vsllib.model_utils import (
+    MORMForClassificationConfig,
 )
 from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, seed_everything, write_metrics_csv
 
@@ -371,7 +373,7 @@ def main() -> None:
         print(f"LOADING MODEL... ({script_args.checkpoint_path})")
         import subprocess
 
-        def du(path):
+        def du(path: str) -> str:
             """disk usage in human readable format (e.g. '2,1GB')"""
             return subprocess.check_output(['du','-sh', path]).split()[0].decode('utf-8')
         checkpoint_size = du(script_args.checkpoint_path)
