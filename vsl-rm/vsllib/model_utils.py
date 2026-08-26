@@ -1,3 +1,4 @@
+from pythae.models.nn import BaseDecoder, BaseEncoder
 import tqdm
 
 from transformers.configuration_utils import PretrainedConfig
@@ -719,10 +720,80 @@ class FastGaussianMixture(nn.Module):
 
             return samples, log_prob, predicted_ids
 
+
+from pythae.models.vae import VAE, VAEConfig
+from pythae.models.nn import BaseDecoder, BaseEncoder
+from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
+
+from pythae.models.base.base_utils import ModelOutput
+class CustomVAEConfig(VAEConfig):
+    def __init__(self, input_dim: int, 
+                 vae_latent_dim: int,
+                vae_reconstruction_loss: str, 
+                vae_type: str, 
+                vae_dropout: int,
+                vae_layer_activation: str,
+                vae_n_hidden_layers: int , 
+                vae_hidden_dim_size: int , **kwargs):
+        super().__init__(input_dim=input_dim, latent_dim=vae_latent_dim, reconstruction_loss=vae_reconstruction_loss, **kwargs)
+        self.n_hidden_layers = vae_n_hidden_layers
+        self.hidden_dim = vae_hidden_dim_size
+        self.type = vae_type
+        self.dropout = vae_dropout
+        self.layer_activation = vae_layer_activation
+
+class CustomEncoder(Encoder_VAE_MLP):
+    def __init__(self, args: CustomVAEConfig, device, dtype):
+        BaseEncoder.__init__(self)
+        self.input_dim = args.input_dim
+        self.latent_dim = args.latent_dim
+        self.hidden_dim_size = args.hidden_dim
+        self.n_hidden_layers = args.n_hidden_layers
+        
+        layers = nn.ModuleList()
+
+        layers.append(nn.Sequential(nn.Linear(np.prod(args.input_dim), self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
+        for _ in range(args.n_hidden_layers - 1):
+            layers.append(nn.Sequential(nn.Linear(self.hidden_dim_size, self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
+        self.layers = layers
+        self.depth = len(layers)
+
+        self.embedding = nn.Linear(self.hidden_dim_size, self.latent_dim, device=device, dtype=dtype)
+        self.log_var = nn.Linear(self.hidden_dim_size, self.latent_dim, device=device, dtype=dtype)
+
+class CustomDecoder(Decoder_AE_MLP):
+    def __init__(self, args: CustomVAEConfig, device, dtype):
+        BaseDecoder.__init__(self)
+        
+        self.input_dim = args.input_dim
+
+        layers = nn.ModuleList()
+
+        layers.append(nn.Sequential(nn.Linear(args.latent_dim, args.hidden_dim, device=device, dtype=dtype), nn.ReLU()))
+        for _ in range(args.n_hidden_layers - 1):
+                    layers.append(nn.Sequential(nn.Linear(self.hidden_dim_size, self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
+                
+        layers.append(
+            nn.Sequential(nn.Linear(args.hidden_dim, int(np.prod(args.input_dim)), device=device, dtype=dtype), nn.Sigmoid())
+        )
+
+        self.layers = layers
+        self.depth = len(layers)
+
+class CustomVAE(VAE):
+    
+    def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: BaseDecoder):
+        super().__init__(vae_config, encoder, decoder)
+    
+    
 class MORMForClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
     has_no_defaults_at_init = True
 
+    def vae_args(self):
+        # Return all arguments that start with "vae_" as a dictionary
+        return {k[4:]: v for k, v in self.__dict__.items() if k.startswith("vae_")}
+    
     @property
     def loss_management(self) -> MOLossManagement:
         loss_func_enum = MOLossFunctions(self.loss_func_type)
@@ -735,12 +806,13 @@ class MORMForClassificationConfig(PretrainedConfig):
         vs_weight_initialization: Literal['dirichlet',
                                      'span', 'equal'] = "dirichlet",
         do_initialization: bool = True,
+
         entropy_coefficient: float = 0.0,
         ctx_coefficient: float = 0.0,
         vs_selection_coefficient: float = 0.0,
         training_initialization_data_size: int|str = "all",
         sharp_context_classification: bool = True,
-        direct_gmm: bool = False,
+        direct_context_to_vs_relation: bool = False,
         detach_context_selection_for_value_system_selection: bool = False,
         detach_vs_selection_for_value_system_weight_training: bool = False,
         pad_token_id: int = "UNKNOWN",
@@ -817,7 +889,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         """if pad_token_id == "UNKNOWN":
             raise ValueError("pad_token_id must be set to a valid integer value corresponding to the tokenizer's pad token ID. It is currently set to 'UNKNOWN', which is not valid. Please set it to the correct value when initializing the config.")
         """
-        self.direct_gmm=direct_gmm
+        self.direct_context_to_vs_relation=direct_context_to_vs_relation
         self.vs_layer_hidden_sizes = vs_layer_hidden_sizes
         self.vs_layer_dropout = vs_layer_dropout
         self.vs_layer_intermediate_activation = vs_layer_intermediate_activation

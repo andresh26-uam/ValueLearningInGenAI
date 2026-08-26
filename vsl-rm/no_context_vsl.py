@@ -144,7 +144,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
 
-            direct_gmm=script_args.direct_gmm,
+            direct_context_to_vs_relation=script_args.direct_context_to_vs_relation,
             sharp_context_classification=script_args.sharp_context_classification,
             detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
             detach_context_selection_for_value_system_selection=script_args.detach_context_selection_for_value_system_selection,

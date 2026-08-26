@@ -236,7 +236,8 @@ class ContextImplementations(enum.Enum):
     BASIC_HARSH = "BASIC_HARSH"
     GMM = "GMM"
     GMM_AND_CLASSIFIER = "GMM_AND_CLASSIFIER"
-    NESTED_GMM = "NESTED_GMM"
+    
+    VAE_AND_KMEANS = "VAE_KMEANS"
 
 class MOLossFunctionsCategories():
     REQUIRES_GRAD_ON_EVERYTHING = [MOLossFunctions.DEFAULT, MOLossFunctions.CTX_DEFAULT]

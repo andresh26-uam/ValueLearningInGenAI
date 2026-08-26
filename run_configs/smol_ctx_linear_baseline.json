@@ -3,7 +3,7 @@
     "dataset": "pku",
     "context_implementation": "NO_CONTEXT",
     "do_initialization": false,
-    "direct_gmm": false,
+    "direct_context_to_vs_relation": false,
     "vs_weight_initialization": "equal",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": false,

@@ -3,7 +3,7 @@
     "dataset": "pku",
     "context_implementation": "GMM",
     "do_initialization": true,
-    "direct_gmm": false,
+    "direct_context_to_vs_relation": false,
     "vs_weight_initialization": "equal",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": false,
@@ -39,6 +39,14 @@
     "vs_num_hidden_layers": 3,
     "vs_layer_dropout": 0.0,
     "vs_layer_activation": "SiLU",
+
+    "vae_latent_dim": 10,
+    "vae_type": "VAE", 
+    "vae_dropout": 0.0,
+    "vae_layer_activation": "ReLU",
+    "vae_reconstruction_loss": "mse", 
+    "vae_n_hidden_layers": 2, 
+    "vae_hidden_dim_size": 256,
     
 
     "use_validation_for_tendencies": false,

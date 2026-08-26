@@ -141,7 +141,7 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
 
             is_tensor = torch.is_tensor
 
-        elif tensor_type == TensorType.MLX:
+            """ elif tensor_type == TensorType.MLX:
             if not is_mlx_available():
                 raise ImportError("Unable to convert output to MLX tensors format, MLX is not installed.")
             import mlx.core as mx
@@ -152,7 +152,7 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
                 return mx.array(value, dtype=dtype)
 
             def is_tensor(obj):
-                return isinstance(obj, mx.array)
+                return isinstance(obj, mx.array)"""
         else:
 
             def as_tensor(value: Any, dtype=None):
@@ -590,7 +590,7 @@ class ScriptArguments:
         default="NO_CONTEXT",
         metadata={"help": "Choose between ContextImplementations in defines.py"}
     )
-    direct_gmm: Optional[bool] = field(
+    direct_context_to_vs_relation: Optional[bool] = field(
         default=False,
         metadata={"help": "Whether to consider a value system for each gmm-obtained context (no context-to-vs matrix)"},
     )
