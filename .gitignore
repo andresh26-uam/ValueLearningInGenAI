@@ -219,3 +219,5 @@ sweeps/
 results/
 
 gmm_*.png
+
+my_model/*

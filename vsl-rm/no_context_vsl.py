@@ -60,7 +60,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
             sentence_model = None
             if script_args.use_sentence_transformer:
-                sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                sentence_model = SentenceTransformer(f'sentence-transformers/{script_args.sentence_transformer_name}')
                 
 
             if script_args.use_frozen_base_model:
@@ -143,14 +143,18 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             input_size_vs = np.array(dataset.train_dataset["context_features"][0]).shape[0]
             
         elif script_args.task_type == "nlp_based":
-            input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model)
-            
+            #input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model, config)
+            input_size = "infer"
+            input_size_vs = "infer"
         else:
 
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
+
+            use_sentence_transformer=script_args.use_sentence_transformer,
+            sentence_transformer_name=script_args.sentence_transformer_name,
 
             vae_latent_dim=script_args.vae_latent_dim,
             vae_type=script_args.vae_type,

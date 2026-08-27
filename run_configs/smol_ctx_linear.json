@@ -7,13 +7,13 @@
     "direct_context_to_vs_relation": true,
     "vs_weight_initialization": "dirichlet",
     "detach_vs_selection_for_value_system_weight_training": false,
-    "detach_context_selection_for_value_system_selection": true,
-    "ctx_coefficient": 0.0001,
+    "detach_context_selection_for_value_system_selection": false,
+    "ctx_coefficient": 1.0,
     "vs_selection_coefficient": 0.0,
     "entropy_coefficient": 0.0,
 
     "initial_temperature": 1.0,
-    "lambda_clustering": 10.0,
+    "lambda_clustering": 1.0,
 
     "training_initialization_data_size": "all",
     "sharp_context_classification": true,
@@ -58,9 +58,9 @@
 
     "rew_center_coefficient": 0.001,
     
-    "learning_rate": 0.001,
+    "learning_rate": 0.005,
     "grounding_learning_rate": 0.0001,
-    "context_learning_rate": 0.0001,
+    "context_learning_rate": 0.005,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 100.0,

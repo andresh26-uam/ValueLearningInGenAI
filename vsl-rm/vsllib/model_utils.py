@@ -10,6 +10,7 @@ import torch as th
 import torch.nn as nn
 from transformers import TrainingArguments
 
+from torch.distributions import Normal, Independent
 
 from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
 
@@ -19,6 +20,14 @@ THRESHOLD_CTX = 50.0
 TEMP_GMM = 1.0
 ACTIVATE_TEMPERATURE_GMM = False
 
+def gaussian_prob(
+            z: th.Tensor,
+            mu: th.Tensor,
+            log_var: th.Tensor,
+        ) -> th.Tensor:
+            std = th.exp(0.5 * log_var)
+            dist = Independent(Normal(mu, std), 1)
+            return dist.log_prob(z).exp()
 
 def compute_mutual_information(context_to_vs_logit_probs: th.Tensor):
     context_log_probs = th.log_softmax(
@@ -901,6 +910,8 @@ class MORMForClassificationConfig(PretrainedConfig):
         value_layer_dropout: float = 0.1,
         value_layer_intermediate_activation: str = "ReLU",
         value_layer_final_activation: str = "none",
+        sentence_transformer_name: str = "all-MiniLM-L6-v2",
+        use_sentence_transformer: bool = False,
         layer_normalization: Literal['LayerNorm',
                                      'BatchNorm', 'none'] = 'LayerNorm',
                             
@@ -970,6 +981,9 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vs_layer_intermediate_activation = vs_layer_intermediate_activation
         self.vs_weight_initialization = vs_weight_initialization
 
+        self.sentence_transformer_name = sentence_transformer_name
+        self.use_sentence_transformer = use_sentence_transformer
+        
         self.initial_temperature = initial_temperature
         self.lambda_clustering = lambda_clustering
         self.vae_beta = vae_beta

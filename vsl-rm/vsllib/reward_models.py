@@ -7,6 +7,7 @@ from copy import deepcopy
 from dataclasses import replace
 from dataclasses import fields
 
+from sentence_transformers import SentenceTransformer
 import tqdm
 from typing_extensions import Self
 
@@ -33,10 +34,9 @@ from sklearn.cluster import KMeans
 from vsllib.training_utils import MORMTrainingVariables
 from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, ContextImplementations, MOLossFunctions
 from vsllib.model_utils import ACTIVATE_TEMPERATURE_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, THRESHOLD_CTX, CustomDecoder, CustomEncoder, FastGaussianMixture, MORMForClassificationConfig, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
-from vsllib.model_utils import CustomVAE, CustomVAEConfig
+from vsllib.model_utils import CustomVAE, CustomVAEConfig, gaussian_prob
 
 from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, transform_weights_to_tuple
-
 
 logger = logging.get_logger(__name__)
 
@@ -965,15 +965,19 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             encoded_centroids = self.context_logits.encoder(centroids).embedding
             self.latent_centroids.data.copy_(encoded_centroids)
         self.latent_centroids.requires_grad_(True)
-        
+
+    
+    
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
+        print("HIDDEN STATE SHAPE", hidden_state.shape)
         self.context_logits: CustomVAE
         assert isinstance(self.context_logits, CustomVAE)
         model_output = self.context_logits.forward({"data": hidden_state})
         z = model_output["z"]
         mu = model_output["mu"]
         log_var = model_output["log_var"]
-        prob_z = 1.0/(th.sqrt(2*th.pi*th.exp(log_var))) * th.exp(-0.5 * ((z - mu) ** 2) / 2*th.exp(log_var))
+        prob_z = gaussian_prob(z, mu, log_var)
+        assert prob_z.shape==(z.shape[0],)
         """model_output = ModelOutput(
                     recon_loss=recon_loss,
                     reg_loss=kld,
@@ -1007,7 +1011,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         # TODO: ?? self.update_temperature()
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
         assert context_logprobs_detached_repr.shape == (hidden_state.shape[0], self.num_contexts)
-        loss_clustering = self.lambda_clustering * th.sum(context_logit*context_logprobs_detached_repr.exp(), dim=-1).mean()
+        loss_clustering = self.lambda_clustering * (th.sum(context_logit*context_logprobs_detached_repr.exp(), dim=-1)*prob_z).sum() / hidden_state.shape[0]
         #TODO: Adaptation of https://arxiv.org/pdf/1806.10069
         
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
@@ -2849,29 +2853,43 @@ class MORMForSequenceClassification(MORMForClassification):
         return th.cat([rewards, score], dim=-1)
 
     @staticmethod
-    def infer_model_inputs_sizes(base_model: AutoModelForSequenceClassification) -> Tuple[int, Optional[int]]:
+    def infer_model_inputs_sizes(base_model: AutoModelForSequenceClassification, config: MORMForClassificationConfig) -> Tuple[int, Optional[int]]:
         # SequenceClassification wrappers often expose the classifier head input width here.
+        input_size = None
         if hasattr(base_model, "score") and hasattr(base_model.score, "in_features"):
-            return int(base_model.score.in_features), int(base_model.score.in_features)
+            input_size = int(base_model.score.in_features)
+        else:
+            cfg = getattr(base_model, "config", None)
+            for attr in ("hidden_size", "d_model", "n_embd", "dim"):
+                value = getattr(cfg, attr, None)
+                if value is not None:
+                    input_size = int(value)
+                    break
+        if input_size is None:
+            # Last fallback for models with custom configs but standard embedding modules.
+            input_emb = base_model.get_input_embeddings() if hasattr(
+                base_model, "get_input_embeddings") else None
 
-        cfg = getattr(base_model, "config", None)
-        for attr in ("hidden_size", "d_model", "n_embd", "dim"):
-            value = getattr(cfg, attr, None)
-            if value is not None:
-                return int(value), int(value)
-
-        # Last fallback for models with custom configs but standard embedding modules.
-        input_emb = base_model.get_input_embeddings() if hasattr(
-            base_model, "get_input_embeddings") else None
-        if input_emb is not None and hasattr(input_emb, "embedding_dim"):
-            return int(input_emb.embedding_dim), int(input_emb.embedding_dim)
-        if input_emb is not None and hasattr(input_emb, "weight"):
-            return int(input_emb.weight.shape[-1]), int(input_emb.weight.shape[-1])
-
-        raise ValueError(
-            "Could not infer hidden size for reward heads. Expected one of: "
-            "score.in_features, config.hidden_size/d_model/n_embd/dim, or input embedding width."
-        )
+            if input_emb is not None and hasattr(input_emb, "embedding_dim"):
+                input_size = int(input_emb.embedding_dim)
+                
+            elif input_emb is not None and hasattr(input_emb, "weight"):
+                input_size = int(input_emb.weight.shape[-1])
+            else:
+                raise ValueError(
+                            "Could not infer hidden size for reward heads. Expected one of: "
+                            "score.in_features, config.hidden_size/d_model/n_embd/dim, or input embedding width."
+                        )
+        if config.use_sentence_transformer:
+            sentence_transformer = config.sentence_transformer_name
+            model = SentenceTransformer(f'sentence-transformers/{sentence_transformer}')
+            test = model.encode(["test"], convert_to_numpy=True)
+            del model
+            input_size_vs = test.shape[-1]
+        else:
+            input_size_vs = input_size
+        return input_size, input_size_vs
+        
 
     
 
@@ -2886,9 +2904,12 @@ class MORMForSequenceClassification(MORMForClassification):
         self.supports_gradient_checkpointing = hasattr(
             self.full_model, "gradient_checkpointing_enable")
         model_device = self._module_device(self.full_model)
-        input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model)
-        assert input_size == config.input_size
-        assert input_size_vs == config.input_size_vs
+        input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model, config)
+        print("input size", input_size, "input size vs", input_size_vs)
+        config.input_size_vs = input_size_vs
+        config.input_size = input_size
+        #assert input_size == config.input_size
+        #assert input_size_vs == config.input_size_vs
         
         # In base-model mode, consume reward/score attributes from base model outputs.
         if self.use_base_model_heads:

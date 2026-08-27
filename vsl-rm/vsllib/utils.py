@@ -386,6 +386,12 @@ class ScriptArguments:
     use_sentence_transformer: Optional[bool] = field(
         default=False, metadata={"help": "Whether to use a sentence transformer for context embedding. If False, will use the base model's embeddings."}
     )
+    sentence_transformer_name: Optional[str] = field(
+            default="all-MiniLM-L6-v2",
+            metadata={"help": "The name of the sentence transformer model to use for context embedding. This is only used if use_sentence_transformer is True."},
+        )
+
+        
     save_postprocessed_and_feature_extracted_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
@@ -648,7 +654,7 @@ class ScriptArguments:
     )
 
 
-
+    
 def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
 
     if script_args.config_file:

@@ -2,7 +2,7 @@
 
 
 GPUS="L40S:1"
-CPU=False
+CPU=True
 
 DEBUG=()
 SAVE=(--do_save=False)
@@ -33,8 +33,9 @@ DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("d
 CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
 VS_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_selection_coefficient", 0.0))' "$CONFIG")
 DIRECT_GMM=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("direct_gmm", False))' "$CONFIG")
-LAMBDA=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("lambda_clustering", False))' "$CONFIG")
-TEMP=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("initial_temperature", False))' "$CONFIG")
+LAMBDA=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("lambda_clustering", 0.0))' "$CONFIG")
+TEMP=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("initial_temperature", 0.0))' "$CONFIG")
+SENTENCE_TRANS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("use_sentence_transformer", False))' "$CONFIG")
 
 NORM=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("layer_normalization", "none"))' "$CONFIG")
 VS_WEIGHT_INIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_weight_initialization", "dirichlet"))' "$CONFIG")
@@ -99,7 +100,7 @@ elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv13_VAE_KLOSSACTIVE
+  NAME=SmolCtxVSLRMv14_VAE_KLOSSACTIVE_PROBS
   SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
   NAME=SmolCtxVSLRMv11_TH50VS
@@ -111,7 +112,7 @@ else
   NAME=test
 fi
 
-NAME="${NAME}_${CTX_IMPLEMENTATION}_INITVS_${VS_WEIGHT_INIT}_INITCTX_${DOINIT}_VS_${VS_COEFF}_CTX_${CTX_COEFF}_TM_${TEMP}_LC_${LAMBDA}_NORM_${NORM}_DIRGMM_${DIRECT_GMM}"
+NAME="${NAME}_ST_${SENTENCE_TRANS}_${CTX_IMPLEMENTATION}_INITVS_${VS_WEIGHT_INIT}_INITCTX_${DOINIT}_VS_${VS_COEFF}_CTX_${CTX_COEFF}_TM_${TEMP}_LC_${LAMBDA}_NORM_${NORM}_DIRGMM_${DIRECT_GMM}"
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
