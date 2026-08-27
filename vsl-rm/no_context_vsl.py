@@ -10,6 +10,7 @@ from accelerate import PartialState
 import accelerate
 from dotenv import load_dotenv
 import numpy as np
+from sentence_transformers import SentenceTransformer
 from transformers import Trainer
 # import evaluate
 import torch
@@ -33,7 +34,7 @@ for candidate in (
         break
 
 from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, sample_example_profiles_exact, sample_example_profiles_scipy, seed_everything
-from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
+from vsllib.dataset_processing import USE_SENTENCE_TRANSFORMER, FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
 from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, mo_compute_loss_func
@@ -57,6 +58,11 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             base_model = model_full.base_model if hasattr(
                 model_full, 'base_model') else model_full
 
+            sentence_model = None
+            if USE_SENTENCE_TRANSFORMER:
+                sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                
+
             if script_args.use_frozen_base_model:
                 # For models like ArmoRM that have built-in multiple reward structure
                 model = model_full
@@ -73,6 +79,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
                                                 normalize_context=script_args.normalize_context_features,
                                                 from_disk=True,
+                                                sentence_model=sentence_model,
                                                 extra_keep_keys=extra_keep_keys,
                                                 retokenize=script_args.repostprocess,
                                                 recalculate_embeddings=script_args.recalculate_features,
@@ -151,6 +158,10 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             vae_reconstruction_loss=script_args.vae_reconstruction_loss,
             vae_n_hidden_layers=script_args.vae_n_hidden_layers,
             vae_hidden_dim=script_args.vae_hidden_dim_size,
+
+            initial_temperature=script_args.initial_temperature,
+            lambda_clustering=script_args.lambda_clustering,
+            vae_beta=script_args.vae_beta,
         
             
             direct_context_to_vs_relation=script_args.direct_context_to_vs_relation,

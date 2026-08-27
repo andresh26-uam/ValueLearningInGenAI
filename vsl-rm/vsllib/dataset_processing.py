@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Union
 from uuid import uuid4
 
 import numpy as np
+from sentence_transformers import SentenceTransformer
 from sklearn.preprocessing import StandardScaler
 import torch as th
 from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, NO_RATING_MASK
@@ -76,37 +77,44 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
         del sample[key]	
     return sample
 
-def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu")) -> dict:
+
+
+
+USE_SENTENCE_TRANSFORMER = False
+def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu"),  sentence_transformer: SentenceTransformer= None) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
     with th.no_grad():
         model_device = device
-        for ic, case in enumerate([("input_ids_1", "attention_mask_1", "embedding_1"), ("input_ids_2", "attention_mask_2", "embedding_2"), ("context_input_ids", "context_attention_mask", CONTEXT_EMBEDDING_FEATURE_NAME)]):
+        for ic, case_ in enumerate([("input_ids_1", "attention_mask_1", "embedding_1", "option1"), ("input_ids_2", "attention_mask_2", "embedding_2", "option2"), ("context_input_ids", "context_attention_mask", CONTEXT_EMBEDDING_FEATURE_NAME, "context")]):
             if ic == 2 and not use_context:
                 continue
-            merged_features = {
-                "input_ids": sample[case[0]],
-                "attention_mask": sample[case[1]],
-            }
-            
-            batch = tokenizer.pad(
-                merged_features,
-                padding=collator.padding,
-                max_length=collator.max_length,
-                pad_to_multiple_of=collator.pad_to_multiple_of,
-                return_tensors=collator.return_tensors,
-            )
-            inputs = batch["input_ids"].to(model_device)
-            atm = batch["attention_mask"].to(model_device)
-            output = model(
-                input_ids=inputs,
-                attention_mask=atm,
-                return_dict=True,
-            ).last_hidden_state
-            # Pick the last non-padding token embedding for each sequence.
-            last_token_idx = atm.sum(dim=1) - 1
+            elif ic == 2 and USE_SENTENCE_TRANSFORMER:
+                sample[case_[2]] = sentence_transformer.encode(case_[3])
+            else:
+                merged_features = {
+                    "input_ids": sample[case_[0]],
+                    "attention_mask": sample[case_[1]],
+                }
+                
+                batch = tokenizer.pad(
+                    merged_features,
+                    padding=collator.padding,
+                    max_length=collator.max_length,
+                    pad_to_multiple_of=collator.pad_to_multiple_of,
+                    return_tensors=collator.return_tensors,
+                )
+                inputs = batch["input_ids"].to(model_device)
+                atm = batch["attention_mask"].to(model_device)
+                output = model(
+                    input_ids=inputs,
+                    attention_mask=atm,
+                    return_dict=True,
+                ).last_hidden_state
+                # Pick the last non-padding token embedding for each sequence.
+                last_token_idx = atm.sum(dim=1) - 1
 
-            sample[case[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
-            del output
+                sample[case_[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
+                del output
             
         return sample
 
@@ -468,7 +476,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             normalized_norms = np.linalg.norm(normalized_contexts, ord=2, axis=1)
             assert np.allclose(normalized_norms, np.ones_like(normalized_norms)), "Normalization failed: not all context embeddings have unit norm."
         
-    def __init__(self, path: str, tokenizer, normalize_context=False, from_disk: bool = True, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+    def __init__(self, path: str, tokenizer, normalize_context=False, from_disk: bool = True, sentence_model: SentenceTransformer=None, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
         self.normalize_context = normalize_context
         pp_kwargs = {
             "tokenizer": tokenizer,

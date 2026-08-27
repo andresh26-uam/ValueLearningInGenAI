@@ -1,5 +1,6 @@
 
 from abc import abstractmethod
+from calendar import c
 from copy import deepcopy
 
 
@@ -682,11 +683,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                         )
         else:
             assert num_contexts==num_value_systems, "Direct GMM requires num_contexts==num_value_systems"
-            self.context_to_vs_logits = th.eye(
-                                num_contexts,
-                                device=device,
-                                dtype=dtype,
-                            requires_grad=False)*1000.0
+            self.context_to_vs_logits = None
                         
             
     def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor, **kwargs) -> None:
@@ -871,15 +868,22 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         encoder = CustomEncoder(args=self.vae_config, device=device, dtype=dtype)
         decoder = CustomDecoder(args=self.vae_config, device=device, dtype=dtype)
         return CustomVAE(vae_config=self.vae_config, encoder=encoder, decoder=decoder)
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: dict = {}, **kwargs) -> None:
-        
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, 
+                 detach_context_selection_for_value_system_selection: bool = False, 
+                 detach_vs_selection_for_value_system_weight_training: bool = False, 
+                 device: th.device = None, dtype: th.dtype = None, 
+                 weight_initialization: str = "dirichlet", 
+                 direct_context_to_vs_relation: bool = False, 
+                 args_for_ctx_probabilities: dict = {}, initial_temperature=1.0, lambda_clustering=0.1, **kwargs) -> None:
+        self._temperature = initial_temperature
+        self.lambda_clustering = lambda_clustering
         self.detach_context_selection_for_value_system_selection = detach_context_selection_for_value_system_selection
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, 
                          detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, 
                          device=device, dtype=dtype, weight_initialization=weight_initialization, 
                          args_for_ctx_probabilities=args_for_ctx_probabilities)
         assert isinstance(self.context_logits, CustomVAE)
-        self.centroids = nn.Parameter(
+        self.latent_centroids = nn.Parameter(
             th.randn(
                 (num_contexts, self.context_logits.latent_dim),
                 device=device,
@@ -897,11 +901,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                                 )
         else:
             assert num_contexts==num_value_systems, "Direct GMM requires num_contexts==num_value_systems"
-            self.context_to_vs_logits = th.eye(
-                                num_contexts,
-                                device=device,
-                                dtype=dtype, requires_grad=False
-                            )*1000.0
+            self.context_to_vs_logits = None
                         
             
 
@@ -909,21 +909,31 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         return (self.vs_selection_to_logit_vsweights_matrix,)
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
-            return (*self.context_logits.parameters(), self.centroids)
+            return (*self.context_logits.parameters(), self.latent_centroids)
         else:
-            return (*self.context_logits.parameters(), self.centroids, self.context_to_vs_logits,)
+            return (*self.context_logits.parameters(), self.latent_centroids, self.context_to_vs_logits,)
 
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
                 return self.value_system_from_context_train(hidden_state, context_data)
-        
+
+    def update_temperature(self) -> None:
+        if self.training:
+            self._temperature = max(0.99*self._temperature, 0.1)
+        else:
+            raise ValueError("Temperature can only be set when gradients are enabled.")
+        return self.temperature
+
+    @property
+    def temperature(self) -> float:
+        return self._temperature
     def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor, config: MORMForClassificationConfig, args: TrainingArguments, **kwargs) -> None:
 
         from pythae.data.datasets import BaseDataset
         self.context_logits.requires_grad_(True)
-        self.context_logits.requires_grad_(True)
         self.vs_selection_to_logit_vsweights_matrix.requires_grad_(True)
-        self.context_to_vs_logits.requires_grad_(True)
-        self.centroids.requires_grad_(True)
+        if not self.direct_context_to_vs_relation:
+            self.context_to_vs_logits.requires_grad_(True)
+        self.latent_centroids.requires_grad_(True)
         
         w = th.is_grad_enabled()
         assert w
@@ -932,7 +942,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             learning_rate=config.lr_context,
             per_device_train_batch_size=args.per_device_train_batch_size,
             per_device_eval_batch_size=args.per_device_train_batch_size,
-            num_epochs=max(int(0.1*args.num_train_epochs), 1), # Change this to train the model a bit more
+            num_epochs=max(int(0.05*args.num_train_epochs), 1), # Change this to train the model a bit more
             optimizer_cls="AdamW",
             optimizer_params={"weight_decay": args.weight_decay}
         )
@@ -953,12 +963,17 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         with th.no_grad():
             self.context_logits: CustomVAE
             encoded_centroids = self.context_logits.encoder(centroids).embedding
-            self.centroids.data.copy_(encoded_centroids)
+            self.latent_centroids.data.copy_(encoded_centroids)
+        self.latent_centroids.requires_grad_(True)
         
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
         self.context_logits: CustomVAE
         assert isinstance(self.context_logits, CustomVAE)
         model_output = self.context_logits.forward({"data": hidden_state})
+        z = model_output["z"]
+        mu = model_output["mu"]
+        log_var = model_output["log_var"]
+        prob_z = 1.0/(th.sqrt(2*th.pi*th.exp(log_var))) * th.exp(-0.5 * ((z - mu) ** 2) / 2*th.exp(log_var))
         """model_output = ModelOutput(
                     recon_loss=recon_loss,
                     reg_loss=kld,
@@ -967,20 +982,34 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                     z=z,
                 )
         """
-        assert model_output["z"].shape[1] == self.centroids.shape[1]
+        assert z.shape[1] == self.latent_centroids.shape[1]
 
-        context_logit = th.cosine_similarity(model_output["z"].unsqueeze(1), self.centroids.unsqueeze(0), dim=2)
-        assert th.allclose(context_logit[1][4], th.cosine_similarity(model_output["z"][1], self.centroids[4], dim=0))
+        ucentroids = self.latent_centroids.unsqueeze(0)
+        urepresentation = z.unsqueeze(1)
+        if self.detach_context_selection_for_value_system_selection:
+            context_logit = th.cosine_similarity(urepresentation.detach(), ucentroids, dim=2)
+            context_logit_with_detached_centroids = th.cosine_similarity(urepresentation,  ucentroids.detach(), dim=2)
+        else:
+            context_logit = th.cosine_similarity(urepresentation, ucentroids, dim=2)
+            context_logit_with_detached_centroids = context_logit
+        
+        assert th.allclose(context_logit[1][4], th.cosine_similarity(z[1], self.latent_centroids[4], dim=0))
         assert context_logit.shape == (hidden_state.shape[0], self.num_contexts)
         #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
         #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
         #HARD: context_logprobs = per_component_logprob + component_logprobs
         
-        context_logprobs = th.log_softmax(context_logit, dim=1)
-        
+        context_logprobs_detached_repr = th.log_softmax(context_logit/self.temperature, dim=1)
         if self.detach_context_selection_for_value_system_selection:
-            context_logprobs = context_logprobs.detach()
-            
+            context_logprobs = th.log_softmax(context_logit_with_detached_centroids/self.temperature, dim=1)
+        else:
+            context_logprobs = context_logprobs_detached_repr
+        # TODO: ?? self.update_temperature()
+        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+        assert context_logprobs_detached_repr.shape == (hidden_state.shape[0], self.num_contexts)
+        loss_clustering = self.lambda_clustering * th.sum(context_logit*context_logprobs_detached_repr.exp(), dim=-1).mean()
+        #TODO: Adaptation of https://arxiv.org/pdf/1806.10069
+        
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
         assert hidden_state.shape[1] == np.prod(self.context_logits.input_dim)
         
@@ -1005,6 +1034,8 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             )
         else:
             vs_logprobs = context_logprobs
+        print("VS LOGPROBS INPUT", vs_logprobs[0:5])
+        #input()
         assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
 
         vs_assignments = random_argmax(vs_logprobs, dim=1)
@@ -1018,8 +1049,8 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             context_logprobs=context_logprobs,
             vs_logprobs=vs_logprobs,
             vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
-            ctx_possibilities=self.centroids,
-            extra_for_custom_loss=(model_output["loss"],model_output["recon_x"], model_output["z"])
+            ctx_possibilities=self.latent_centroids,
+            extra_for_custom_loss=(model_output["loss"],model_output["recon_x"], z, self.latent_centroids, loss_clustering)
         )
 
 
@@ -1217,15 +1248,16 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
             #decoded = ctx.extra_for_custom_loss[1][jidx]
             #mu = ctx.extra_for_custom_loss[2][jidx]
             #log_var = ctx.extra_for_custom_loss[3][jidx]
-            ctx_features = ctx.context_features[jidx]
             #reconstruction_loss = nn.MSELoss(decoded, ctx_features, reduction='sum')
             #KLD = -0.5 * th.sum(1 + log_var - mu.pow(2) - log_var.exp())
 
             loss = ctx.extra_for_custom_loss[0]
+            loss_clustering = ctx.extra_for_custom_loss[4]
             print("VAE_LOSS??", loss.shape, loss)
-            print("FEATURES:", ctx_features.shape)
+            print("VAE_LOSS?? CLUST INPUT", loss_clustering)
+            #input()
             #model_output["loss"],model_output["recon_x"], model_output["z"]
-            ctx_prediction_loss = loss
+            ctx_prediction_loss = loss + loss_clustering
     
         return ctx_prediction_loss, CtxData.from_previous(ctx, ctx_pred_loss=ctx_prediction_loss )
     else:
@@ -1233,9 +1265,10 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
 
 def entropy_loss_logits(config: MORMForClassificationConfig, ctx: CtxData) -> th.Tensor:
 
+    if config.direct_context_to_vs_relation:
+        return 0.0, ctx
     if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ]:
         context_to_vs_logits = ctx.extra_for_custom_loss[3]
-
         assert context_to_vs_logits.shape == (config.max_contexts, config.max_value_systems), f"Expected entropy_matrix shape {(config.max_contexts, config.max_value_systems)}, got {context_to_vs_logits.shape}"
 
         _,_,mi = compute_mutual_information(context_to_vs_logits)
@@ -1553,7 +1586,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
         gr_loss = gr_loss[0]
         gr_loss_ideal = gr_loss_ideal[0] if ideal_logits is not None else None
 
-    if th.is_grad_enabled():
+    if th.is_grad_enabled() and __debug__:
         ctx_data: CtxData
         if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
             print("CTXP", ctx_data.context_logprobs[0:4])
@@ -1563,6 +1596,12 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
             print("VS_SELECTION_LOSS", vs_selection_loss)
             print("VS_LOSS", vs_loss)
             #exit(0)
+            print("GR_LOSS", gr_loss)
+            print("VS_LOSS", vs_loss)
+            print("VS_SELECTION_LOSS", vs_selection_loss)  
+            print("CTX_LOSS", ctx_loss)
+            print("ENTROPY_LOSS", entropy_loss) 
+            #input()
     vs_loss = vs_loss + vs_selection_loss*vs_selection_coefficient +ctx_loss*ctx_coefficient + entropy_loss*entropy_coefficient   
     #vs_loss = vs_selection_loss + 0.0000001*vs_loss
     if th.is_grad_enabled() and training_variables is not None:
@@ -1711,6 +1750,10 @@ class MORMForClassification(PreTrainedModel):
 
 
     def _set_train_mode(self, train_mode: bool):
+        self.value_system_layer.requires_grad_(train_mode)
+        self.value_system_layer.train(train_mode)
+        self.reward_heads.requires_grad_(train_mode)
+        self.reward_heads.train(train_mode)
         for param in self.grounding_parameters():
             param.requires_grad = train_mode
 
@@ -2031,10 +2074,16 @@ class MORMForClassification(PreTrainedModel):
                 optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=lr, weight_decay=weight_decay)
                             
             else:
+                optimizer_ctx = None
+                                    
                 if ContextImplementations(self.config.context_implementation) == ContextImplementations.GMM:
-                    optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, self.value_system_layer.context_to_vs_logits,), lr=lr, weight_decay=weight_decay)
+                    optimizer = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_value_system, weight_decay=weight_decay)
+                    if not self.config.direct_context_to_vs_relation:
+                        optimizer_ctx = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_context, weight_decay=weight_decay)
                 elif ContextImplementations(self.config.context_implementation) == ContextImplementations.VAE_AND_KMEANS:
-                    optimizer = th.optim.AdamW(( self.value_system_layer.vs_selection_to_logit_vsweights_matrix, self.value_system_layer.context_to_vs_logits,), lr=lr, weight_decay=weight_decay)
+                    optimizer = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_value_system, weight_decay=weight_decay)
+                    if not self.config.direct_context_to_vs_relation:
+                        optimizer_ctx = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_context, weight_decay=weight_decay)
                 elif ContextImplementations(self.config.context_implementation) == ContextImplementations.GMM_AND_CLASSIFIER:
                     
                     # PRETRAIN vs_logits_network to be uniform.
@@ -2080,7 +2129,7 @@ class MORMForClassification(PreTrainedModel):
                     batch_indices = perm2[start:end]
                     rewards1 = self.reward_heads(valid_grounding_features1[batch_indices])
                     rewards2 = self.reward_heads(valid_grounding_features2[batch_indices])
-                optimizer.zero_grad()
+                #optimizer.zero_grad()
                 
                 targets = valid_targets[batch_indices]
                 
@@ -2121,15 +2170,19 @@ class MORMForClassification(PreTrainedModel):
                     mutual_information = compute_mutual_information_from_alternative_distributions(th.cat([ctx1.vs_logprobs, ctx2.vs_logprobs], dim=0), th.cat([ctx1.context_logprobs, ctx2.context_logprobs], dim=0))
                     
                         #input()
-                if entropy_coef > 0:
+                if entropy_coef > 0 and not self.config.direct_context_to_vs_relation:
                     loss_total = loss_total - entropy_coef * mutual_information
-                
+                optimizer.zero_grad()
+                if optimizer_ctx is not None:
+                    optimizer_ctx.zero_grad()
                 loss_total.backward()
                 with th.no_grad():
                     accuracy = accuracy_logits(bt_normal, targets, missing_mask=None, discordance_epsilon=self.config.discordance_epsilon)
                     #accuracy = ((th.sigmoid(bt_normal) > 0.5) == (targets > 0.5)).float().mean()
                     
                 optimizer.step()
+                if optimizer_ctx is not None:
+                    optimizer_ctx.step()
                 
                 # Every 100 steps, draw the self.value_system_layer.context_to_vs_logprobabilities matrix with matplotlib and save it to a file.
                 
@@ -2298,7 +2351,7 @@ class MORMForClassification(PreTrainedModel):
             
     def plot_matrices(self, t: int, filename, low_res=False, save_npy=True, ctx_data: CtxData = None):
         self.value_system_layer: BasicGmmCtxDependentAlignmentLayer
-        if isinstance(self.value_system_layer, GmmAndClassifierCtxDependentAlignmentLayer):
+        if isinstance(self.value_system_layer, GmmAndClassifierCtxDependentAlignmentLayer) or self.value_system_layer.direct_context_to_vs_relation:
             assert ctx_data is not None, "ctx_data must be provided for GmmAndClassifierCtxDependentAlignmentLayer"
             log_probs1 = ctx_data.vs_logprobs
             log_probs2 = ctx_data.context_logprobs
@@ -2330,6 +2383,10 @@ class MORMForClassification(PreTrainedModel):
         averaged_vs_weights = (context_to_vs @ vs_weights).cpu().numpy()
         context_to_vs = context_to_vs.cpu().numpy()
         vs_weights = vs_weights.cpu().numpy()
+
+        print("VSWEIGHT", vs_weights[0:5])
+        print(vs_weights[5:10])
+        
 
         figure, axes = plt.subplots(1, 4, figsize=(32, 8))
         axes[0].imshow(context_to_vs, cmap='viridis', aspect='auto', vmin=0.0, vmax=1.0)
@@ -2449,7 +2506,8 @@ class MORMForClassification(PreTrainedModel):
                 weight_initialization = config.vs_weight_initialization,
                 num_contexts=config.max_contexts,
                 num_value_systems=config.max_value_systems,
-                num_values=config.num_values, device=device, dtype=dtype, args_for_ctx_probabilities=config.vae_args()
+                num_values=config.num_values, device=device, dtype=dtype, args_for_ctx_probabilities=config.vae_args(),
+                initial_temperature=config.initial_temperature, lambda_clustering=config.lambda_clustering,
                 )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC_HARSH:
             return BasicHarshCtxDependentAlignmentLayer(

@@ -631,6 +631,18 @@ class ScriptArguments:
         default=256,
         metadata={"help": "The hidden dimension size of the VAE used for context selection."},
     )
+    vae_beta: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "The beta parameter for the BetaVAE used for context selection."},
+    )
+    initial_temperature: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "The initial temperature for the Gumbel-Softmax used for context selection."},
+    )
+    lambda_clustering: Optional[float] = field(
+        default=1.0,
+        metadata={"help": "The lambda parameter for the clustering loss used for context selection in VAE KMEANS: https://arxiv.org/pdf/1806.10069."},
+    )
 
 
 

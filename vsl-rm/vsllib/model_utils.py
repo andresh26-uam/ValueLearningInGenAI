@@ -727,6 +727,7 @@ from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_M
 
 from pythae.models.base.base_utils import ModelOutput
 
+
 class CustomVAEConfig(VAEConfig):
     def __init__(self, input_dim: int, 
                  vae_latent_dim: int,
@@ -812,7 +813,41 @@ class CustomVAE(VAE):
     def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: BaseDecoder):
         super().__init__(vae_config, encoder, decoder)
         self.train()
+    def forward(self, inputs: BaseDataset, **kwargs):
+            """
+            The VAE model
     
+            Args:
+                inputs (BaseDataset): The training dataset with labels
+    
+            Returns:
+                ModelOutput: An instance of ModelOutput containing all the relevant parameters
+    
+            """
+    
+            x = inputs["data"]
+    
+            encoder_output = self.encoder(x)
+    
+            mu, log_var = encoder_output.embedding, encoder_output.log_covariance
+    
+            std = th.exp(0.5 * log_var)
+            z, eps = self._sample_gauss(mu, std)
+            recon_x = self.decoder(z)["reconstruction"]
+    
+            loss, recon_loss, kld = self.loss_function(recon_x, x, mu, log_var, z)
+    
+            output = ModelOutput(
+                recon_loss=recon_loss,
+                mu=mu,
+                log_var=log_var,
+                reg_loss=kld,
+                loss=loss,
+                recon_x=recon_x,
+                z=z,
+            )
+    
+            return output
     
 class MORMForClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
@@ -835,6 +870,9 @@ class MORMForClassificationConfig(PretrainedConfig):
                                      'span', 'equal'] = "dirichlet",
         do_initialization: bool = True,
 
+        initial_temperature: float = 1.0,
+        lambda_clustering: float = 0.0,
+        vae_beta: float = 1.0,
         vae_latent_dim: int =32,
         vae_type: str ="VAE",
         vae_dropout: int = 0.0,
@@ -931,6 +969,9 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vs_layer_intermediate_activation = vs_layer_intermediate_activation
         self.vs_weight_initialization = vs_weight_initialization
 
+        self.initial_temperature = initial_temperature
+        self.lambda_clustering = lambda_clustering
+        self.vae_beta = vae_beta
         self.vae_latent_dim=vae_latent_dim
         self.vae_type=vae_type
         self.vae_dropout=vae_dropout
