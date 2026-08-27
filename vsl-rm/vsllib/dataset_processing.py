@@ -46,6 +46,8 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
             ctx = sample['context']
         else:
             ctx = sample['prompt']
+        sample['context'] = ctx
+
         ctemplate = maybe_strip_bos_token(tokenizer.apply_chat_template(
         [{'role': 'user', 'content': ctx}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
         tok_context = tokenizer(ctemplate, truncation=True)
@@ -80,7 +82,7 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
 
 
 
-def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu"),  sentence_transformer: SentenceTransformer= None) -> dict:
+def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu"),  sentence_transformer: SentenceTransformer= None, **kwargs) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
     with th.no_grad():
         model_device = device
@@ -88,7 +90,9 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
             if ic == 2 and not use_context:
                 continue
             elif ic == 2 and sentence_transformer is not None:
-                sample[case_[2]] = sentence_transformer.encode(case_[3])
+                sentence = sample['context']
+                sample[case_[2]] = sentence_transformer.encode(sentence, convert_to_tensor=True).detach().cpu()
+                
             else:
                 merged_features = {
                     "input_ids": sample[case_[0]],
@@ -113,6 +117,7 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
                 last_token_idx = atm.sum(dim=1) - 1
 
                 sample[case_[2]] = output[np.arange(output.size(0)), last_token_idx].detach().cpu()
+                
                 del output
             
         return sample
@@ -319,6 +324,7 @@ def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys:
         sample['context'] = ctx
         if sample.get(CONTEXT_FEATURE_NAME, None) is None:
             sample[CONTEXT_FEATURE_NAME] = ctx
+            print("CTX SIZE", ctx)
             
         
         keep_keys.extend([CONTEXT_FEATURE_NAME, "context"])
@@ -345,7 +351,7 @@ def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys:
     return sample
 
 
-def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_context: bool =True, device: th.device = th.device("cpu")) -> dict:
+def feature_extract_sample(sample: dict, collator: MORewardDataCollator, use_context: bool =True, device: th.device = th.device("cpu"), **kwargs) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
     
     with th.no_grad():
@@ -399,12 +405,20 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
     def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=32, num_proc=4):
         model_reference = fe_kwargs.pop("model_reference")
         model_reference = model_reference.cpu()
+
+        sentence_transformer = None
+        if "sentence_transformer" in fe_kwargs.keys() and fe_kwargs.get("sentence_transformer") is not None:
+            sentence_transformer = fe_kwargs.pop("sentence_transformer").cpu()
+        
+        
         assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
         assert self.data[0].get("labels", None) is not None, "Labels   are missing after tokenization step."
-        def _embed_shard(dataset_shard, local_model, device):
+        def _embed_shard(dataset_shard, local_model, device, sentence_transformer=None):
+            local_model.eval()
+            if sentence_transformer is not None: sentence_transformer.eval() 
             with th.no_grad():
                 return dataset_shard.map(
-                            lambda x: self.feature_extractor_method(x, local_model, use_context=use_context, device=device, **fe_kwargs),
+                            lambda x: self.feature_extractor_method(x, local_model, use_context=use_context, device=device, sentence_transformer=sentence_transformer, **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,
@@ -420,10 +434,12 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                     ]
 
             model_copies = [deepcopy(model_reference).to(th.device(f"cuda:{i}")).eval() for i in range(n_gpus)]
+            if sentence_transformer is not None:
+                sentence_transformer_copies = [deepcopy(sentence_transformer).to(th.device(f"cuda:{i}")).eval() for i in range(n_gpus)]
 
             with ThreadPoolExecutor(max_workers=n_gpus) as executor:
                 futures = [
-                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"))
+                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"), sentence_transformer=sentence_transformer_copies[i] if sentence_transformer is not None else None)
                             for i, shard in enumerate(shards)
                         ]
                 mapped_shards = [f.result() for f in futures]
@@ -433,9 +449,12 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
         elif th.cuda.is_available():
             print("Embedding dataset on single GPU")
             model_reference = model_reference.to(th.device("cuda"))
+            if sentence_transformer is not None:
+                sentence_transformer = sentence_transformer.to(th.device("cuda"))
+                sentence_transformer.eval()
             model_reference.eval()
             self.data = self.data.map(
-                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), **fe_kwargs),
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), sentence_transformer=sentence_transformer, **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,
@@ -445,8 +464,10 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                 print("WARNING: No GPU available, embedding dataset on CPU. This may be very slow.")
                 model_reference = model_reference.to(th.device("cpu"))
                 model_reference.eval()
+                if sentence_transformer is not None:
+                    sentence_transformer.eval()
                 self.data = self.data.map(
-                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cpu"), sentence_transformer=sentence_transformer, **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,

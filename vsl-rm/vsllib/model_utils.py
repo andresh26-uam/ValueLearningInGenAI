@@ -1,3 +1,4 @@
+from pythae.data import BaseDataset
 from pythae.models.nn import BaseDecoder, BaseEncoder
 import tqdm
 

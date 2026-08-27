@@ -2,11 +2,11 @@
 
 
 GPUS="L40S:1"
-CPU=True
+CPU=False
 
-DEBUG=(--debug)
+DEBUG=()
 SAVE=(--do_save=False)
-REPORT_TO=none
+REPORT_TO=wandb
 
 if [[ "$CPU" == "True" ]]; then
     GPUS=""
@@ -124,7 +124,10 @@ for seed in 42; do
         "$CONFIG"
         "--dataset=$DATASET"
         "--run_name=${GPUS}${NAME}"
-        "--seed=$seed"
+        "--seed=$seed" 
+        #"--recalculate_features"
+        #"--repostprocess"
+        #"--do_train=False"
         "--num_train_epochs=$NUM_TRAIN_EPOCHS"
         "--discordance_epsilon=$DISCORDANCE_EPSILON"
         "--training_initialization_data_size=$training_initialization_data_size"

@@ -61,6 +61,7 @@ def pkuAlignment_processor() -> tuple[int, list[int]]:
     ds = concatenate_datasets([train_dataset, val_dataset])
 
     
+    validation_indices = list(range(len(train_dataset), len(ds)))
     
     rows = []
     skipped_amount = 0
@@ -71,7 +72,6 @@ def pkuAlignment_processor() -> tuple[int, list[int]]:
             rows.append(row_or_skipped)
         else:
             skipped_amount += 1
-    validation_indices = list(range(len(train_dataset), len(ds)))
     
     assert len(validation_indices) == len(val_dataset), "Validation indices length should match the validation dataset length."    
 
