@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from enum import Enum
 import json
 import numpy as np
+from sentence_transformers import SentenceTransformer
 import torch
 from transformers import (
     HfArgumentParser,
@@ -452,11 +453,17 @@ def main() -> None:
             embed_model = model.full_model if script_args.use_extracted_features else None
             print("EMBED MODEL:", embed_model)
             print("FEATURES:", script_args.use_extracted_features)
-            
+
+            sentence_model = None
+            if script_args.use_sentence_transformer:
+                sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                
             dataset = PairwisePreferenceDataset(
                             train_path,
                             tokenizer,
                             from_disk=True,
+                            use_sentence_transformer=script_args.use_sentence_transformer,
+                            sentence_model=sentence_model,
                             normalize_context=script_args.normalize_context_features,
                             extra_keep_keys=extra_keep_keys,
                             retokenize=False,

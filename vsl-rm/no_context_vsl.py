@@ -34,7 +34,7 @@ for candidate in (
         break
 
 from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, sample_example_profiles_exact, sample_example_profiles_scipy, seed_everything
-from vsllib.dataset_processing import USE_SENTENCE_TRANSFORMER, FeatureBasedPreferenceDataset, PairwisePreferenceDataset
+from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
 from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, mo_compute_loss_func
@@ -59,7 +59,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 model_full, 'base_model') else model_full
 
             sentence_model = None
-            if USE_SENTENCE_TRANSFORMER:
+            if script_args.use_sentence_transformer:
                 sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
                 
 
@@ -77,6 +77,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_extracted_features) 
 
             dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
+                                                use_sentence_transformer=script_args.use_sentence_transformer,
                                                 normalize_context=script_args.normalize_context_features,
                                                 from_disk=True,
                                                 sentence_model=sentence_model,

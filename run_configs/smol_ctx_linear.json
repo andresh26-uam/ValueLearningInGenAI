@@ -1,6 +1,7 @@
 {
     "model_name": "HuggingFaceTB/SmolLM-135M-Instruct",
     "dataset": "pku",
+    "use_sentence_transformer": true,
     "context_implementation": "VAE_KMEANS",
     "do_initialization": true,
     "direct_context_to_vs_relation": true,

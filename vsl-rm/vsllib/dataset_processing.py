@@ -80,7 +80,6 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
 
 
 
-USE_SENTENCE_TRANSFORMER = False
 def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoTokenizer, collator: MORewardDataCollatorWithPadding, use_context: bool =True, device: th.device = th.device("cpu"),  sentence_transformer: SentenceTransformer= None) -> dict:
     # THIS ASSUMES BATCHED MAPPING FUNCTION.
     with th.no_grad():
@@ -88,7 +87,7 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
         for ic, case_ in enumerate([("input_ids_1", "attention_mask_1", "embedding_1", "option1"), ("input_ids_2", "attention_mask_2", "embedding_2", "option2"), ("context_input_ids", "context_attention_mask", CONTEXT_EMBEDDING_FEATURE_NAME, "context")]):
             if ic == 2 and not use_context:
                 continue
-            elif ic == 2 and USE_SENTENCE_TRANSFORMER:
+            elif ic == 2 and sentence_transformer is not None:
                 sample[case_[2]] = sentence_transformer.encode(case_[3])
             else:
                 merged_features = {
@@ -167,8 +166,9 @@ class BasePairwisePreferenceDataset():
         self.data: Dataset 
         self.context_feature_name = context_feature_name
         self._cached_context_embeddings=None
+        
         print(f"Loading dataset from {path} with from_disk={from_disk}")
-
+        
         preprocessed_dataset_path = os.path.join(path, f"preprocessed")
         os.makedirs(preprocessed_dataset_path, exist_ok=True)
         
@@ -476,7 +476,8 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             normalized_norms = np.linalg.norm(normalized_contexts, ord=2, axis=1)
             assert np.allclose(normalized_norms, np.ones_like(normalized_norms)), "Normalization failed: not all context embeddings have unit norm."
         
-    def __init__(self, path: str, tokenizer, normalize_context=False, from_disk: bool = True, sentence_model: SentenceTransformer=None, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1):
+    def __init__(self, path: str, tokenizer, normalize_context=False, from_disk: bool = True, sentence_model: SentenceTransformer=None, extra_keep_keys: list = None, retokenize: bool = False, recalculate_embeddings: bool = False, use_embeddings: bool = True, model_reference: AutoModelForCausalLM = None, collator: MORewardDataCollatorWithPadding = None, use_context: bool = True, split_seed: int = 42, cleanup_cache_files: bool = True, eval_proportion_or_indices: Union[float, List[int]] = 0.05, test_proportion_or_indices: Union[float, List[int]] = 0.1, use_sentence_transformer: bool = False):
+        
         self.normalize_context = normalize_context
         pp_kwargs = {
             "tokenizer": tokenizer,
@@ -486,14 +487,21 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             "model_reference": model_reference,
             "collator": collator
         }
+        if use_sentence_transformer:
+            fe_kwargs["sentence_transformer"] = sentence_model
+        else:
+            fe_kwargs["sentence_transformer"] = None
         self.postprocessor_method = tokenize_sample
         self.feature_extractor_method = embed_sample
-
         
+
+        subpath = model_reference.config._name_or_path.replace('/', '_') if model_reference is not None else "only_tokenized"
+        if use_sentence_transformer:
+            subpath += "_ST_" + sentence_model.config._name_or_path.replace('/', '_')
         super().__init__(path=path,
                          context_feature_name = CONTEXT_EMBEDDING_FEATURE_NAME,
                          from_disk=from_disk,
-                         sub_path=model_reference.config._name_or_path.replace('/', '_') if model_reference is not None else "only_tokenized",
+                         sub_path=subpath,
                          extra_keep_keys=extra_keep_keys,
                          recalculate_features=recalculate_embeddings,
                          repostprocess=retokenize,

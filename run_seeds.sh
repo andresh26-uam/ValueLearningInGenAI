@@ -4,9 +4,9 @@
 GPUS="L40S:1"
 CPU=True
 
-DEBUG=()
+DEBUG=(--debug)
 SAVE=(--do_save=False)
-REPORT_TO=wandb
+REPORT_TO=none
 
 if [[ "$CPU" == "True" ]]; then
     GPUS=""

@@ -383,6 +383,9 @@ class ScriptArguments:
     use_cpu: Optional[bool] = field(
         default=False, metadata={"help": "Whether to use CPU for training. If False, will use GPU if available."})
 
+    use_sentence_transformer: Optional[bool] = field(
+        default=False, metadata={"help": "Whether to use a sentence transformer for context embedding. If False, will use the base model's embeddings."}
+    )
     save_postprocessed_and_feature_extracted_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
