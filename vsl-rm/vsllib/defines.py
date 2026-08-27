@@ -153,6 +153,7 @@ SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-MIN_EPSILON)) -0.5 # The difference in score
 VALUE_LAYER_ACTIVATIONS = {
     "ReLU": nn.ReLU,
     "Tanh": nn.Tanh,
+    "LeakyReLU": nn.LeakyReLU,
     "Softplus": nn.Softplus,
     "SiLU": nn.SiLU,
     "Sigmoid": nn.Sigmoid,

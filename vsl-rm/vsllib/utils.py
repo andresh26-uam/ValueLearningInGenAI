@@ -603,6 +603,35 @@ class ScriptArguments:
         metadata={"help": "Whether to detach the value system selection from the context selection. If True, the value system selection will not be used for the context selection."},
     )
 
+    vae_latent_dim: Optional[int] = field(
+        default=10,
+        metadata={"help": "The latent dimension of the VAE used for context selection. If 0, no VAE will be used."},
+    )
+    vae_type: Optional[str] = field(
+        default="VAE",
+        metadata={"help": "The type of VAE to use for context selection. Options: VAE, BetaVAE, FactorVAE, etc."},
+    )
+    vae_dropout: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "The dropout probability for the VAE used for context selection."},
+    )
+    vae_layer_activation: Optional[str] = field(
+        default="ReLU",
+        metadata={"help": "The activation function to use for the hidden layers of the VAE used for context selection. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"},
+    )
+    vae_reconstruction_loss: Optional[str] = field(
+        default="mse",
+        metadata={"help": "The reconstruction loss to use for the VAE used for context selection. Options: mse, bce, etc."},
+    )   
+    vae_n_hidden_layers: Optional[int] = field( 
+        default=2,
+        metadata={"help": "The number of hidden layers in the VAE used for context selection."},
+    )
+    vae_hidden_dim_size: Optional[int] = field(
+        default=256,
+        metadata={"help": "The hidden dimension size of the VAE used for context selection."},
+    )
+
 
 
 def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:

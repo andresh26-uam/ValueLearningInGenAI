@@ -144,6 +144,15 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
 
+            vae_latent_dim=script_args.vae_latent_dim,
+            vae_type=script_args.vae_type,
+            vae_dropout=script_args.vae_dropout,
+            vae_layer_activation=script_args.vae_layer_activation,
+            vae_reconstruction_loss=script_args.vae_reconstruction_loss,
+            vae_n_hidden_layers=script_args.vae_n_hidden_layers,
+            vae_hidden_dim=script_args.vae_hidden_dim_size,
+        
+            
             direct_context_to_vs_relation=script_args.direct_context_to_vs_relation,
             sharp_context_classification=script_args.sharp_context_classification,
             detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
@@ -230,7 +239,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER,ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
