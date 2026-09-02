@@ -160,6 +160,10 @@ VALUE_LAYER_ACTIVATIONS = {
     "none": None,
 }
 
+SENTENCE_MODEL_SIZES = {
+    "all-MiniLM-L6-v2": 384,
+}
+
 MODEL_PRESETS: Dict[str, Dict[str, Any]] = {
     "mlp": {},
     "gemma": {

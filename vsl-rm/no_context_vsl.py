@@ -430,7 +430,7 @@ if __name__ == "__main__":
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)
                 trainer.model = mo_model
-                
+                mo_model.to("cuda" if torch.cuda.is_available() and not script_args.use_cpu else "cpu")
                 print(trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test"))
 
     saving()

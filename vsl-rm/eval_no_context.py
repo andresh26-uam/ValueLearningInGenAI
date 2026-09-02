@@ -456,7 +456,7 @@ def main() -> None:
 
             sentence_model = None
             if script_args.use_sentence_transformer:
-                sentence_model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+                sentence_model = SentenceTransformer(f'sentence-transformers/{model.config.sentence_transformer_name}')
                 
             dataset = PairwisePreferenceDataset(
                             train_path,

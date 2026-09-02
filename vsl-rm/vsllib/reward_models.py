@@ -36,7 +36,7 @@ from pythae.trainers import BaseTrainerConfig
 from pythae.pipelines.training import TrainingPipeline
 
 from vsllib.training_utils import MORMTrainingVariables
-from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, ContextImplementations, MOLossFunctions
+from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, SENTENCE_MODEL_SIZES, ContextImplementations, MOLossFunctions
 from vsllib.model_utils import ACTIVATE_TEMPERATURE_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
 from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
@@ -2834,7 +2834,8 @@ class MORMForClassification(PreTrainedModel):
             return SequenceClassifierOutputWithPastAndOthers(logits=logits)"""
         
         return self.base_forward(*args,**kwargs)
-        
+
+
 class MORMForSequenceClassification(MORMForClassification):
     config_class = MORMForClassificationConfig
     base_model_prefix = "full_model"
@@ -2980,10 +2981,10 @@ class MORMForSequenceClassification(MORMForClassification):
                         )
         if config.use_sentence_transformer:
             sentence_transformer = config.sentence_transformer_name
-            model = SentenceTransformer(f'sentence-transformers/{sentence_transformer}')
+            """model = SentenceTransformer(f'sentence-transformers/{sentence_transformer}')
             test = model.encode(["test"], convert_to_numpy=True)
-            del model
-            input_size_vs = test.shape[-1]
+            del model"""
+            input_size_vs =  SENTENCE_MODEL_SIZES[sentence_transformer]
         else:
             input_size_vs = input_size
         return input_size, input_size_vs

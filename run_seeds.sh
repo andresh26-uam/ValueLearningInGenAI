@@ -2,7 +2,7 @@
 
 
 GPUS="L40S:1"
-CPU=True
+CPU=False
 
 DEBUG=()
 SAVE=(--do_save=False)
