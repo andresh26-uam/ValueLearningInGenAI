@@ -1,20 +1,43 @@
+from collections.abc import Iterator
+import math
+
 from pythae.data import BaseDataset
 from pythae.models.nn import BaseDecoder, BaseEncoder
 import tqdm
 
 from transformers.configuration_utils import PretrainedConfig
-from typing import Literal, Optional, Tuple
+from typing import List, Literal, Optional, Tuple
 
 import numpy as np
 import torch as th
 import torch.nn as nn
 from transformers import TrainingArguments
 
+from pythae.models.vae import VAE, VAEConfig
+from pythae.models.nn import BaseDecoder, BaseEncoder
+from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
+
+from pythae.models.base.base_utils import ModelOutput
+
 from torch.distributions import Normal, Independent
 
-from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
 
-THRESHOLD = 0.0
+from sklearn.cluster import KMeans
+
+from pythae.data.datasets import BaseDataset
+from pythae.trainers import BaseTrainerConfig
+from pythae.pipelines.training import TrainingPipeline
+
+
+from umap import UMAP
+import matplotlib.pyplot as plt
+import numpy as np
+from sklearn.metrics import pairwise_distances_argmin_min
+                
+from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
+from vsllib.utils import kmeans_clustering
+
+THRESHOLD = 50.0
 ACTIVATE_THRESHOLD_VS =  False
 THRESHOLD_CTX = 50.0
 TEMP_GMM = 1.0
@@ -731,139 +754,13 @@ class FastGaussianMixture(nn.Module):
             return samples, log_prob, predicted_ids
 
 
-from pythae.models.vae import VAE, VAEConfig
-from pythae.models.nn import BaseDecoder, BaseEncoder
-from pythae.models.nn.default_architectures import Encoder_VAE_MLP, Decoder_AE_MLP
-
-from pythae.models.base.base_utils import ModelOutput
 
 
-class CustomVAEConfig(VAEConfig):
-    def __init__(self, input_dim: int, 
-                 vae_latent_dim: int,
-                vae_reconstruction_loss: str, 
-                vae_type: str, 
-                vae_dropout: int,
-                vae_layer_activation: str,
-                vae_n_hidden_layers: int , 
-                vae_hidden_dim: int , vae_detach_centroids: bool = False, **kwargs):
-        super().__init__(input_dim=input_dim, latent_dim=vae_latent_dim, reconstruction_loss=vae_reconstruction_loss, **kwargs)
-        self.n_hidden_layers = vae_n_hidden_layers
-        self.hidden_dim = vae_hidden_dim
-        self.type = vae_type
-        self.dropout = vae_dropout
-        self.layer_activation = vae_layer_activation
-
-class CustomEncoder(Encoder_VAE_MLP):
-    def __init__(self, args: CustomVAEConfig, device, dtype):
-        BaseEncoder.__init__(self)
-        self.input_dim = args.input_dim
-        self.latent_dim = args.latent_dim
-        self.hidden_dim = args.hidden_dim
-        self.n_hidden_layers = args.n_hidden_layers
-        self.layer_activation = args.layer_activation
-        
-        layers = nn.ModuleList()
-
-        encoder = nn.Sequential(*construct_layers(input_dim=np.prod(args.input_dim),
-                         hidden_sizes=[self.hidden_dim] * (self.n_hidden_layers-1),
-                         intermediate_activation=self.layer_activation,
-                         dropout=args.dropout,
-                         device=device,
-                         dtype=dtype,
-                         n_outputs=self.hidden_dim,
-                         final_activation=args.layer_activation, # TODO ??
-                         final_activation_kwargs={}))
-
-        layers.append(encoder)
-
-        self.layers = layers
-        self.depth = len(layers)
-
-        self.embedding = nn.Linear(self.hidden_dim, self.latent_dim, device=device, dtype=dtype)
-        self.log_var = nn.Linear(self.hidden_dim, self.latent_dim, device=device, dtype=dtype)
-        print("ENCODER", self)
-
-
-class CustomDecoder(Decoder_AE_MLP):
-    def __init__(self, args: CustomVAEConfig, device, dtype):
-        BaseDecoder.__init__(self)
-        
-        self.input_dim = args.input_dim
-        self.latent_dim = args.latent_dim
-        self.hidden_dim = args.hidden_dim
-        self.n_hidden_layers = args.n_hidden_layers
-        self.layer_activation = args.layer_activation
-        
-        layers = nn.ModuleList()
-
-        decoder = nn.Sequential(*construct_layers(input_dim=self.latent_dim,
-                         hidden_sizes=[self.hidden_dim] * self.n_hidden_layers,
-                         intermediate_activation=self.layer_activation,
-                         dropout=args.dropout,
-                         device=device,
-                         dtype=dtype,
-                         n_outputs=np.prod(self.input_dim),
-                         final_activation="none", # TODO ??
-                         final_activation_kwargs={}))
-        layers.append(decoder)
-        """layers.append(nn.Sequential(nn.Linear(args.latent_dim, args.hidden_dim, device=device, dtype=dtype), nn.ReLU()))
-        for _ in range(args.n_hidden_layers - 1):
-                    layers.append(nn.Sequential(nn.Linear(self.hidden_dim_size, self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
-              """  
-        """layers.append(
-            nn.Sequential(nn.Linear(args.hidden_dim, int(np.prod(args.input_dim)), device=device, dtype=dtype), nn.Sigmoid())
-        )"""
-
-        self.layers = layers
-        self.depth = len(layers)
-        print("DECODER", self)
-
-class CustomVAE(VAE):
-    def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: BaseDecoder):
-        super().__init__(vae_config, encoder, decoder)
-        self.train()
-    def forward(self, inputs: BaseDataset, **kwargs):
-            """
-            The VAE model
-    
-            Args:
-                inputs (BaseDataset): The training dataset with labels
-    
-            Returns:
-                ModelOutput: An instance of ModelOutput containing all the relevant parameters
-    
-            """
-    
-            x = inputs["data"]
-    
-            encoder_output = self.encoder(x)
-    
-            mu, log_var = encoder_output.embedding, encoder_output.log_covariance
-    
-            std = th.exp(0.5 * log_var)
-            z, eps = self._sample_gauss(mu, std)
-            recon_x = self.decoder(z)["reconstruction"]
-    
-            loss, recon_loss, kld = self.loss_function(recon_x, x, mu, log_var, z)
-    
-            output = ModelOutput(
-                recon_loss=recon_loss,
-                mu=mu,
-                log_var=log_var,
-                reg_loss=kld,
-                loss=loss,
-                recon_x=recon_x,
-                z=z,
-            )
-    
-            return output
-    
 class MORMForClassificationConfig(PretrainedConfig):
     model_type = "morm_for_sequence_classification"
     has_no_defaults_at_init = True
 
-    def vae_args(self):
+    def vae_args(self) -> dict:
         # Return all arguments that start with "vae_" as a dictionary
         return {k: v for k, v in self.__dict__.items() if k.startswith("vae_")}
     
@@ -879,18 +776,23 @@ class MORMForClassificationConfig(PretrainedConfig):
         vs_weight_initialization: Literal['dirichlet',
                                      'span', 'equal'] = "dirichlet",
         do_initialization: bool = True,
-
-        initial_temperature: float = 1.0,
-        lambda_clustering: float = 0.0,
+        do_vs_initialization: bool = True,
+        normalize_context: bool =False,
+                                                        
+        vae_pretrain_epochs: int = 10,
+        vae_initial_temperature: float = 1.0,
+        vae_lambda_clustering: float = 1.0,
         vae_beta: float = 1.0,
         vae_latent_dim: int =32,
-        vae_type: str ="VAE",
+        vae_type: str = "vae",
         vae_dropout: int = 0.0,
         vae_layer_activation: str = "ReLU",
         vae_reconstruction_loss: str = "mse",
         vae_n_hidden_layers: int = 4,
         vae_hidden_dim: int = 512,
-
+        vae_final_encoder_layer_activation: str = "none",
+        vae_resampling_iterations: int = 10,
+        vae_similarity: str = "cosine",
         entropy_coefficient: float = 0.0,
         ctx_coefficient: float = 0.0,
         vs_selection_coefficient: float = 0.0,
@@ -942,10 +844,10 @@ class MORMForClassificationConfig(PretrainedConfig):
         base_model_reward_head_indices: list = None,
         loss_func_type: str = MOLossFunctions.DEFAULT.value,
         loss_func_kwargs: dict = None,
-        lr_grounding: Optional[float] = None,
-        lr_value_system: Optional[float] = None,
-        lr_context: Optional[float] = None,
-        lr_lambda: Optional[float] = None,
+        lr_grounding: Optional[float] = 0.0001,
+        lr_value_system: Optional[float] = 0.0001,
+        lr_context: Optional[float] = 0.0,
+        lr_lambda: Optional[float] = 0.0,
         max_contexts: Optional[float]=5,
         max_value_systems: Optional[float]=3,
         **kwargs,
@@ -981,11 +883,13 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vs_layer_intermediate_activation = vs_layer_intermediate_activation
         self.vs_weight_initialization = vs_weight_initialization
 
+        self.normalize_context = normalize_context
         self.sentence_transformer_name = sentence_transformer_name
         self.use_sentence_transformer = use_sentence_transformer
-        
-        self.initial_temperature = initial_temperature
-        self.lambda_clustering = lambda_clustering
+
+        self.vae_pretrain_epochs = vae_pretrain_epochs
+        self.vae_initial_temperature = vae_initial_temperature
+        self.vae_lambda_clustering = vae_lambda_clustering
         self.vae_beta = vae_beta
         self.vae_latent_dim=vae_latent_dim
         self.vae_type=vae_type
@@ -994,10 +898,14 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vae_reconstruction_loss=vae_reconstruction_loss
         self.vae_n_hidden_layers=vae_n_hidden_layers
         self.vae_hidden_dim=vae_hidden_dim
+        self.vae_resampling_iterations=vae_resampling_iterations
+        self.vae_similarity=vae_similarity
+        self.vae_final_encoder_layer_activation = vae_final_encoder_layer_activation
 
         self.context_implementation = context_implementation
         self.sharp_context_classification = sharp_context_classification
         self.do_initialization = do_initialization
+        self.do_vs_initialization = do_vs_initialization
         self.vs_selection_coefficient = vs_selection_coefficient
         self.ctx_coefficient = ctx_coefficient
         self.entropy_coefficient = entropy_coefficient
@@ -1031,7 +939,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.input_size_vs = input_size_vs
         self.training_initialization_data_size = training_initialization_data_size
         if isinstance(dtype, th.dtype):
-            self.dtype = str(dtype).replace("torch.", "")
+            self.dtype = str(dtype).replace("th.", "")
         else:
             self.dtype = str(dtype)
         self.use_ideal_grounding_model = use_ideal_grounding_model
@@ -1085,3 +993,935 @@ class MORMForClassificationConfig(PretrainedConfig):
         
         super().__init__(num_labels=num_values + 1,
                          id2label=id2label, label2id=label2id, **kwargs)
+        
+class CustomVAEConfig(VAEConfig):
+
+    def __init__(self, input_dim: int, 
+                 vae_latent_dim: int,
+                vae_reconstruction_loss: str,
+                vae_type: str, 
+                vae_dropout: int,
+                vae_layer_activation: str,
+                vae_n_hidden_layers: int , 
+                vae_final_encoder_layer_activation: str,
+                vae_resampling_iterations: int,
+                vae_similarity: str,
+                vae_hidden_dim: int , 
+                vae_initial_temperature: float, 
+                vae_lambda_clustering: float,
+                vae_is_binary: bool = False,
+                vae_pretrain_epochs: int = 10,
+                  **kwargs):
+        super().__init__(input_dim=input_dim, latent_dim=vae_latent_dim, reconstruction_loss=vae_reconstruction_loss, **kwargs)
+        self.n_hidden_layers = vae_n_hidden_layers
+        self.hidden_dim = vae_hidden_dim
+        self.pretrain_epochs = vae_pretrain_epochs
+        self.type = vae_type
+        self.dropout = vae_dropout
+        self.layer_activation = vae_layer_activation
+        self.resampling_iterations = vae_resampling_iterations if vae_type == "vae" else 1
+        self.final_layer_activation = vae_final_encoder_layer_activation
+        self.similarity = vae_similarity
+        self.lambda_clustering = vae_lambda_clustering
+        self.initial_temperature = vae_initial_temperature
+        self.binary = vae_is_binary
+
+class CustomEncoder(Encoder_VAE_MLP):
+    def __init__(self, args: CustomVAEConfig, device, dtype):
+        BaseEncoder.__init__(self)
+        self.input_dim = args.input_dim
+        self.latent_dim = args.latent_dim
+        self.hidden_dim = args.hidden_dim
+        self.n_hidden_layers = args.n_hidden_layers
+        self.layer_activation = args.layer_activation
+        self.final_layer_activation = args.final_layer_activation
+        self.vae_type = args.type
+        layers = nn.ModuleList()
+
+        encoder = nn.Sequential(*construct_layers(input_dim=np.prod(args.input_dim),
+                         hidden_sizes=[self.hidden_dim] * (self.n_hidden_layers-1),
+                         intermediate_activation=self.layer_activation,
+                         dropout=args.dropout,
+                         device=device,
+                         dtype=dtype,
+                         n_outputs=self.hidden_dim,
+                         final_activation=self.final_layer_activation, # TODO ??
+                         final_activation_kwargs={}))
+        
+        layers.append(encoder)
+
+        self.layers = layers
+        self.depth = len(layers)
+
+        if args.type == "vae":    
+            self.embedding = nn.Linear(self.hidden_dim, self.latent_dim, device=device, dtype=dtype)
+            self.log_var = nn.Linear(self.hidden_dim, self.latent_dim, device=device, dtype=dtype)
+        elif args.type == "ae":
+            self.embedding = nn.Linear(self.hidden_dim, self.latent_dim, device=device, dtype=dtype)
+            self.log_var = None
+        else:
+            raise ValueError(f"Unsupported VAE type: {args.type}")
+        print("ENCODER", self)
+
+    def forward(self, x: th.Tensor, output_layer_levels: List[int] = None) -> ModelOutput:
+        if self.vae_type == "ae":
+            output = ModelOutput()
+    
+            max_depth = self.depth
+    
+            if output_layer_levels is not None:
+    
+                assert all(
+                    self.depth >= levels > 0 or levels == -1
+                    for levels in output_layer_levels
+                ), (
+                    f"Cannot output layer deeper than depth ({self.depth}). "
+                    f"Got ({output_layer_levels})."
+                )
+    
+                if -1 in output_layer_levels:
+                    max_depth = self.depth
+                else:
+                    max_depth = max(output_layer_levels)
+    
+            out = x.reshape(-1, np.prod(self.input_dim))
+    
+            for i in range(max_depth):
+                out = self.layers[i](out)
+    
+                if output_layer_levels is not None:
+                    if i + 1 in output_layer_levels:
+                        output[f"embedding_layer_{i+1}"] = out
+                if i + 1 == self.depth:
+                    output["embedding"] = self.embedding(out)
+                    #output["log_covariance"] = self.log_var(out)
+            return output
+        elif self.vae_type == "vae":
+            return super().forward(x)
+
+class CustomDecoder(Decoder_AE_MLP):
+    def __init__(self, args: CustomVAEConfig, device, dtype):
+        BaseDecoder.__init__(self)
+        
+        self.input_dim = args.input_dim
+        self.latent_dim = args.latent_dim
+        self.hidden_dim = args.hidden_dim
+        self.n_hidden_layers = args.n_hidden_layers
+        self.layer_activation = args.layer_activation
+        
+        layers = nn.ModuleList()
+
+        decoder = nn.Sequential(*construct_layers(input_dim=self.latent_dim,
+                         hidden_sizes=[self.hidden_dim] * self.n_hidden_layers,
+                         intermediate_activation=self.layer_activation,
+                         dropout=args.dropout,
+                         device=device,
+                         dtype=dtype,
+                         n_outputs=np.prod(self.input_dim),
+                         final_activation="none", # TODO ??
+                         final_activation_kwargs={}))
+        layers.append(decoder)
+        """layers.append(nn.Sequential(nn.Linear(args.latent_dim, args.hidden_dim, device=device, dtype=dtype), nn.ReLU()))
+        for _ in range(args.n_hidden_layers - 1):
+                    layers.append(nn.Sequential(nn.Linear(self.hidden_dim_size, self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
+              """  
+        """layers.append(
+            nn.Sequential(nn.Linear(args.hidden_dim, int(np.prod(args.input_dim)), device=device, dtype=dtype), nn.Sigmoid())
+        )"""
+
+        self.layers = layers
+        self.depth = len(layers)
+        print("DECODER", self)
+
+
+class CustomVAE(VAE):
+    def extra_parameters1(self) -> List[nn.Parameter]:
+        return [self._latent_centroids]
+    def extra_parameters2(self) -> List[nn.Parameter]:
+        return None
+    def context_parameters(self) -> List[nn.Parameter]:
+        return list(self.encoder.parameters()) + list(self.decoder.parameters())
+
+    # THIS IS INSPIRED BY: https://arxiv.org/pdf/1806.10069
+    def plot_embedding_space(self, sample_data: th.Tensor, sample_labels: th.Tensor=None, original_space_centroids: th.Tensor=None, save_path: str = None, output: ModelOutput = None, sampling_reps = 5):
+        
+        with th.no_grad(): 
+            encoder_output = self.encoder(sample_data)
+            if original_space_centroids is not None:
+                # Project original space centroids to latent space
+                original_space_centroids = original_space_centroids.to(sample_data.device, sample_data.dtype)
+                latent_original_centroids = self.encoder(original_space_centroids).embedding
+                
+            std_m=None
+            if self.model_config.type == "vae":
+                mu, log_var = encoder_output.embedding, encoder_output.log_covariance
+                    
+                std = th.exp(0.5 * log_var)
+                std_m = th.mean(std).item()
+
+                z_all = []
+                for r in range(sampling_reps):
+                    z, eps = self._sample_gauss(mu, std)
+                    z = z.cpu().numpy()
+                    z_all.append(z)
+                z = np.concatenate(z_all, axis=0)
+            else:
+                z = encoder_output.embedding.cpu().numpy()
+            # Fit a tsne model to the latent space and the centroids
+            
+            umap = UMAP(n_components=2, random_state=42)
+            z_with_centroids = np.concatenate([z, self.latent_centroids.detach().cpu().numpy()], axis=0)
+            if self.latent_dim > 2:
+                z_umap_with_centroids = umap.fit_transform(z_with_centroids)
+            else:
+                z_umap_with_centroids = z_with_centroids
+            z_umap = z_umap_with_centroids[:-self.num_contexts]
+            z_umap_centroids = z_umap_with_centroids[-self.num_contexts:]
+            if sample_labels is None:
+                #labels set to be the centroid closest to each point in the latent space
+                closest_centroids, _ = pairwise_distances_argmin_min(z, self.latent_centroids.detach().cpu().numpy())
+                sample_labels = closest_centroids 
+            if original_space_centroids is not None:
+                # Project original space centroids to latent space and then to UMAP space
+                latent_original_centroids = self.encoder(original_space_centroids).embedding
+                if self.latent_dim > 2:
+                    umap_original_centroids = umap.transform(latent_original_centroids)
+                else:
+                    umap_original_centroids = latent_original_centroids.detach().cpu().numpy()
+            plt.figure(figsize=(8, 6))
+            if sample_labels.shape[0] != z_umap.shape[0]:
+                sample_labels_expanded = np.zeros((len(sample_labels) * sampling_reps,))
+                assert len(sample_labels_expanded) == z_umap.shape[0], f"sample_labels_expanded shape {len(sample_labels_expanded)} does not match z_umap shape {z_umap.shape[0]}"
+
+                for i in range(sample_labels.shape[0]):
+                    sample_labels_expanded[i*sampling_reps:(i+1)*sampling_reps] = sample_labels[i]
+                    
+                sample_labels = sample_labels_expanded
+            plt.scatter(z_umap[:, 0], z_umap[:, 1], c=sample_labels, cmap='viridis', s=5, alpha=0.8)
+            # plot centroids the same color as the closest points in the latent space:
+            plt.scatter(z_umap_centroids[:, 0], z_umap_centroids[:, 1], c='red', marker='X', s=100, label='Centroids')
+            if original_space_centroids is not None:
+                plt.scatter(umap_original_centroids[:, 0], umap_original_centroids[:, 1], c='blue', marker='o', s=100, label='Original Centroids')
+            #plt.scatter(z_umap_centroids[:, 0], z_umap_centroids[:, 1], c='red', marker='X', s=100, label='Centroids')
+            if output is None:
+                plt.title('Latent Space UMAP Projection')
+                plt.xlabel('UMAP 1')
+                plt.ylabel('UMAP 2')
+            else:
+                plt.title(f"Loss: {output.loss.item():.4f}, SDMEAN {std_m if self.model_config.type != "ae" else "None"}\n KL: {output.reg_loss.item():.4f} Recon: {output.recon_loss.item():.4f} loss_vae_pure {output.loss_vae_pure.item():.4f} loss_clustering {output.loss_clustering:.4f}")
+                plt.xlabel('UMAP 1')
+                plt.ylabel('UMAP 2')
+            plt.legend()
+            if save_path is not None:
+                plt.savefig(save_path + ".png", dpi=50)
+            plt.show() 
+
+    def init_centroids(self, device, dtype) -> th.Tensor:
+        return nn.Parameter(
+            (th.rand(
+                (self.num_contexts, self.latent_dim),
+                device=device,
+                dtype=dtype
+            )*2-1.0), requires_grad=True
+        )
+
+    @property
+    def latent_centroids(self) -> th.Tensor:
+        return self._latent_centroids
+
+    def parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        if not self._pretrain_mode:
+            return super().parameters(recurse=recurse)
+        else:
+            return self.context_parameters()
+        
+    def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: BaseDecoder, 
+                num_contexts: int, device, dtype, **kwargs):
+        super().__init__(vae_config, encoder, decoder)
+        self.train()
+        self.num_contexts = num_contexts
+        self._temperature = self.model_config.initial_temperature
+        self._latent_centroids = self.init_centroids(device, dtype)
+        self.set_pretrain_mode(False)
+    
+    def loss_function_unreduced(self, recon_x: th.Tensor, x: th.Tensor, mu: th.Tensor, log_var: th.Tensor=None, z: th.Tensor=None) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    
+            if self.model_config.reconstruction_loss == "mse":
+                recon_loss = (
+                    0.5
+                    * nn.functional.mse_loss(
+                        recon_x.reshape(x.shape[0], -1),
+                        x.reshape(x.shape[0], -1),
+                        reduction="none",
+                    ).sum(dim=-1)
+                )
+    
+            elif self.model_config.reconstruction_loss == "bce":
+    
+                recon_loss = nn.functional.binary_cross_entropy(
+                    recon_x.reshape(x.shape[0], -1),
+                    x.reshape(x.shape[0], -1),
+                    reduction="none",
+                ).sum(dim=-1)
+            if self.model_config.type == "vae":
+                KLD = -0.5 * th.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=-1)
+            else:
+                KLD = th.zeros_like(recon_loss)
+            return (recon_loss + KLD).mean(dim=0), recon_loss.mean(dim=0), KLD.mean(dim=0), recon_loss + KLD 
+
+    def loss_function(self, recon_x: th.Tensor, x: th.Tensor, mu: th.Tensor, log_var: th.Tensor=None, z: th.Tensor=None) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+        ret = self.loss_function_unreduced(recon_x, x, mu, log_var, z)
+        return ret[0], ret[1], ret[2]
+    
+    def similarity(self, x: th.Tensor,y: th.Tensor, dim:int=1) -> th.Tensor:
+            if self.model_config.similarity=="cosine":
+                return th.cosine_similarity(x, y, dim=dim, eps=1e-2)
+            elif self.model_config.similarity=="euclidean":
+                return -th.sum((x-y)**2, dim=dim)#/(th.norm(x, dim=dim) + th.norm(y, dim=dim) + 1e-8)
+                
+    def update_temperature(self) -> None:
+            if self.training:
+                self._temperature = max(0.99*self._temperature, 0.001)
+            else:
+                raise ValueError("Temperature can only be set when gradients are enabled.")
+            return self.temperature
+    
+    @property
+    def temperature(self) -> float:
+        return self._temperature
+
+    def forward(self, hidden_state: th.Tensor|dict, loss_clustering= None, epoch=None, **kwargs):
+           
+            if isinstance(hidden_state, dict):
+                to_basic = hidden_state
+                hidden_state = hidden_state["data"]
+            else:
+                to_basic = {"data": hidden_state}
+            model_output = self.forward_basic(to_basic)
+            z = model_output["z"]
+            mu = model_output["mu"]
+            log_var = model_output["log_var"]
+                    #prob_z = gaussian_prob(z, mu, log_var).detach()
+                    #assert prob_z.shape==(z.shape[0],)
+    
+            assert z.shape[1] == self.latent_centroids.shape[1]
+                                    
+            ucentroids = self.latent_centroids.unsqueeze(0)
+            zrepresentation = z.unsqueeze(1)
+                    
+            #context_logit_detached_repr = self.similarity(zrepresentation.detach(), ucentroids, dim=2)
+            context_logit = self.similarity(zrepresentation, ucentroids, dim=2)
+    
+            #print("Z: ", z[0:5])
+            #print("LATENT CENTROIDS: ", self.latent_centroids[0:5])
+            #print(self.similarity(z[0], self.latent_centroids[0], dim=0), context_logit[0][0])
+            #print(self.similarity(z[0], self.latent_centroids[1], dim=0), context_logit[0][1])
+            #print("CONTEXT LOGIT", context_logit[0:5], context_logit[0][0])
+            #print("Similarity check", self.similarity(z[0], self.latent_centroids[0], dim=0), context_logit[0][0])
+            assert th.allclose(context_logit[1][4], self.similarity(z[1], self.latent_centroids[4], dim=0))
+            assert context_logit.shape == (hidden_state.shape[0], self.num_contexts)
+                    #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
+                    #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
+                    #HARD: context_logprobs = per_component_logprob + component_logprobs
+                    
+            #context_logprobs_detached_repr = self.sim_to_logprob(context_logit_detached_repr)
+            context_logit_with_detached_centroids = self.similarity(zrepresentation,  ucentroids.detach(), dim=2)
+            context_logprobs_detached_centroid = self.sim_to_logprob(context_logit_with_detached_centroids)            
+            context_logprobs = self.sim_to_logprob(context_logit_with_detached_centroids)
+            
+                    # TODO: ?? self.update_temperature()
+            assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+                    
+                    #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
+                    #print("IT GOES:", context_logprobs)
+                    #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
+                    
+            with th.no_grad():
+                ctx_assignments = random_argmax(context_logprobs, dim=1)
+                    
+            if loss_clustering is None:
+                loss_clustering, repeat_inference = self.clustering_algorithm_loss_or_update(model_output, ctx_assignments, context_logprobs)
+                if repeat_inference:
+                    return self.forward(hidden_state, loss_clustering=loss_clustering)
+
+
+            loss_pure_unreduced = model_output.pop("loss_unreduced")
+            loss_unreduced = loss_pure_unreduced + self.model_config.lambda_clustering * loss_clustering
+            loss_clustering = th.mean(loss_clustering) if isinstance(loss_clustering, th.Tensor) else float(loss_clustering)
+            loss_vae_pure = model_output.pop("loss")
+            if __debug__:
+                 assert th.allclose(th.mean(loss_pure_unreduced), loss_vae_pure, atol=1e-4, rtol=1e-3), f"Loss mismatch: loss_pure_unreduced {loss_pure_unreduced}, loss_vae_pure {loss_vae_pure}"
+                        
+            loss_vae = loss_vae_pure + self.model_config.lambda_clustering * loss_clustering
+            if self._pretrain_mode:
+                assert self.model_config.lambda_clustering == 0.0, "During pretraining, lambda_clustering should be set to 0.0"
+            
+            return ModelOutput(loss_clustering=loss_clustering, 
+                               loss_unreduced=loss_unreduced,
+                               loss=loss_vae,
+                               loss_vae_pure=loss_vae_pure,
+                               context_logprobs=context_logprobs,
+                               context_logprobs_detached_centroid=context_logprobs_detached_centroid,
+                               ctx_assignments=ctx_assignments,
+                               **model_output)
+
+    def sim_to_logprob(self, logit_sim: th.Tensor, direct_prob=False) -> th.Tensor:
+        if self.model_config.similarity == "euclidean":
+            assert th.all(logit_sim <= 0), "Euclidean similarity should be non-positive"
+
+            logit_distance = -logit_sim
+            if logit_sim.shape == (logit_distance.shape[0], self.num_contexts):
+                min_log = logit_distance.min(dim=1).values.unsqueeze(1)
+                assert min_log.shape == (logit_distance.shape[0], 1)
+                assert logit_distance.shape == (logit_distance.shape[0], self.num_contexts)
+                assert all([logit_distance[0,i] >= min_log[0] for i in range(self.num_contexts)])
+                
+            else:
+                assert logit_distance.shape == (self.num_contexts,)
+                min_log = logit_distance.min().values
+                assert min_log.shape == ()
+                assert logit_sim.shape == (self.num_contexts,)
+
+            if direct_prob:
+                return th.softmax(-(logit_distance-min_log)/self.temperature, dim=1)
+            else:
+                return th.log_softmax(-(logit_distance-min_log)/self.temperature, dim=1)
+        elif self.model_config.similarity == "cosine":
+            if direct_prob:
+                return th.softmax(logit_sim/self.temperature, dim=1)
+            else:
+                return th.log_softmax(logit_sim/self.temperature, dim=1)
+    
+    def clustering_algorithm_loss_or_update(self, model_output: ModelOutput, ctx_assignments, context_logprobs):
+        ucentroids, mu_representation = self.latent_centroids.unsqueeze(0), model_output["mu"].unsqueeze(1)
+        
+        context_logit_of_mu = self.similarity(mu_representation.detach(), ucentroids, dim=2) # THIS IS DISTANCE
+        # minimum distance of each sample to any centroid
+        context_distance_of_mu = -context_logit_of_mu
+        context_probs_of_mu = self.sim_to_logprob(context_logit_of_mu, direct_prob=True)
+
+        if __debug__:
+            with th.no_grad():
+                min_distance = (-context_logit_of_mu).min(dim=1).values
+                assert min_distance.shape == (model_output["mu"].shape[0],)
+                assert context_logit_of_mu.shape == (model_output["mu"].shape[0], self.num_contexts)
+                context_probs_of_mu_test = th.softmax(-((-context_logit_of_mu)-min_distance.unsqueeze(1))/self.temperature, dim=1) # THIS SHOULD BE "CLOSENES"
+                assert th.allclose(context_probs_of_mu, context_probs_of_mu_test, atol=1e-4, rtol=1e-3), f"Context probs of mu do not match expected softmax values. Got {context_probs_of_mu}, expected {th.log(context_probs_of_mu_test)}"
+        
+        #print("CONTEXT LOGIT OF MU", context_logit_of_mu[0:5])
+        #print("CONTEXT LOGPROBS OF MU", context_logprobs_of_mu[0:5])
+        
+        loss_clustering_unreduced = (th.sum(context_distance_of_mu*(context_probs_of_mu), dim=-1))
+        assert loss_clustering_unreduced.shape == (model_output["mu"].shape[0],)
+        return loss_clustering_unreduced, False
+
+    def set_pretrain_mode(self, pretrain: bool):
+        self._pretrain_mode = pretrain
+        if pretrain:
+            self._orig_lambda = self.model_config.lambda_clustering
+            self.model_config.lambda_clustering = 0.0
+            self.latent_centroids.requires_grad_(False)
+        else:
+            if hasattr(self, "_orig_lambda") and self._orig_lambda is not None:
+                self.model_config.lambda_clustering = self._orig_lambda
+            
+            self.latent_centroids.requires_grad_(True)
+
+    def initialize_from_data(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor,  eval_data: th.Tensor, eval_assignments: th.Tensor, eval_ground_truth: th.Tensor=None, args: TrainingArguments=None, config: MORMForClassificationConfig=None, **kwargs):
+        # This code pretrains the VAE/AE model on the data and initializes the latent centroids with Kmeans
+        self.requires_grad_(True)
+        
+        self.set_pretrain_mode(True)
+        
+        w = th.is_grad_enabled()
+        assert w
+        train_config = BaseTrainerConfig(
+            output_dir='my_model',
+            learning_rate=config.lr_context,
+            per_device_train_batch_size=args.per_device_train_batch_size,
+            per_device_eval_batch_size=args.per_device_train_batch_size,
+            num_epochs=max(int(0.01*args.num_train_epochs), 1), # Change this to train the model a bit more
+            optimizer_cls="AdamW",
+            optimizer_params={"weight_decay": args.weight_decay}
+        )
+        
+        pipeline = TrainingPipeline(
+            training_config=train_config,
+            model=self
+        )
+        with th.enable_grad():
+            probe_output = self({"data": data[:10]})
+        assert probe_output.loss.requires_grad, "VAE initialization loss is detached from trainable parameters"
+        dataset = BaseDataset(data, data)
+        eval_dataset = BaseDataset(eval_data, eval_data)
+        
+        if eval_ground_truth is not None:
+                        eval_ground_truth_centroids = th.stack([
+                            eval_data[eval_ground_truth == i].mean(dim=0) if th.any(eval_ground_truth == i) else th.mean(eval_data, dim=0)
+                            for i in range(self.num_contexts)
+                        ])
+        eval_centroids = th.stack([
+            eval_data[eval_assignments == i].mean(dim=0) if th.any(eval_ground_truth == i) else th.mean(eval_data, dim=0)
+                        
+                        for i in range(self.num_contexts)
+                    ])
+        for r in range(self.model_config.pretrain_epochs):
+            print(f"Pretraining VAE/AE model, epoch {r+1}/{self.model_config.pretrain_epochs}...")
+            # at each 10% of the pretraining epochs, plot the embedding space and the centroids
+            if r % max(1, self.model_config.pretrain_epochs // 10) == 0:
+                self.eval()
+                output = self.forward(eval_data)
+                self.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}", output=output)
+                # Compute the eval centroids as the mean of the hidden states for each context assignment
+                
+                
+                assert th.allclose(eval_centroids[0], eval_data[eval_assignments==0].mean(dim=0))
+                self.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}_shouldbe", output=output, sample_labels=eval_assignments, original_space_centroids=eval_centroids)
+
+                if eval_ground_truth is not None:
+                    #eval_ground_truth_centroids = eval_data[eval_ground_truth].reshape(self.num_contexts, -1, *eval_data.shape[1:]).mean(dim=1)
+                    self.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}_shouldbe_groundtruth", output=output, sample_labels=eval_ground_truth, original_space_centroids=eval_ground_truth_centroids)
+
+            self.train()
+            
+            pipeline(
+                train_data = dataset,
+                eval_data = eval_dataset
+            )
+
+            #print("C After", self.latent_centroids[0])
+            
+            encoded_data = self.encoder(data).embedding.detach()
+            self.latent_centroids.copy_(th.tensor(
+                kmeans_clustering(encoded_data.cpu().numpy(), self.num_contexts).cluster_centers_, 
+                device=self.latent_centroids.device, dtype=self.latent_centroids.dtype))
+                 
+        print("Running k-means on the learned embeddings...")
+        encoded_data = self.encoder(data).embedding.detach()
+        kmeans_model = kmeans_clustering(encoded_data.cpu().numpy(),
+            K=self.num_contexts,
+        )
+
+        with th.no_grad():
+            encoded_centroids = kmeans_model.cluster_centers_
+            self.latent_centroids.copy_(th.tensor(encoded_centroids, device=self.latent_centroids.device, dtype=self.latent_centroids.dtype))
+        self.latent_centroids.requires_grad_(not isinstance(self, CustomVAENoLoss))
+        
+        self.plot_embedding_space(
+            sample_data=eval_data,
+            sample_labels=eval_ground_truth if eval_ground_truth is not None else eval_assignments,
+            original_space_centroids=eval_ground_truth_centroids if eval_ground_truth is not None else eval_centroids,
+            #original_space_centroids=th.as_tensor(kmeans_model.cluster_centers_, device=device, dtype=th.float32),
+            save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}_shouldbe_final",
+        )
+        
+        self.plot_embedding_space(
+            sample_data=eval_data,
+            sample_labels=None,
+            original_space_centroids=eval_ground_truth_centroids,
+            #original_space_centroids=th.as_tensor(kmeans_model.cluster_centers_, device=device, dtype=th.float32),
+            save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}_shouldbe_final",
+        )
+        
+        self.set_pretrain_mode(False)
+        #self._temperature = 0.1 smaller is risky
+    def forward_basic(self, inputs: BaseDataset, **kwargs):
+            """
+            The VAE model
+    
+            Args:
+                inputs (BaseDataset): The training dataset with labels
+    
+            Returns:
+                ModelOutput: An instance of ModelOutput containing all the relevant parameters
+    
+            """
+    
+            x = inputs["data"]
+    
+            encoder_output = self.encoder(x)
+            if self.model_config.type == "vae":
+                mu, log_var = encoder_output.embedding, encoder_output.log_covariance
+                std = th.exp(0.5 * log_var)
+            else:
+                mu, log_var = encoder_output.embedding, None
+            
+            loss_total = 0.0
+            recon_loss_total = 0.0
+            kld_total = 0.0
+            loss_unreduced_total = 0.0
+            assert isinstance(self.model_config, CustomVAEConfig) #and self.model_config.resampling_iterations > 0, "resampling_iterations must be a positive integer"
+            for _ in range(self.model_config.resampling_iterations):
+                if self.model_config.type == "vae":
+                    z, eps = self._sample_gauss(mu, std)
+                else:
+                    z = mu
+                #z = mu
+                recon_x = self.decoder(z)["reconstruction"]
+        
+                loss, recon_loss, kld, loss_unreduced = self.loss_function_unreduced(recon_x, x, mu, log_var, z)
+                loss_total = loss + loss_total
+                recon_loss_total = recon_loss + recon_loss_total
+                kld_total = kld + kld_total
+                loss_unreduced_total = loss_unreduced + loss_unreduced_total
+            loss = loss_total / self.model_config.resampling_iterations
+            recon_loss = recon_loss_total / self.model_config.resampling_iterations
+            kld = kld_total / self.model_config.resampling_iterations
+            loss_unreduced = loss_unreduced_total / self.model_config.resampling_iterations
+
+            output = ModelOutput(
+                loss_unreduced=loss_unreduced,
+                recon_loss=recon_loss,
+                mu=mu,
+                log_var=log_var,
+                reg_loss=kld,
+                loss=loss,
+                recon_x=recon_x,
+                z=z,
+            )
+    
+            return output
+
+class CustomVAENoLoss(CustomVAE):
+    update_factor = 0.90
+
+    def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: BaseDecoder, num_contexts: int, device, dtype, **kwargs):
+        super().__init__(vae_config, encoder, decoder, num_contexts, device, dtype, **kwargs)
+        
+    def clustering_algorithm_loss_or_update(self, model_output: ModelOutput, ctx_assignments, context_logprobs):
+        # Sample cluster label according to multinomial of context_logprobs (no grad) DONT USE RANDOM ARGMAX:
+        
+        
+        with th.no_grad():
+            total_distance = 0.0
+            rand_ctx_assignments = th.multinomial(context_logprobs.exp(), num_samples=1).squeeze(1)
+            
+            z = model_output["z"]
+            # Update the centroids so they move towards the mean of the assigned latent representations z:
+            for c in range(self.num_contexts):
+                assigned_z = z[rand_ctx_assignments == c]
+                if len(assigned_z) > 0:
+                    new_centroid = assigned_z.mean(dim=0)
+                    distance = th.norm(new_centroid - self.latent_centroids[c])
+                    total_distance += distance
+                    if self.training:
+                        self.latent_centroids.data[c] = (new_centroid*(1.0-self.update_factor) + self.latent_centroids.data[c]*self.update_factor).detach().clone()
+        loss_clustering = th.norm(self.latent_centroids @ self.latent_centroids.T - th.eye(self.num_contexts, device=self.latent_centroids.device, dtype=self.latent_centroids.dtype))
+        return loss_clustering, self.training
+
+
+class VaDEDecoder(Decoder_AE_MLP):
+    def __init__(self, args: CustomVAEConfig, device, dtype, dec_act="none"):
+        super().__init__(args)
+        self.input_dim = args.input_dim
+        self.latent_dim = args.latent_dim
+        self.hidden_dim = args.hidden_dim
+        self.n_hidden_layers = args.n_hidden_layers
+        self.layer_activation = args.layer_activation
+        
+        self._decoder = nn.Sequential(*construct_layers(input_dim=self.latent_dim,
+                            hidden_sizes=[self.hidden_dim] * (self.n_hidden_layers-1),
+                            intermediate_activation=self.layer_activation,
+                            dropout=args.dropout,
+                            device=device,
+                            dtype=dtype,
+                            n_outputs=self.hidden_dim,
+                            final_activation="none", # TODO ??
+                            final_activation_kwargs={}))
+        
+        """layers.append(nn.Sequential(nn.Linear(args.latent_dim, args.hidden_dim, device=device, dtype=dtype), nn.ReLU()))
+        for _ in range(args.n_hidden_layers - 1):
+                    layers.append(nn.Sequential(nn.Linear(self.hidden_dim_size, self.hidden_dim_size, device=device, dtype=dtype), nn.ReLU()))
+                """  
+        """layers.append(
+            nn.Sequential(nn.Linear(args.hidden_dim, int(np.prod(args.input_dim)), device=device, dtype=dtype), nn.Sigmoid())
+        )"""
+
+        self.depth = 1
+        input_dim_flat = np.prod(self.input_dim)
+        
+        self._dec_mu = nn.Linear(args.hidden_dim, input_dim_flat, device=device, dtype=dtype)
+        self._dec_log_sigma = nn.Linear(args.hidden_dim, input_dim_flat, device=device, dtype=dtype)
+        self._dec_act = VALUE_LAYER_ACTIVATIONS[dec_act] if dec_act is not None else None
+        print("DECODER", self)
+    
+    def forward(self, z: th.Tensor) -> dict:
+        
+        h = self._decoder(z)
+        x_mu = self._dec_mu(h)
+        x_logvar = self._dec_log_sigma(h)
+        if self._dec_act is not None:
+            x_mu = self._dec_act(x_mu)
+
+        return ModelOutput(x_mu=x_mu,x_logvar=x_logvar, reconstruction=x_mu)
+
+
+from torch.autograd import Variable
+from sklearn.mixture import GaussianMixture
+from sklearn.cluster import KMeans
+
+import vsllib.vade_metrics as metrics
+
+pi2 = 2 * math.pi
+logpi2 = math.log(pi2)
+
+class CustomVaDE(CustomVAE):
+
+    @property
+    def latent_centroids(self) -> th.Tensor:
+        return self.u_p.T
+
+    def init_centroids(self, device, dtype) -> th.Tensor:
+        self.create_gmmparam(self.num_contexts, self.latent_dim, device, dtype)
+        return None
+
+    def extra_parameters1(self) -> List[nn.Parameter]:
+        return None
+    def extra_parameters2(self) -> List[nn.Parameter]:
+        return None
+    def context_parameters(self) -> List[nn.Parameter]:
+        return self.parameters()
+    
+    def __init__(self, vae_config: CustomVAEConfig, encoder: BaseEncoder, decoder: VaDEDecoder, num_contexts: int, device, dtype, **kwargs):
+        vae_config.type = "vae"
+        super().__init__(vae_config, encoder, decoder, num_contexts, device, dtype, **kwargs)
+        #self.create_gmmparam(self.num_contexts, self.latent_dim)
+        
+    def create_gmmparam(self, n_centroids: int, z_dim: int, device, dtype)-> None:
+        self.theta_p = th.nn.Parameter(th.ones(n_centroids, device=device, dtype=dtype)/n_centroids, requires_grad=True) # mixture weights
+        self.u_p = th.nn.Parameter(th.zeros(z_dim, n_centroids, device=device, dtype=dtype), requires_grad=True) #mean
+        self.lambda_p = th.nn.Parameter(th.ones(z_dim, n_centroids, device=device, dtype=dtype),  requires_grad=True) #variance
+
+    def reparameterize(self, mu: th.Tensor, logvar: th.Tensor) -> th.Tensor:
+        if self.training:
+            eps = th.randn_like(mu)
+            return mu + eps * (0.5 * logvar).exp()
+
+        return mu
+    def clustering_algorithm_loss_or_update(self, model_output: ModelOutput, ctx_assignments, context_logprobs):
+            return 0.0, False
+    
+    def initialize_gmm(self, dataloader) -> None:
+            use_cuda = th.cuda.is_available()
+            if use_cuda:
+                self.cuda()
+    
+            self.eval()
+            data = []
+            for batch_idx, data_dict in enumerate(dataloader):
+                inputs = data_dict["data"]
+                labels = data_dict.get("labels", None)
+                inputs = inputs.view(inputs.size(0), -1).float()
+                if use_cuda:
+                    inputs = inputs.cuda()
+                inputs = Variable(inputs)
+                output = self.forward(inputs)
+                z = output.z
+                data.append(z.data.cpu().numpy())
+            data = np.concatenate(data)
+            gmm = GaussianMixture(n_components=self.num_contexts,covariance_type='diag')
+            gmm.fit(data)
+            self.u_p.data.copy_(th.from_numpy(gmm.means_.T.astype(np.float32)))  # why transpose?
+            self.lambda_p.data.copy_(th.from_numpy(gmm.covariances_.T.astype(np.float32)))
+
+    def gmm_kmeans_cluster(self, dataloader) -> None:
+            use_cuda = th.cuda.is_available()
+            if use_cuda:
+                self.cuda()
+    
+            self.eval()
+            data = []
+            Y = []
+            for batch_idx, data_dict in enumerate(dataloader):
+                inputs = data_dict["data"]
+                y = data_dict.get("labels", None)
+                inputs = inputs.view(inputs.size(0), -1).float()
+                if use_cuda:
+                    inputs = inputs.cuda()
+                inputs = Variable(inputs)
+                output = self.forward(inputs)
+                mu = output.mu
+                data.append(mu.data.cpu().numpy())
+                Y.append(y.numpy())
+            data = np.concatenate(data)
+            Y = np.concatenate(Y)
+            gmm = GaussianMixture(n_components=self.num_contexts, covariance_type='full')
+            gmm.fit(data)
+            y_pred_gmm = gmm.predict(data)
+            acc = np.round(metrics.acc(Y, y_pred_gmm), 5)
+            nmi = np.round(metrics.nmi(Y, y_pred_gmm), 5)
+            ari = np.round(metrics.ari(Y, y_pred_gmm), 5)
+            print('GMM fit of AutoEncoder embedding: acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
+    
+            km = KMeans(n_clusters=self.num_contexts, n_init=20)
+            y_pred_kmeans = km.fit_predict(data)
+            acc = np.round(metrics.acc(Y, y_pred_kmeans), 5)
+            nmi = np.round(metrics.nmi(Y, y_pred_kmeans), 5)
+            ari = np.round(metrics.ari(Y, y_pred_kmeans), 5)
+            print('Kmeans clustering of AutoEncoder embedding: acc = %.5f, nmi = %.5f, ari = %.5f' % (acc, nmi, ari))
+
+    
+    
+    def forward_original(self, x) -> ModelOutput:
+            print("FORWARD ORIGINAL")
+            print("X", x[0:5], x.shape)
+            h = self.encoder(x)
+            
+            mu, logvar = h.embedding, h.log_covariance
+            print("H", mu.grad_fn, logvar.grad_fn)
+            z = self.reparameterize(mu, logvar)
+            
+            out_dec = self.decoder(z)
+            x_mu,x_logvar = out_dec.x_mu, out_dec.x_logvar
+            recon_x = x_mu
+            return ModelOutput(z=z, recon_x=recon_x,x_logvar=x_logvar, 
+                               mu=mu, logvar=logvar)
+
+    def loss_function(self, recon_x_mu, recon_x_logvar, x, z, z_mean, z_log_var) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+            Z = z.unsqueeze(2).expand(z.size()[0], z.size()[1], self.num_contexts) # NxDxK
+            z_mean_t = z_mean.unsqueeze(2).expand(z_mean.size()[0], z_mean.size()[1], self.num_contexts)
+            z_log_var_t = z_log_var.unsqueeze(2).expand(z_log_var.size()[0], z_log_var.size()[1], self.num_contexts)
+            u_tensor3 = self.u_p.unsqueeze(0).expand(z.size()[0], self.u_p.size()[0], self.u_p.size()[1]) # NxDxK
+            lambda_tensor3 = self.lambda_p.unsqueeze(0).expand(z.size()[0], self.lambda_p.size()[0], self.lambda_p.size()[1])
+            theta_tensor2 = self.theta_p.unsqueeze(0).expand(z.size()[0], self.num_contexts) # NxK
+            
+            p_c_z = th.exp(th.log(theta_tensor2) - th.sum(0.5*th.log(pi2*lambda_tensor3)+\
+                (Z-u_tensor3)**2/(2*lambda_tensor3), dim=1)) + 1e-10 # NxK
+            gamma = p_c_z / th.sum(p_c_z, dim=1, keepdim=True) # NxK
+    
+    
+    
+            #NX1
+            if self.model_config.binary:
+                BCE = -th.sum(x*th.log(th.clamp(recon_x_mu, min=1e-10))+(1-x)*th.log(th.clamp(1-recon_x_mu, min=1e-10)), 1)
+            else:
+                BCE = th.sum(0.5*logpi2+0.5*recon_x_logvar+0.5*(x-recon_x_mu)**2/th.exp(recon_x_logvar),1)
+            logpzc = th.sum(0.5*gamma*th.sum(logpi2+th.log(lambda_tensor3)+
+                th.exp(z_log_var_t)/lambda_tensor3 + (z_mean_t-u_tensor3)**2/lambda_tensor3, dim=1), dim=1)
+            qentropy = -0.5*th.sum(1+z_log_var+logpi2, 1)
+            logpc = -th.sum(th.log(theta_tensor2)*gamma, 1)
+            logqcx = th.sum(th.log(gamma)*gamma, 1)
+    
+            # Normalise by same number of elements as in reconstruction
+            kld_maybe = logpzc + qentropy + logpc + logqcx
+            loss_unreduced = BCE + kld_maybe
+            loss = th.mean(loss_unreduced)
+    
+            return loss, BCE.mean(), kld_maybe.mean(), loss_unreduced
+    
+    def forward_basic(self, inputs: BaseDataset, **kwargs):
+                """
+                The VAE model
+        
+                Args:
+                    inputs (BaseDataset): The training dataset with labels
+        
+                Returns:
+                    ModelOutput: An instance of ModelOutput containing all the relevant parameters
+        
+                """
+        
+                x = inputs["data"]
+                print("FORWARD BASIC")
+                out_original = self.forward_original(x)
+                recon_x_mu, recon_x_logvar = out_original.recon_x, out_original.x_logvar
+                z, mu, log_var = out_original.z, out_original.mu, out_original.logvar
+
+                assert isinstance(self.model_config, CustomVAEConfig) #and self.model_config.resampling_iterations > 0, "resampling_iterations must be a positive integer"
+                
+        
+                loss, recon_loss, kld, loss_unreduced = self.loss_function(recon_x_mu=recon_x_mu, 
+                                                                           recon_x_logvar=recon_x_logvar, 
+                                                                           x=x, z=z, z_mean=mu, z_log_var=log_var)
+                    
+                output = ModelOutput(
+                    loss_unreduced=loss_unreduced,
+                    recon_loss=recon_loss,
+                    mu=mu,
+                    log_var=log_var,
+                    reg_loss=kld,
+                    loss=loss,
+                    recon_x=recon_x_mu,
+                    z=z,
+                )
+        
+                return output
+    def forward(self, hidden_state: th.Tensor|dict, loss_clustering= None, epoch=None, **kwargs):
+        
+        if isinstance(hidden_state, dict):
+            to_basic = hidden_state
+            hidden_state = hidden_state["data"]
+        else:
+            to_basic = {"data": hidden_state}
+        model_output = self.forward_basic(to_basic)
+        z = model_output["z"]
+        mu = model_output["mu"]
+        log_var = model_output["log_var"]
+                #prob_z = gaussian_prob(z, mu, log_var).detach()
+                #assert prob_z.shape==(z.shape[0],)
+
+                
+        context_logit = self.predict_logits_z(z, mu, log_var)
+        context_logprobs = self.sim_to_logprob(context_logit)
+        #context_logprobs_detached_repr = self.sim_to_logprob(self.predict_logits_z(z, mu, log_var))
+        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+        
+        with th.no_grad():
+            ctx_assignments = random_argmax(context_logprobs, dim=1)
+                
+        """if loss_clustering is None:
+            loss_clustering, repeat_inference = self.clustering_algorithm_loss_or_update(model_output, ctx_assignments, context_logprobs, context_logprobs_detached_repr)
+            if repeat_inference:
+                return self.forward(hidden_state, loss_clustering=loss_clustering)"""
+    
+        loss_unreduced = model_output.pop("loss_unreduced") #+ self.model_config.lambda_clustering * loss_clustering
+        loss_vae = th.mean(loss_unreduced)
+        #loss_clustering = th.mean(loss_clustering) if isinstance(loss_clustering, th.Tensor) else float(loss_clustering)
+        return ModelOutput(loss_clustering=0.0, 
+                            loss_unreduced=loss_unreduced,
+                            loss=loss_vae,
+                            loss_vae_pure=model_output.pop("loss"),
+                            context_logprobs=context_logprobs,
+                            context_logprobs_detached_centroid=context_logprobs,
+                            ctx_assignments=ctx_assignments,
+                            **model_output)
+    
+    def predict_logits(self, x) -> th.Tensor:
+        assert x.shape[1] == np.prod(self.input_dim)
+        out_original = self.forward_original(x)
+        z, mu, log_var = out_original.z, out_original.mu, out_original.logvar
+        return self.predict_logits_z(z, mu, log_var)
+
+    def predict_logits_z(self, z, mu, log_var) -> th.Tensor:
+        return self.get_logit_gamma(z, mu, log_var)
+    
+    def predict_proba(self, x) -> th.Tensor:
+        return self.softmax(self.predict_logits(x), dim=1)
+
+    def get_gamma(self, z, z_mean, z_log_var):
+            Z = z.unsqueeze(2).expand(z.size()[0], z.size()[1], self.num_contexts) # NxDxK
+            z_mean_t = z_mean.unsqueeze(2).expand(z_mean.size()[0], z_mean.size()[1], self.num_contexts)
+            z_log_var_t = z_log_var.unsqueeze(2).expand(z_log_var.size()[0], z_log_var.size()[1], self.num_contexts)
+            u_tensor3 = self.u_p.unsqueeze(0).expand(z.size()[0], self.u_p.size()[0], self.u_p.size()[1]) # NxDxK
+            lambda_tensor3 = self.lambda_p.unsqueeze(0).expand(z.size()[0], self.lambda_p.size()[0], self.lambda_p.size()[1])
+            theta_tensor2 = self.theta_p.unsqueeze(0).expand(z.size()[0], self.num_contexts) # NxK
+    
+            p_c_z = th.exp(th.log(theta_tensor2) - th.sum(0.5*th.log(pi2*lambda_tensor3)+\
+                (Z-u_tensor3)**2/(2*lambda_tensor3), dim=1)) + 1e-10 # NxK
+            gamma = p_c_z / th.sum(p_c_z, dim=1, keepdim=True)
+    
+            return gamma
+    
+    def get_logit_gamma(self, z: th.Tensor, z_mean: th.Tensor, z_log_var: th.Tensor) -> th.Tensor:
+            Z = z.unsqueeze(2).expand(z.size()[0], z.size()[1], self.num_contexts) # NxDxK
+            #z_mean_t = z_mean.unsqueeze(2).expand(z_mean.size()[0], z_mean.size()[1], self.num_contexts)
+            #z_log_var_t = z_log_var.unsqueeze(2).expand(z_log_var.size()[0], z_log_var.size()[1], self.num_contexts)
+            u_tensor3 = self.u_p.unsqueeze(0).expand(z.size()[0], self.u_p.size()[0], self.u_p.size()[1]) # NxDxK
+            lambda_tensor3 = self.lambda_p.unsqueeze(0).expand(z.size()[0], self.lambda_p.size()[0], self.lambda_p.size()[1])
+            theta_tensor2 = self.theta_p.unsqueeze(0).expand(z.size()[0], self.num_contexts) # NxK
+    
+            log_p_c_z = th.log(theta_tensor2) - th.sum(0.5*th.log(pi2*lambda_tensor3)+\
+                (Z-u_tensor3)**2/(2*lambda_tensor3), dim=1)# NxK
+            
+            return log_p_c_z
+    

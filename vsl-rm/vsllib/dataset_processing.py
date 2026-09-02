@@ -299,7 +299,7 @@ class BasePairwisePreferenceDataset():
 
 def postprocess_sample(sample: dict, value_keys: list = None, delete_other_keys: bool = True, extra_keep_keys: list = None, use_context: bool =True) -> dict:
   
-    keep_keys = ["option1", "option2", "grounding_features_1", "grounding_features_2", "labels"]
+    keep_keys = ["option1", "option2", "grounding_features_1", "grounding_features_2", "labels", "context"]
     if extra_keep_keys:
         keep_keys.extend(extra_keep_keys)
     sample["state"] =np.asarray(sample["state"])

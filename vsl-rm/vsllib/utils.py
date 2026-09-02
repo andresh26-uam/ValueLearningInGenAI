@@ -72,6 +72,12 @@ def to_float(value: Any) -> float:
     return float(value)
 
 
+
+def to_tensor(value: Any, dtype=None, device=None) -> float:
+    if isinstance(value, th.Tensor):
+        return value
+    return th.tensor(value, dtype=dtype, device=device)
+
 def fuse_parameters(model) -> th.Tensor:
     """Move model parameters to a contiguous tensor, and return that tensor."""
     n = sum(p.numel() for p in model.parameters())
@@ -90,7 +96,7 @@ def fuse_parameters(model) -> th.Tensor:
 
 
 
-def print_tensor_and_grad_fn(grad_fn, level=0):
+def print_tensor_and_grad_fn(grad_fn, level: int =0) -> None:
     indent = "  " * level
     if grad_fn is None:
         print("NO GRAD FN")
@@ -132,7 +138,7 @@ def convert_to_tensors(data: Dict, tensor_type: str | TensorType | None = None, 
                 raise ImportError("Unable to convert output to PyTorch tensors format, PyTorch is not installed.")
             import torch
 
-            def as_tensor(value, dtype=None):
+            def as_tensor(value, dtype=None) -> th.Tensor:
                 if isinstance(value, list) and len(value) > 0 and isinstance(value[0], np.ndarray):
                     return torch.from_numpy(np.array(value))
                 if len(flatten(value)) == 0 and dtype is None:
@@ -224,7 +230,7 @@ def sample_example_profiles_scipy(profile_variety, n_values=3,
 
     rng = np.random.default_rng(seed)
 
-    def softmax(z):
+    def softmax(z: np.ndarray) -> np.ndarray:
         z = z.reshape(profile_variety, n_values)
         z = z - z.max(axis=1, keepdims=True)
         e = np.exp(z)
@@ -469,6 +475,9 @@ class ScriptArguments:
     )
 
     weight_decay: Optional[float] = field(default=0.001)
+    extra_weight_decay1: Optional[float] = field(default=0.001)
+    extra_weight_decay2: Optional[float] = field(default=0.001)
+    
     model_name: Optional[str] = field(
         # default="mistralai/Mistral-7B-Instruct-v0.2",
         # default="meta-llama/Llama-3.2-1B",
@@ -595,6 +604,10 @@ class ScriptArguments:
         default=True,
         metadata={"help": "Whether to do the training initialization step when assigning value systems to contexts. If False, we will skip this step and use the initial value system assignments."},
     )
+    do_vs_initialization: Optional[bool] = field(
+        default=True,
+        metadata={"help": "Whether to do the value system initialization step when assigning value systems to contexts. If False, we will skip this step and use the initial value system assignments."},
+    )
     context_implementation: Optional[str] = field(
         default="NO_CONTEXT",
         metadata={"help": "Choose between ContextImplementations in defines.py"}
@@ -612,6 +625,10 @@ class ScriptArguments:
         metadata={"help": "Whether to detach the value system selection from the context selection. If True, the value system selection will not be used for the context selection."},
     )
 
+    vae_pretrain_epochs: Optional[int] = field(
+        default=10,
+        metadata={"help": "The number of epochs to pretrain the VAE used for context selection. If 0, no pretraining will be done."},
+    )
     vae_latent_dim: Optional[int] = field(
         default=10,
         metadata={"help": "The latent dimension of the VAE used for context selection. If 0, no VAE will be used."},
@@ -644,11 +661,23 @@ class ScriptArguments:
         default=1.0,
         metadata={"help": "The beta parameter for the BetaVAE used for context selection."},
     )
-    initial_temperature: Optional[float] = field(
+    vae_final_encoder_layer_activation: Optional[str] = field(
+        default="none",
+        metadata={"help": "The activation function to use for the final layer of the VAE used for context selection. Use one of {list(VALUE_LAYER_ACTIVATIONS.keys())}"},
+    )
+    vae_resampling_iterations: Optional[float] = field(
+        default=0.5,
+        metadata={"help": "The logit threshold for the VAE used for context selection. If the logit is below this threshold, the context will be considered as not selected."},
+    )
+    vae_similarity: Optional[str] = field(
+        default="cosine",
+        metadata={"help": "The similarity metric to use for the VAE used for context selection. Options: cosine, euclidean, etc."},
+    )
+    vae_initial_temperature: Optional[float] = field(
         default=1.0,
         metadata={"help": "The initial temperature for the Gumbel-Softmax used for context selection."},
     )
-    lambda_clustering: Optional[float] = field(
+    vae_lambda_clustering: Optional[float] = field(
         default=1.0,
         metadata={"help": "The lambda parameter for the clustering loss used for context selection in VAE KMEANS: https://arxiv.org/pdf/1806.10069."},
     )
@@ -813,7 +842,7 @@ def kmeans_clustering(dataset_ctxs: np.ndarray, K=None, max_iter=10000)-> KMeans
 
         n_clusters = min(int(K), int(dataset_ctxs.shape[0]))
         random_state = 42
-        kmeans = KMeans(n_clusters=n_clusters, n_init="auto", random_state=random_state, max_iter=max_iter)
+        kmeans = KMeans(n_clusters=n_clusters, init="k-means++", n_init="auto", random_state=random_state, max_iter=max_iter)
         kmeans.fit(dataset_ctxs)
 
         

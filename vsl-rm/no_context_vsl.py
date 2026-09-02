@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # SBATCH --job-name=ValueLearningInGenAI
 # SBATCH --chdir=/home/aholg/ValueLearningInGenAI
+from copy import deepcopy
 from functools import partial
 import os
 from pathlib import Path
 import sys
 from pprint import pprint
 from accelerate import PartialState
-import accelerate
 from dotenv import load_dotenv
 import numpy as np
 from sentence_transformers import SentenceTransformer
@@ -33,7 +33,7 @@ for candidate in (
         sys.path.insert(0, str(candidate))
         break
 
-from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, sample_example_profiles_exact, sample_example_profiles_scipy, seed_everything
+from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, seed_everything
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
@@ -152,20 +152,25 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         
         mo_config = MORMForClassificationConfig(
             do_initialization=script_args.do_initialization,
+            do_vs_initialization=script_args.do_vs_initialization,
 
             use_sentence_transformer=script_args.use_sentence_transformer,
             sentence_transformer_name=script_args.sentence_transformer_name,
 
             vae_latent_dim=script_args.vae_latent_dim,
+            vae_pretrain_epochs=script_args.vae_pretrain_epochs,
             vae_type=script_args.vae_type,
             vae_dropout=script_args.vae_dropout,
             vae_layer_activation=script_args.vae_layer_activation,
             vae_reconstruction_loss=script_args.vae_reconstruction_loss,
             vae_n_hidden_layers=script_args.vae_n_hidden_layers,
             vae_hidden_dim=script_args.vae_hidden_dim_size,
-
-            initial_temperature=script_args.initial_temperature,
-            lambda_clustering=script_args.lambda_clustering,
+            vae_final_encoder_layer_activation=script_args.vae_final_encoder_layer_activation,
+            vae_resampling_iterations=script_args.vae_resampling_iterations,
+            vae_similarity=script_args.vae_similarity,
+            
+            vae_initial_temperature=script_args.vae_initial_temperature,
+            vae_lambda_clustering=script_args.vae_lambda_clustering,
             vae_beta=script_args.vae_beta,
         
             
@@ -244,6 +249,10 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             " Sub optimizer kwargs: ", sub_optimizer_kwargs)
         sub_optimizer_kwargs = sub_optimizer_kwargs or {}
         sub_optimizer_kwargs["weight_decay"] = training_args.weight_decay
+        sub_optimizer_kwargs_extra1 = deepcopy(sub_optimizer_kwargs)
+        sub_optimizer_kwargs_extra2 = deepcopy(sub_optimizer_kwargs)
+        sub_optimizer_kwargs_extra1["weight_decay"] = script_args.extra_weight_decay1
+        sub_optimizer_kwargs_extra2["weight_decay"] = script_args.extra_weight_decay2
 
         print("Script arguments: ")
 
@@ -255,7 +264,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
@@ -282,6 +291,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 'params_gr_ideal': list(mo_model.reward_heads_ideal.parameters()) if script_args.use_ideal_grounding_model else None,
                 'params_vs': list(mo_model.value_system_parameters()),
                 'params_ctx': list(mo_model.context_parameters()),
+                "params_extra1": list(mo_model.extra_parameters1()) if hasattr(mo_model, "extra_parameters1") and mo_model.extra_parameters1() is not None else None,
+                "params_extra2": list(mo_model.extra_parameters2()) if hasattr(mo_model, "extra_parameters2") and mo_model.extra_parameters2() is not None else None,
                 'n_values': mo_config.num_values,
                 'lr_value_system': mo_config.lr_value_system,
                 'lr_grounding': mo_config.lr_grounding,
@@ -290,6 +301,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 'loss_func_type': mo_config.loss_func_type,
                 'loss_func_type_kwargs': mo_config.loss_func_type_kwargs,
                 'sub_optimizer_class': sub_optimizer_cls,
+                'sub_optimizer_kwargs_extra1': sub_optimizer_kwargs_extra1,
+                'sub_optimizer_kwargs_extra2': sub_optimizer_kwargs_extra2,
                 'training_variables': mo_model.training_variables,
                 ** sub_optimizer_kwargs
             }),
@@ -304,7 +317,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         print("EVALUATING")
         if not script_args.use_frozen_base_model:
             ret = trainer.evaluate()
-        print("EVALUATED: ")
+        print("EVALUATED: press to continue ")
+        
         pprint(ret)
         trainer.train()
         print("TRAINING FINISHED")

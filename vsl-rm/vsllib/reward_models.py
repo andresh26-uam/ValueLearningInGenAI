@@ -1,12 +1,12 @@
 
 from abc import abstractmethod
-from calendar import c
 from copy import deepcopy
 
 
 from dataclasses import replace
 from dataclasses import fields
 
+from attr import has
 from sentence_transformers import SentenceTransformer
 import tqdm
 from typing_extensions import Self
@@ -31,10 +31,14 @@ from datasets import Dataset
 
 from sklearn.cluster import KMeans
 
+from pythae.data.datasets import BaseDataset
+from pythae.trainers import BaseTrainerConfig
+from pythae.pipelines.training import TrainingPipeline
+
 from vsllib.training_utils import MORMTrainingVariables
 from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, ContextImplementations, MOLossFunctions
-from vsllib.model_utils import ACTIVATE_TEMPERATURE_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, THRESHOLD_CTX, CustomDecoder, CustomEncoder, FastGaussianMixture, MORMForClassificationConfig, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
-from vsllib.model_utils import CustomVAE, CustomVAEConfig, gaussian_prob
+from vsllib.model_utils import ACTIVATE_TEMPERATURE_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
+from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
 from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, transform_weights_to_tuple
 
@@ -344,15 +348,25 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
         per_vs_contexts["used_vs"] = self.running_context_training_data.n_used_valuesystems
         per_vs_contexts["spread_ctx"] = self.running_context_training_data.ctx_spread_factor
         per_vs_contexts["spread_vs"] = self.running_context_training_data.vs_spread_factor
+        per_vs_contexts.update(self.get_statistics())
         return per_vs_contexts
-    
+
+    @abstractmethod
+    def get_statistics(self):
+        return {}
     @abstractmethod
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         return self.parameters()
     @abstractmethod
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return self.parameters()
-    
+
+    @abstractmethod
+    def extra_parameters1(self) -> Iterable[nn.Parameter]:
+        return None
+    @abstractmethod
+    def extra_parameters2(self) -> Iterable[nn.Parameter]:
+        return None
 
     def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -374,6 +388,9 @@ def sample_dirichlet(alpha: th.Tensor, dims: tuple = (1,)) -> th.Tensor:
     return th.distributions.Dirichlet(alpha).sample(dims)
 class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
 
+    def get_statistics(self):
+            return {}
+    
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None, args_for_ctx_probabilities: dict = {}, **kwargs):
         return nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
@@ -686,7 +703,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             self.context_to_vs_logits = None
                         
             
-    def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor, **kwargs) -> None:
+    def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: np.ndarray, eval_data: th.Tensor= None, eval_assignments: np.ndarray=None, eval_ground_truth=None, **kwargs) -> None:
         self.context_logits.initialize_from_data(centroids, data, assignments)
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, device: th.device = None, dtype: th.dtype = None, args_for_ctx_probabilities: dict = {}, **kwargs) -> nn.Module:
         return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_TEMPERATURE_GMM)
@@ -852,10 +869,11 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
                     extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs)
                 )
 
-from pythae.trainers import BaseTrainerConfig
-from pythae.pipelines.training import TrainingPipeline
-class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
+class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
+    VaeClass = CustomVAE
+    VaeDecoderClass = CustomDecoder
+    VaeEncoderClass = CustomEncoder
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, device: th.device = None, dtype: th.dtype = None, args_for_ctx_probabilities: dict = {}, **kwargs) -> nn.Module:
 
         args_for_ctx_probabilities.update({"input_dim": (input_shape,) if isinstance(input_shape, int) else input_shape,
@@ -865,33 +883,30 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         self.vae_config = CustomVAEConfig.from_dict(args_for_ctx_probabilities)
         print("VAE CONFIG", self.vae_config)
         
-        encoder = CustomEncoder(args=self.vae_config, device=device, dtype=dtype)
-        decoder = CustomDecoder(args=self.vae_config, device=device, dtype=dtype)
-        return CustomVAE(vae_config=self.vae_config, encoder=encoder, decoder=decoder)
+        encoder = self.VaeEncoderClass(args=self.vae_config, device=device, dtype=dtype)
+        decoder = self.VaeDecoderClass(args=self.vae_config, device=device, dtype=dtype)
+        
+        return self.VaeClass(vae_config=self.vae_config, encoder=encoder, decoder=decoder, device=device, dtype=dtype, 
+                         num_contexts=self.num_contexts, detach_context_selection_for_value_system_selection=self.detach_context_selection_for_value_system_selection, **kwargs)
     def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, 
                  detach_context_selection_for_value_system_selection: bool = False, 
                  detach_vs_selection_for_value_system_weight_training: bool = False, 
                  device: th.device = None, dtype: th.dtype = None, 
                  weight_initialization: str = "dirichlet", 
                  direct_context_to_vs_relation: bool = False, 
-                 args_for_ctx_probabilities: dict = {}, initial_temperature=1.0, lambda_clustering=0.1, **kwargs) -> None:
-        self._temperature = initial_temperature
-        self.lambda_clustering = lambda_clustering
+                 args_for_ctx_probabilities: dict = {},  **kwargs) -> None:
+        
+        self.direct_context_to_vs_relation = direct_context_to_vs_relation
         self.detach_context_selection_for_value_system_selection = detach_context_selection_for_value_system_selection
+        
+
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, 
                          detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, 
                          device=device, dtype=dtype, weight_initialization=weight_initialization, 
                          args_for_ctx_probabilities=args_for_ctx_probabilities)
         assert isinstance(self.context_logits, CustomVAE)
-        self.latent_centroids = nn.Parameter(
-            th.randn(
-                (num_contexts, self.context_logits.latent_dim),
-                device=device,
-                dtype=dtype
-            ), requires_grad=True
-        )
-        self.direct_context_to_vs_relation = direct_context_to_vs_relation
-        if not direct_context_to_vs_relation:
+
+        if not self.direct_context_to_vs_relation:
                     self.context_to_vs_logits = nn.Parameter(
                                     th.randn(
                                         (num_contexts,num_value_systems),
@@ -902,142 +917,87 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         else:
             assert num_contexts==num_value_systems, "Direct GMM requires num_contexts==num_value_systems"
             self.context_to_vs_logits = None
-                        
-            
-
+        
+    
+    def extra_parameters1(self) -> Iterable[nn.Parameter]:
+        return self.context_logits.extra_parameters1()
+        
+    def extra_parameters2(self) -> Iterable[nn.Parameter]:
+        return self.context_logits.extra_parameters2()
+    
+    def get_statistics(self) -> dict:
+        self.context_logits: CustomVAE
+        # calculate the distances between the latent centroids:
+        with th.no_grad():
+            reconst = self.context_logits.decoder(self.context_logits.latent_centroids)["reconstruction"]
+            centroid_distance = th.norm(self.context_logits.latent_centroids.unsqueeze(0) - self.context_logits.latent_centroids.unsqueeze(1), dim=2).mean().item()
+            orthogonality = th.norm(th.mm(self.context_logits.latent_centroids, self.context_logits.latent_centroids.T) - th.eye(self.num_contexts, device=self.context_logits.latent_centroids.device, dtype=self.context_logits.latent_centroids.dtype), dim=(0,1)).item()
+            reconstructed_distance = th.norm(reconst.unsqueeze(0) - reconst.unsqueeze(1), dim=2).mean().item()
+        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss}
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
-        return (self.vs_selection_to_logit_vsweights_matrix,)
+        if self.direct_context_to_vs_relation:
+            ret = (self.vs_selection_to_logit_vsweights_matrix,)
+        else:
+            ret = (self.vs_selection_to_logit_vsweights_matrix, self.context_to_vs_logits,)
+        print("VALUE SYSTEM PARAMS", [p.shape for p in ret])
+        return ret
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
-            return (*self.context_logits.parameters(), self.latent_centroids)
+            return (*self.context_logits.context_parameters(),)
         else:
-            return (*self.context_logits.parameters(), self.latent_centroids, self.context_to_vs_logits,)
+            return (*self.context_logits.context_parameters(), )
 
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
                 return self.value_system_from_context_train(hidden_state, context_data)
 
-    def update_temperature(self) -> None:
-        if self.training:
-            self._temperature = max(0.99*self._temperature, 0.1)
-        else:
-            raise ValueError("Temperature can only be set when gradients are enabled.")
-        return self.temperature
-
-    @property
-    def temperature(self) -> float:
-        return self._temperature
-    def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor, config: MORMForClassificationConfig, args: TrainingArguments, **kwargs) -> None:
-
-        from pythae.data.datasets import BaseDataset
-        self.context_logits.requires_grad_(True)
-        self.vs_selection_to_logit_vsweights_matrix.requires_grad_(True)
-        if not self.direct_context_to_vs_relation:
-            self.context_to_vs_logits.requires_grad_(True)
-        self.latent_centroids.requires_grad_(True)
-        
-        w = th.is_grad_enabled()
-        assert w
-        config = BaseTrainerConfig(
-            output_dir='my_model',
-            learning_rate=config.lr_context,
-            per_device_train_batch_size=args.per_device_train_batch_size,
-            per_device_eval_batch_size=args.per_device_train_batch_size,
-            num_epochs=max(int(0.05*args.num_train_epochs), 1), # Change this to train the model a bit more
-            optimizer_cls="AdamW",
-            optimizer_params={"weight_decay": args.weight_decay}
-        )
-        
-        pipeline = TrainingPipeline(
-            training_config=config,
-            model=self.context_logits
-        )
-        with th.enable_grad():
-            probe_output = self.context_logits({"data": data[:1]})
-        assert probe_output.loss.requires_grad, "VAE initialization loss is detached from trainable parameters"
-        dataset = BaseDataset(data, data)
-        eval_dataset = BaseDataset(centroids, centroids)
-        pipeline(
-            train_data = dataset,
-            eval_data = eval_dataset
-        )
-        with th.no_grad():
-            self.context_logits: CustomVAE
-            encoded_centroids = self.context_logits.encoder(centroids).embedding
-            self.latent_centroids.data.copy_(encoded_centroids)
-        self.latent_centroids.requires_grad_(True)
-
     
+    def initialize(self, centroids: th.Tensor=None, data: th.Tensor=None, assignments: th.Tensor=None, eval_assignments: th.Tensor=None, config: MORMForClassificationConfig=None, args: TrainingArguments=None, simple_init=False, eval_data: th.Tensor=None, eval_ground_truth=None, **kwargs) -> None:
+        
+        self.context_logits.initialize_from_data(
+            centroids=centroids, 
+        data=data, assignments=assignments, 
+        eval_data=eval_data,
+        eval_ground_truth=eval_ground_truth, 
+        eval_assignments=eval_assignments, 
+        config=config, 
+        args=args, **kwargs)
+        
+
     
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
-        print("HIDDEN STATE SHAPE", hidden_state.shape)
         self.context_logits: CustomVAE
         assert isinstance(self.context_logits, CustomVAE)
-        model_output = self.context_logits.forward({"data": hidden_state})
-        z = model_output["z"]
-        mu = model_output["mu"]
-        log_var = model_output["log_var"]
-        prob_z = gaussian_prob(z, mu, log_var)
-        assert prob_z.shape==(z.shape[0],)
-        """model_output = ModelOutput(
-                    recon_loss=recon_loss,
-                    reg_loss=kld,
-                    loss=loss,
-                    recon_x=recon_x,
-                    z=z,
-                )
-        """
-        assert z.shape[1] == self.latent_centroids.shape[1]
+        model_output = self.context_logits.forward(hidden_state)
+        loss_clustering = model_output["loss_clustering"]
+        context_logprobs_detached_centroid = model_output["context_logprobs_detached_centroid"]
+        context_logprobs= model_output["context_logprobs"]
+        ctx_assignments = model_output["ctx_assignments"]
+        loss_vae = model_output["loss"]
 
-        ucentroids = self.latent_centroids.unsqueeze(0)
-        urepresentation = z.unsqueeze(1)
-        if self.detach_context_selection_for_value_system_selection:
-            context_logit = th.cosine_similarity(urepresentation.detach(), ucentroids, dim=2)
-            context_logit_with_detached_centroids = th.cosine_similarity(urepresentation,  ucentroids.detach(), dim=2)
-        else:
-            context_logit = th.cosine_similarity(urepresentation, ucentroids, dim=2)
-            context_logit_with_detached_centroids = context_logit
-        
-        assert th.allclose(context_logit[1][4], th.cosine_similarity(z[1], self.latent_centroids[4], dim=0))
-        assert context_logit.shape == (hidden_state.shape[0], self.num_contexts)
-        #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
-        #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
-        #HARD: context_logprobs = per_component_logprob + component_logprobs
-        
-        context_logprobs_detached_repr = th.log_softmax(context_logit/self.temperature, dim=1)
-        if self.detach_context_selection_for_value_system_selection:
-            context_logprobs = th.log_softmax(context_logit_with_detached_centroids/self.temperature, dim=1)
-        else:
-            context_logprobs = context_logprobs_detached_repr
-        # TODO: ?? self.update_temperature()
-        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
-        assert context_logprobs_detached_repr.shape == (hidden_state.shape[0], self.num_contexts)
-        loss_clustering = self.lambda_clustering * (th.sum(context_logit*context_logprobs_detached_repr.exp(), dim=-1)*prob_z).sum() / hidden_state.shape[0]
-        #TODO: Adaptation of https://arxiv.org/pdf/1806.10069
         
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
         assert hidden_state.shape[1] == np.prod(self.context_logits.input_dim)
         
-        #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
-        #print("IT GOES:", context_logprobs)
-        #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
-        
-        ctx_assignments = random_argmax(context_logprobs, dim=1)
         #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
         #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
         #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
         #raise ValueError("...")
         #print("WHAT", context_logprobs.dtype)
-        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+        if self.detach_context_selection_for_value_system_selection:
+            context_logprobs_for_vs_selection = context_logprobs_detached_centroid
+        else:
+            context_logprobs_for_vs_selection = context_logprobs
+        assert context_logprobs_for_vs_selection.shape == (hidden_state.shape[0], self.num_contexts)
 
         if not self.direct_context_to_vs_relation:
             log_p_vs_given_context = th.log_softmax(self.context_to_vs_logits, dim=1)
             
             vs_logprobs = th.logsumexp(
-                context_logprobs.unsqueeze(-1) + log_p_vs_given_context.unsqueeze(0),
+                context_logprobs_for_vs_selection.unsqueeze(-1) + log_p_vs_given_context.unsqueeze(0),
                 dim=1,
             )
         else:
-            vs_logprobs = context_logprobs
+            vs_logprobs = context_logprobs_for_vs_selection
         print("VS LOGPROBS INPUT", vs_logprobs[0:5])
         #input()
         assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
@@ -1045,17 +1005,83 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         vs_assignments = random_argmax(vs_logprobs, dim=1)
         
         assert vs_assignments.shape == (len(hidden_state),)
-        
+
+        self._last_vae_cluster_loss = loss_clustering.mean().item() if isinstance(loss_clustering, th.Tensor) else float(loss_clustering)
+        self._last_vae_reconstruction_loss = model_output["recon_loss"].mean().item()
+        self._last_vae_kl_loss = model_output["reg_loss"].mean().item()
         return CtxData(
             context_features=hidden_state,
             vs_assignments=vs_assignments,
             ctx_assignments=ctx_assignments,
-            context_logprobs=context_logprobs,
+            context_logprobs=context_logprobs_for_vs_selection,
             vs_logprobs=vs_logprobs,
             vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
-            ctx_possibilities=self.latent_centroids,
-            extra_for_custom_loss=(model_output["loss"],model_output["recon_x"], z, self.latent_centroids, loss_clustering)
+            ctx_possibilities=self.context_logits.latent_centroids,
+            extra_for_custom_loss=(loss_vae, self.context_logits.latent_centroids)
         )
+
+    
+
+class VaeAndKMeansNoLossCtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
+
+    VaeClass = CustomVAENoLoss
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: Dict = {}, **kwargs) -> None:
+        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, device=device, dtype=dtype, weight_initialization=weight_initialization, direct_context_to_vs_relation=direct_context_to_vs_relation, args_for_ctx_probabilities=args_for_ctx_probabilities,  **kwargs)
+        
+        
+    
+class VaDECtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
+
+    VaeClass = CustomVaDE
+    VaeDecoderClass = VaDEDecoder
+    VaeEncoderClass = CustomEncoder
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: Dict = {}, **kwargs) -> None:
+        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, device=device, dtype=dtype, weight_initialization=weight_initialization, direct_context_to_vs_relation=direct_context_to_vs_relation, args_for_ctx_probabilities=args_for_ctx_probabilities,  **kwargs)
+
+
+    def initialize(self, centroids: th.Tensor = None, data: th.Tensor = None, assignments: th.Tensor = None, eval_assignments: th.Tensor = None, config: MORMForClassificationConfig = None, args: TrainingArguments = None, simple_init=False, eval_data: th.Tensor = None, eval_ground_truth=None, **kwargs) -> None:
+        
+        
+        if eval_ground_truth is not None:
+                        eval_assignments = eval_ground_truth
+
+        dataset = BaseDataset(data=data,labels=assignments) #th.utils.data.Dataset(data, )
+        self.context_logits: CustomVaDE
+        dataloader = th.utils.data.DataLoader(dataset, batch_size=args.per_device_train_batch_size, shuffle=True)
+        print("Initializing through GMM")
+        self.context_logits.initialize_gmm(dataloader)
+        self.context_logits.gmm_kmeans_cluster(dataloader)
+        self.train()
+        optimizer = th.optim.Adam(list(self.context_logits.parameters()), lr=config.lr_context)   
+        for epoch in range(1000):
+            self.context_logits.eval()
+            with th.no_grad():
+                output = self.context_logits.forward(eval_data)
+                self.context_logits.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.VaeClass.__name__}_before_epoch_{epoch}", output=output)
+                # Compute the eval centroids as the mean of the hidden states for each context assignment
+                eval_centroids = eval_data[eval_assignments].reshape(self.num_contexts, -1, *eval_data.shape[1:]).mean(dim=1)
+                self.context_logits.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.VaeClass.__name__}_before_epoch_{epoch}_shouldbe", output=output, sample_labels=eval_assignments, original_space_centroids=eval_centroids)
+            self.context_logits.train()
+            self.context_logits.requires_grad_(True)
+            for batch_idx, data in enumerate(dataloader):
+                inputs = data["data"]
+                inputs = inputs.view(inputs.size(0), -1)
+                assert self.context_logits.parameters().__next__().requires_grad, "VAE parameters are not set to require gradients"
+                optimizer.zero_grad()
+                
+                output = self.context_logits.forward_original(inputs)
+                """ModelOutput(z=z, recon_x=recon_x,x_logvar=x_logvar, 
+                                    mu=mu, logvar=logvar)
+                """
+                z, outputs, out_logvar, mu, logvar = output["z"], output["recon_x"], output["x_logvar"], output["mu"], output["logvar"]    
+                print(z.grad_fn, outputs.grad_fn, out_logvar.grad_fn, mu.grad_fn, logvar.grad_fn)
+                loss, _, _, _ = self.context_logits.loss_function(outputs, out_logvar, inputs, z, mu, logvar)
+                
+                loss.backward()
+                optimizer.step()
+        
+
+            
 
 
 LossFuncType = Callable[[th.Tensor, th.Tensor, th.Tensor, Optional[th.Tensor],
@@ -1246,7 +1272,7 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
                     context_logprobabilities = ctx.extra_for_custom_loss[1][jidx] + ctx.extra_for_custom_loss[2]
                     assert th.allclose(logs1, th.logsumexp(context_logprobabilities, dim=1))
             ctx_prediction_loss = -logs1.mean() # TODO entropy reg...
-        elif ContextImplementations(config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ]:
+        elif ContextImplementations(config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE]:
             # TODO ELBO HERE....
             #encoded = ctx.extra_for_custom_loss[0][jidx]
             #decoded = ctx.extra_for_custom_loss[1][jidx]
@@ -1256,12 +1282,13 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
             #KLD = -0.5 * th.sum(1 + log_var - mu.pow(2) - log_var.exp())
 
             loss = ctx.extra_for_custom_loss[0]
-            loss_clustering = ctx.extra_for_custom_loss[4]
-            print("VAE_LOSS??", loss.shape, loss)
-            print("VAE_LOSS?? CLUST INPUT", loss_clustering)
+            if __debug__:
+                print("VAE_LOSS??", loss.shape, loss)
+                print("CENTROIDS", ctx.extra_for_custom_loss[-1], [th.norm(c) for c in ctx.extra_for_custom_loss[-1]])
+            
             #input()
             #model_output["loss"],model_output["recon_x"], model_output["z"]
-            ctx_prediction_loss = loss + loss_clustering
+            ctx_prediction_loss = loss
     
         return ctx_prediction_loss, CtxData.from_previous(ctx, ctx_pred_loss=ctx_prediction_loss )
     else:
@@ -1313,7 +1340,7 @@ def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.T
             gr = logits[..., 0:-1] 
             
             predicted_logits_with_each_vs = gr @ ctx.vs_possibilities.T # This is [Batch size, NumValueSystems]
-            gr_rew_sum_for_each_vs = gr_rew_sum @ ctx.vs_possibilities.T if gr_rew_sum is not None else None
+            rew_sum_for_each_vs = gr_rew_sum @ ctx.vs_possibilities.T if gr_rew_sum is not None else None
             assert predicted_logits_with_each_vs.shape == (logits_p.shape[0], ctx.vs_possibilities.shape[0])
             
             #assert th.allclose(ls_p.exp().sum(dim=-1), th.ones_like(ls_p[..., 0])), f"Log softmax sum is not 1.0, got {ls_p.sum(dim=-1)}"
@@ -1328,25 +1355,34 @@ def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.T
             for i in range(predicted_logits_with_each_vs.shape[-1]):
                 pred_logits_i = predicted_logits_with_each_vs[..., i]
                 
-                pred_logits_i_app = apply_discordance_epsilon_to_logits(missing_mask_vs, target_probs_vs, pred_logits_i, discordance_epsilon=discordance_epsilon, activate_discordance_epsilon_for_loss=activate_disc_epsilon_for_loss)
-            
+                pred_logits_i_app = apply_discordance_epsilon_to_logits(missing_mask_vs, 
+                                                                        target_probs_vs, 
+                                                                        pred_logits_i, 
+                                                                        discordance_epsilon=discordance_epsilon, 
+                                                                        activate_discordance_epsilon_for_loss=activate_disc_epsilon_for_loss)
+                #print(f"ORIGINAL LOGITS WITH {i}: ", pred_logits_i[0:5], "TARGET PROBS", target_probs_vs[0:5])
+                #print(f"PRED LOGITS WITH {i}", pred_logits_i_app[0:5], "TARGET PROBS", target_probs_vs[0:5])
                 loss = th.nn.functional.binary_cross_entropy_with_logits(pred_logits_i_app, target_probs_vs, reduction='none')
                 if rew_center_coefficient != 0 and gr_rew_sum is not None:
-                    gr_rew_sum_for_each_vs_i = gr_rew_sum_for_each_vs[..., i]
-                    centering = th.mean((gr_rew_sum_for_each_vs_i)**2)
+                    rew_sum_for_each_vs_i = rew_sum_for_each_vs[..., i]
+                    centering = th.mean((rew_sum_for_each_vs_i)**2)
                     loss += rew_center_coefficient * centering
                 losses.append(loss)
             losses = th.stack(losses, dim=-1)
+            #print(f"LOSSES {i}", losses)
+            #print(f"LOSSES {i}", losses[0:3])
             assert losses.shape == (logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],), f"Expected losses shape {(logits_p.shape[0],predicted_logits_with_each_vs.shape[-1],)}, got {losses.shape}"
             if not sharp_classification:
                 
-                target_probs = th.softmax(-losses, dim=-1)
+                target_probs_new = th.softmax(-losses, dim=-1)
             else:
                 #Assign 1 to the value systems with the lowest losses, and 0 to the others
                 
-                target_probs = th.where(losses == losses.min(dim=-1, keepdim=True).values, th.ones_like(losses), th.zeros_like(losses))
-                target_probs/=target_probs.sum(dim=-1, keepdim=True)
-            assert th.allclose(target_probs.sum(dim=-1), th.ones_like(target_probs[..., 0])), f"Expected target_probs to sum to 1.0, but got {target_probs.sum(dim=-1)}"
+                target_probs_new = th.where(losses == losses.min(dim=-1, keepdim=True).values, th.ones_like(losses), th.zeros_like(losses))
+                target_probs_new/=target_probs_new.sum(dim=-1, keepdim=True)
+            assert th.allclose(target_probs_new.sum(dim=-1), th.ones_like(target_probs_new[..., 0])), f"Expected target_probs_new to sum to 1.0, but got {target_probs_new.sum(dim=-1)}"
+            #print(f"RESULTING TARGETS {i}", target_probs_new)
+            #print(f"TARGETS 0-3 {i}", target_probs_new[0:3])
             #best_one_hot = th.zeros_like(losses, device=losses.device)
             
             #best_indices = th.argmin(losses, dim=-1)
@@ -1356,9 +1392,15 @@ def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.T
             # THIS NOT NEEDED FOR VAE: assert th.allclose(logs1, logs2), f"Expected vs_logprobs to be the same for each pair, but got {logs1} and {logs2}"
             assert th.allclose(th.exp(logs1), th.softmax(logs1,dim=1)), f"Expected log_softmax logs1"
 
-        vs_prediction_loss = -(target_probs * logs1).sum(dim=-1).mean()
+        vs_prediction_loss = -(target_probs_new * logs1).sum(dim=-1)
+
+        #print("VS P L", vs_prediction_loss[0])
+
+        #print("VS P L", -(target_probs_new * logs1)[0:5], "TARGET PROBS", target_probs_new[0:5], "LOGS1", logs1[0:5])
+        #input()
+        vs_prediction_loss = vs_prediction_loss.mean()
         #THIS IS WRONG WHEN VS_LOGRPROBS IS LOGSOFTMAX!!!! vs_prediction_loss = th.nn.functional.binary_cross_entropy_with_logits(logs1, best_one_hot.detach(), reduction='mean')
-        vs_pred_diff = th.abs(th.exp(logs1) - target_probs.detach()).mean()
+        vs_pred_diff = th.abs(th.exp(logs1) - target_probs_new.detach()).mean()
         """
         else:
             ls_p = th.nn.functional.logsigmoid(predicted_logits_with_each_vs)
@@ -1569,7 +1611,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
                                                         activate_disc_epsilon_for_loss=config.activate_discordance_epsilon_for_loss)
     entropy_loss = 0.0
     
-    if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS] and entropy_coefficient > 0.0 and not config.direct_context_to_vs_relation:
+    if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE] and entropy_coefficient > 0.0 and not config.direct_context_to_vs_relation:
         ctx_data = CtxData.from_dict(others['ctx']) if ctx_data is None else ctx_data
         if 'ctx' not in others.keys():
                 raise ValueError("Program expected a CtxData object returned by the forward method.")
@@ -1592,21 +1634,24 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
 
     if th.is_grad_enabled() and __debug__:
         ctx_data: CtxData
-        if ContextImplementations(config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
-            print("CTXP", ctx_data.context_logprobs[0:4])
-            print("VSP", ctx_data.vs_logprobs[0:4])
-            print("CTXPexp", th.exp(ctx_data.context_logprobs)[0:4])
-            print("CTX_LOSS", ctx_loss)
-            print("VS_SELECTION_LOSS", vs_selection_loss)
-            print("VS_LOSS", vs_loss)
-            #exit(0)
-            print("GR_LOSS", gr_loss)
-            print("VS_LOSS", vs_loss)
-            print("VS_SELECTION_LOSS", vs_selection_loss)  
-            print("CTX_LOSS", ctx_loss)
-            print("ENTROPY_LOSS", entropy_loss) 
-            #input()
+        if ctx_data is not None:
+            print("CTXP", ctx_data.context_logprobs[0:4] if ctx_data.context_logprobs is not None else None)
+            print("VSP", ctx_data.vs_logprobs[0:4] if ctx_data.vs_logprobs is not None else None)
+            print("CTXPexp", th.exp(ctx_data.context_logprobs)[0:4] if ctx_data.context_logprobs is not None else None)
+        print("CTX_LOSS", ctx_loss)
+        print("VS_SELECTION_LOSS", vs_selection_loss)
+        print("VS_LOSS", vs_loss)
+        #exit(0)
+        print("GR_LOSS", gr_loss)
+        print("VS_LOSS", vs_loss)
+        print("VS_SELECTION_LOSS", vs_selection_loss)  
+        print("CTX_LOSS", ctx_loss)
+        print("ENTROPY_LOSS", entropy_loss) 
+        #input()
     vs_loss = vs_loss + vs_selection_loss*vs_selection_coefficient +ctx_loss*ctx_coefficient + entropy_loss*entropy_coefficient   
+    print("VS SELECTION LOSS", vs_selection_loss, 
+          "CTX LOSS", ctx_loss, 
+          "ENTROPY LOSS", entropy_loss)
     #vs_loss = vs_selection_loss + 0.0000001*vs_loss
     if th.is_grad_enabled() and training_variables is not None:
         with th.no_grad():
@@ -1774,6 +1819,7 @@ class MORMForClassification(PreTrainedModel):
         prev_config_loss_func_type = self.config.loss_func_type
         self.config.loss_func_type = MOLossFunctions.DEFAULT.value
         dataset_ctxs = np.array(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name])
+        eval_dataset_ctxs = np.array(eval_set.select_columns([self.vs_features_name])[self.vs_features_name])
         print("Dataset contexts shape:", dataset_ctxs.shape)
         print("Dataset contexts sample:", dataset_ctxs[0],  np.linalg.norm(dataset_ctxs[0], ord=2) )
         kmeans = kmeans_clustering(dataset_ctxs, K= self.config.max_contexts)
@@ -1785,25 +1831,37 @@ class MORMForClassification(PreTrainedModel):
         
         #random_assignment = np.random.choice(self.value_system_layer.num_contexts, size=len(dataset_ctxs))
         #print(random_assignment[0:10], random_assignment.shape)
-        pred_one_hot = th.eye(self.value_system_layer.num_contexts, requires_grad=False)[pred]
+        #pred_one_hot = th.eye(self.value_system_layer.num_contexts, requires_grad=False)[pred]
         dataset_ctxs_th = th.tensor(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
-
+        eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
+        eval_pred = kmeans.predict(eval_dataset_ctxs)
+        
         self.value_system_layer : BasicCtxDependentAlignmentLayer
 
+        try:
+            eval_ground_truth = th.tensor(eval_set.select_columns(["context"])["context"], requires_grad=False)
+            if isinstance(eval_ground_truth[0], str):
+                print("Eval ground truth is string, converting to int")
+                print("Eval ground truth sample:", eval_ground_truth[0:10])
+                #exit(0)
+                eval_ground_truth = None
+        except Exception as e:
+            print("Could not get eval ground truth, setting to None. Error:", e)
+            eval_ground_truth = None
         #self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
         if ContextImplementations(self.config.context_implementation) in [ContextImplementations.BASIC_HARSH, ContextImplementations.DIRECT_VS, ContextImplementations.BASIC_SMOOTH]:
             # NOT REALLY USEFUL: self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
             self.pre_train_basic_smooth(train_subdataset, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         # "Pretrain" the network to assign to each cluster the best value system. (given current initialization)
-        elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ]:
+        elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE ]:
             assert isinstance(self.value_system_layer, VaeAndKMeansCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of VaeAndKMeansCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
-            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args)
-            if self.config.do_initialization:
+            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args, eval_data=eval_dataset_ctxs_th, eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth)
+            if self.config.do_vs_initialization:
                 self.pre_train_grounding_and_vs_selection_matrix(kmeans, train_subdataset, pred, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER ]:
             assert isinstance(self.value_system_layer, BasicGmmCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of BasicGmmCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
-            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args)
-            if self.config.do_initialization:
+            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args, eval_data=eval_dataset_ctxs_th,  eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth)
+            if self.config.do_vs_initialization:
                 self.pre_train_grounding_and_vs_selection_matrix(kmeans, train_subdataset, pred, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         else:    
             # TODO: Missing mask needed.
@@ -2084,7 +2142,7 @@ class MORMForClassification(PreTrainedModel):
                     optimizer = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_value_system, weight_decay=weight_decay)
                     if not self.config.direct_context_to_vs_relation:
                         optimizer_ctx = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_context, weight_decay=weight_decay)
-                elif ContextImplementations(self.config.context_implementation) == ContextImplementations.VAE_AND_KMEANS:
+                elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE]:
                     optimizer = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_value_system, weight_decay=weight_decay)
                     if not self.config.direct_context_to_vs_relation:
                         optimizer_ctx = th.optim.AdamW((self.value_system_layer.vs_selection_to_logit_vsweights_matrix,), lr=self.config.lr_context, weight_decay=weight_decay)
@@ -2511,8 +2569,30 @@ class MORMForClassification(PreTrainedModel):
                 num_contexts=config.max_contexts,
                 num_value_systems=config.max_value_systems,
                 num_values=config.num_values, device=device, dtype=dtype, args_for_ctx_probabilities=config.vae_args(),
-                initial_temperature=config.initial_temperature, lambda_clustering=config.lambda_clustering,
+                
                 )
+        elif ContextImplementations(config.context_implementation) == ContextImplementations.VAE_KMEANS_NOLOSS:
+            return VaeAndKMeansNoLossCtxDependentAlignmentLayer(
+                            input_shape=config.input_size_vs,
+                            direct_context_to_vs_relation=config.direct_context_to_vs_relation,
+                            detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
+                            detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
+                            weight_initialization = config.vs_weight_initialization,
+                            num_contexts=config.max_contexts,
+                            num_value_systems=config.max_value_systems,
+                            num_values=config.num_values, device=device, dtype=dtype, args_for_ctx_probabilities=config.vae_args(),
+                            )
+        elif ContextImplementations(config.context_implementation) == ContextImplementations.VADE:
+                    return VaDECtxDependentAlignmentLayer(
+                                    input_shape=config.input_size_vs,
+                                    direct_context_to_vs_relation=config.direct_context_to_vs_relation,
+                                    detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
+                                    detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
+                                    weight_initialization = config.vs_weight_initialization,
+                                    num_contexts=config.max_contexts,
+                                    num_value_systems=config.max_value_systems,
+                                    num_values=config.num_values, device=device, dtype=dtype, args_for_ctx_probabilities=config.vae_args(),
+                                    )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC_HARSH:
             return BasicHarshCtxDependentAlignmentLayer(
                 input_shape=config.input_size_vs,
@@ -2551,7 +2631,7 @@ class MORMForClassification(PreTrainedModel):
         if config.use_ideal_grounding_model:
             self.reward_heads_ideal = constructor(config, input_size=config.input_size, model_device=model_device)
         self.value_system_layer =  self.construct_value_system_layer(config, model_device, dtype=self.reward_heads.parameters().__next__().dtype) #config.input_size_vs
-        print(self.value_system_layer)
+        print("VS LAYER", self.value_system_layer)
         self.reward_heads_ideal = None if not config.use_ideal_grounding_model else self.reward_heads_ideal
         # self.score_weight_head: ConvexAlignmentLayer = ConvexAlignmentLayer(num_values, 1)
         
@@ -2653,6 +2733,24 @@ class MORMForClassification(PreTrainedModel):
                 params.extend(self.value_system_layer.context_parameters())
         return iter(params)
 
+    def extra_parameters1(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        if hasattr(self.value_system_layer, "extra_parameters1") and self.value_system_layer.extra_parameters1() is not None:
+            params = []
+            if self.config.loss_management.should_apply_grad_on_context_parameters():
+                if self.reward_heads is not None:
+                    params.extend(self.value_system_layer.extra_parameters1())
+            return iter(params)
+        else:
+            return None
+    def extra_parameters2(self, recurse: bool = True) -> Iterator[nn.Parameter]:
+        if hasattr(self.value_system_layer, "extra_parameters2") and self.value_system_layer.extra_parameters2() is not None:
+            params = []
+            if self.config.loss_management.should_apply_grad_on_context_parameters():
+                if self.reward_heads is not None:
+                    params.extend(self.value_system_layer.extra_parameters1())
+            return iter(params)
+        else:
+            return None
     def value_system_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         params = []
         if self.config.loss_management.should_apply_grad_on_value_system_weights():
@@ -2944,7 +3042,7 @@ class MORMForSequenceClassification(MORMForClassification):
     def is_gradient_checkpointing(self) -> bool:
         return bool(getattr(self.full_model, "is_gradient_checkpointing", False))
 
-
+    
     def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:
         params = []
         if self.config.loss_management.should_apply_grad_on_grounding_parameters():

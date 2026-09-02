@@ -236,8 +236,9 @@ class ContextImplementations(enum.Enum):
     BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
     GMM = "GMM"
+    VADE = "VADE"
     GMM_AND_CLASSIFIER = "GMM_AND_CLASSIFIER"
-    
+    VAE_KMEANS_NOLOSS = "VAE_KMEANS_NOLOSS"
     VAE_AND_KMEANS = "VAE_KMEANS"
 
 class MOLossFunctionsCategories():

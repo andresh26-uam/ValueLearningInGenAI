@@ -1,8 +1,6 @@
-import enum
 from typing import Any, Dict, NamedTuple, Optional
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.manifold import TSNE
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
@@ -19,10 +17,10 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
 from vsllib.utils import auto_tsne, kmeans_clustering, plot_alternative_clusterings, to_float
-from vsllib.defines import MIN_EPSILON, ContextImplementations
+from vsllib.defines import ContextImplementations
 
 
-from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
+from datasets import Dataset
 
 
 
@@ -64,11 +62,11 @@ class EvalLoopOutputWithExtraLabels(NamedTuple):
     
 
     @property
-    def labels_qt(self):
+    def labels_qt(self) -> th.Tensor | np.ndarray | tuple[np.ndarray] | None:
         return self.others["target_probs_quantitative"]
 
     @property
-    def labels_ql(self):
+    def labels_ql(self) -> th.Tensor | np.ndarray | tuple[np.ndarray] | None:
         return self.others["target_probs_qualitative"]
 
     #labels_qt: np.ndarray | tuple[np.ndarray] | None
@@ -322,8 +320,8 @@ class MORewardTrainer(Trainer):
     def _run_epoch(
         self,
         model,
-        epoch,
-        train_dataloader,
+        epoch: int,
+        train_dataloader: DataLoader,
         steps_in_epoch,
         num_update_steps_per_epoch,
         trial,
@@ -1056,7 +1054,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 assert isinstance(self.model.value_system_layer, AbstractCtxDependentAlignmentLayer)
                 
                 w_info = self.model.value_system_layer.get_value_system_info()
-
+                
                 for vs_key, vs_data in w_info.items():
                     if str(vs_key).startswith("vs"):
                         train_metrics[vs_key] = dict()

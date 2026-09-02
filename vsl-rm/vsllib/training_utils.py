@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Literal, Optional, Union
 
 import numpy as np
-from numpy import add
 from ordered_set import OrderedSet
 
 
@@ -18,7 +17,7 @@ import torch as th
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from vsllib.defines import MOLossFunctionsCategories, MOLossFunctions, MOLossManagement
 
-from vsllib.utils import convert_to_tensors, to_float
+from vsllib.utils import to_float, to_tensor
 
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -117,8 +116,6 @@ class MORewardDataCollator:
             key: th.stack([th.tensor(feature[key],dtype=self.dtype) for feature in merged_features])
             for key in merged_features[0]
         }
-        if __debug__:
-            print("INPUT", batch["context"][0])
         
         
         batch["return_loss"] = True
@@ -227,6 +224,11 @@ class MORMTrainingVariables(th.nn.Module):
             
         if self.last_accumulated_vs_loss is not None:
             result["value_system_loss"] = to_float(self.last_accumulated_vs_loss)
+        if self.last_accumulated_vs_selection_loss is not None:
+            result["value_system_selection_loss"] = to_float(self.last_accumulated_vs_selection_loss)
+        if self.last_accumulated_ctx_loss is not None:
+            result["context_loss"] = to_float(self.last_accumulated_ctx_loss)
+
         multipliers, vs_coeff = self.get_multipliers(used_only=False)
 
         for i in range(len(multipliers)):
@@ -358,7 +360,9 @@ class MORMTrainingVariables(th.nn.Module):
         self.last_accumulated_coherences_ideal: th.Tensor | None = None
         self.last_accumulated_coherences: th.Tensor | None = None
         self.last_accumulated_representativeness: th.Tensor | None = None
-
+        self.last_accumulated_vs_selection_loss: th.Tensor | None = None
+        self.last_accumulated_ctx_loss: th.Tensor | None = None
+        
         self.loss_metric_tendency_update_ratio = grounding_loss_tendency_update_ratio
         self.gradient_accumulation_steps = gradient_accumulation_steps
 
@@ -372,6 +376,8 @@ class MORMTrainingVariables(th.nn.Module):
         self._cached_coherences = []
         self._cached_coherences_ideal = []
         self._cached_avg_coherence = [] 
+        self._cached_value_system_selection_loss = [] 
+        self._cached_ctx_loss = []
 
         self.use_metrics_or_losses = use_metrics_or_losses 
         self.use_exponential_moving_average_or_optimum_targets = use_exponential_moving_average_or_optimum_targets
@@ -555,6 +561,10 @@ class MORMTrainingVariables(th.nn.Module):
             else:
                 self.last_accumulated_grounding_loss_ideal = self.last_accumulated_grounding_loss.detach()
             self.last_accumulated_vs_loss = th.stack(self._cached_vs_losses).mean().detach()
+            if len(self._cached_value_system_selection_loss) > 0:
+                self.last_accumulated_vs_selection_loss = th.stack(self._cached_value_system_selection_loss).mean().detach()
+            if len(self._cached_ctx_loss) > 0:
+                self.last_accumulated_ctx_loss = th.stack(self._cached_ctx_loss).mean().detach()
 
     def update_metrics_tendencies(self) -> None:
         cached_coherences = None
@@ -693,6 +703,14 @@ class MORMTrainingVariables(th.nn.Module):
                     avg_c = metrics.get("avg_coherence", None)
                     if avg_c is not None:
                         self._cached_avg_coherence.append(avg_c)
+
+                value_system_selection_loss = metrics.get("vs_selection_loss", None)
+                if value_system_selection_loss is not None:
+                    self._cached_value_system_selection_loss.append(to_tensor(value_system_selection_loss))
+                ctx_loss = metrics.get("ctx_loss", None)
+                if ctx_loss is not None:
+                    self._cached_ctx_loss.append(to_tensor(ctx_loss))
+
                 represent = metrics.get("representativeness", None)     
                 if represent is not None:
                     self._cached_representativeness.append(represent)
@@ -811,12 +829,13 @@ class ConstrainedOptimizer(VSLOptimizer):
     @property
     def loss_management(self) -> MOLossManagement:
         return MOLossManagement(self.loss_func_type, self.loss_func_kwargs)
+
     
     def __init__(self, params, params_gr, params_vs, params_ctx, n_values, params_gr_ideal=None, lr_grounding=None,
                  lr_value_system=None, lr_lambda=None, lr_context=None,
                  loss_func_type: MOLossFunctions=MOLossFunctions.DEFAULT, loss_func_type_kwargs: dict = {},
                  training_variables: MORMTrainingVariables = None,
-                 sub_optimizer_class=th.optim.Adam, **optimizer_kwargs):
+                 sub_optimizer_class=th.optim.Adam, params_extra1= None, params_extra2=None, sub_optimizer_kwargs_extra1=None, sub_optimizer_kwargs_extra2=None, **optimizer_kwargs):
         # Params must be provided for compatibility with transformers library.
         super(ConstrainedOptimizer, self).__init__(params_gr=params_gr, params_vs=params_vs, params_ctx=params_ctx, n_values=n_values,
                                                    lr_grounding=lr_grounding, lr_value_system=lr_value_system, lr_context=lr_context, sub_optimizer_class=sub_optimizer_class, **optimizer_kwargs)
@@ -829,6 +848,12 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.params_gr_ideal = params_gr_ideal
             self.optimx_ideal = _create_sub_optimizer(params_gr_ideal, lr_grounding, self.sub_optimizer_class, optimizer_kwargs)
 
+        if params_extra1 is not None:
+            self.params_extra1 = params_extra1
+            self.optim_extra1 = _create_sub_optimizer(params_extra1, lr_context, self.sub_optimizer_class, sub_optimizer_kwargs_extra1 if sub_optimizer_kwargs_extra1 is not None else optimizer_kwargs)
+        if params_extra2 is not None:
+            self.params_extra2 = params_extra2
+            self.optim_extra2 = _create_sub_optimizer(params_extra2, lr_context, self.sub_optimizer_class, sub_optimizer_kwargs_extra2 if sub_optimizer_kwargs_extra2 is not None else optimizer_kwargs)
         self.lr_lambda = lr_lambda if lr_lambda is not None else lr_value_system
         if self.loss_management.should_apply_grad_on_lagrange_multipliers() and self.lr_lambda == 0.0:
             raise ValueError(f"Loss function type {loss_func_type} requires applying gradients on Lagrange multipliers, but lr_lambda is set to 0.0. Please set lr_lambda to a positive value to enable optimization of Lagrange multipliers.")
@@ -850,6 +875,10 @@ class ConstrainedOptimizer(VSLOptimizer):
             self.optim_lambdas.zero_grad(set_to_none)
         if hasattr(self, 'optimx_ideal'):
             self.optimx_ideal.zero_grad(set_to_none)
+        if hasattr(self, 'optim_extra1'):
+                    self.optim_extra1.zero_grad(set_to_none)
+        if hasattr(self, 'optim_extra2'):
+                    self.optim_extra2.zero_grad(set_to_none)
         return None
     
     def custom_backward(self, loss_gr, loss_gr_ideal, loss_vs, epoch: int, **kwargs) -> th.Tensor:
@@ -877,6 +906,7 @@ class ConstrainedOptimizer(VSLOptimizer):
                     (loss_gr_ideal[i]/loss_sum).backward(retain_graph=True)
                     self.optimx_ideal.step()
                     self.optimx_ideal.zero_grad(set_to_none=True)
+        
         self.training_variables.requires_grad_(False)
         #if self.lr_lambda > 0:
             #assert self.optim_lambdas.param_groups[0]['params'][0:len(self.training_variables.lagrange_multipliers)] is self.training_variables.lagrange_multipliers, "Lagrange multipliers not found in optimizer parameters"
@@ -938,6 +968,15 @@ class ConstrainedOptimizer(VSLOptimizer):
             loss = self.training_variables.forward(loss_gr, loss_vs, target_gr_loss=target_gr_loss, selected_indices=selected_indices, add_vs_loss=add_vs_loss, add_gr_loss=add_gr_loss)   
         loss.backward(**kwargs)
         return loss
+
+    def zero_grad(self, set_to_none=True)-> None:
+        super().zero_grad(set_to_none)
+        if hasattr(self, 'optim_extra1'):
+            self.optim_extra1.zero_grad(set_to_none)
+        if hasattr(self, 'optim_extra2'):
+            self.optim_extra2.zero_grad(set_to_none)
+
+    
     def step(self, closure=None)->None:
         
         if __debug__:
@@ -956,6 +995,10 @@ class ConstrainedOptimizer(VSLOptimizer):
                 self.optimy.step()
         if self.optimz is not None and self.lr_context > 0.0:
                 self.optimz.step()
+        if hasattr(self, 'optim_extra1') and self.optim_extra1 is not None:
+            self.optim_extra1.step()
+        if hasattr(self, 'optim_extra2') and self.optim_extra2 is not None:
+            self.optim_extra2.step()
         
         
         self.training_variables.prepare_for_optimizer_step(need_backward=self.lr_lambda > 0)

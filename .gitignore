@@ -221,3 +221,4 @@ results/
 gmm_*.png
 
 my_model/*
+pretrain_plots/*
