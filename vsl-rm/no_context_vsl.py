@@ -151,6 +151,9 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         
         mo_config = MORMForClassificationConfig(
+            normalize_context=script_args.normalize_context_features,
+                                                            
+                                                            
             do_initialization=script_args.do_initialization,
             do_vs_initialization=script_args.do_vs_initialization,
 
@@ -173,7 +176,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             vae_lambda_clustering=script_args.vae_lambda_clustering,
             vae_beta=script_args.vae_beta,
         
-            
+            smooth_evaluation=script_args.smooth_evaluation,
             direct_context_to_vs_relation=script_args.direct_context_to_vs_relation,
             sharp_context_classification=script_args.sharp_context_classification,
             detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
@@ -264,7 +267,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC_SMOOTH, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(
@@ -430,7 +433,7 @@ if __name__ == "__main__":
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)
                 trainer.model = mo_model
-                mo_model.to("cuda" if torch.cuda.is_available() and not script_args.use_cpu else "cpu")
+                
                 print(trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test"))
 
     saving()

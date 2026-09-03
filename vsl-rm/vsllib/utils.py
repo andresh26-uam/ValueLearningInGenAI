@@ -534,6 +534,11 @@ class ScriptArguments:
         metadata={"help": "The lr scheduler"},
     )
     max_length: Optional[int] = field(default=4096)
+
+    smooth_evaluation: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use smooth evaluation, i.e. select, when in eval mode, value system weights as a linear combination of value system probabilities (True), or rather, with argmax (False)."},
+    )
     update_tendencies_every_n_steps: Optional[int] = field(
         default=1,
         metadata={"help": "How often to update the loss/metric tendencies for the Lagrange multiplier updates."},

@@ -237,7 +237,6 @@ class ContextImplementations(enum.Enum):
     NO_CONTEXT = "NO_CONTEXT"
     DIRECT_VS = "DIRECT_VS"
     BASIC = "BASIC"
-    BASIC_SMOOTH = "BASIC_SMOOTH"
     BASIC_HARSH = "BASIC_HARSH"
     GMM = "GMM"
     VADE = "VADE"

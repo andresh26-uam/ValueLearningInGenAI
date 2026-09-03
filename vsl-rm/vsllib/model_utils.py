@@ -778,6 +778,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         do_initialization: bool = True,
         do_vs_initialization: bool = True,
         normalize_context: bool =False,
+        smooth_evaluation: bool = True,
                                                         
         vae_pretrain_epochs: int = 10,
         vae_initial_temperature: float = 1.0,
@@ -884,6 +885,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vs_weight_initialization = vs_weight_initialization
 
         self.normalize_context = normalize_context
+        self.smooth_evaluation=smooth_evaluation
         self.sentence_transformer_name = sentence_transformer_name
         self.use_sentence_transformer = use_sentence_transformer
 
@@ -1143,7 +1145,12 @@ class CustomVAE(VAE):
         return list(self.encoder.parameters()) + list(self.decoder.parameters())
 
     # THIS IS INSPIRED BY: https://arxiv.org/pdf/1806.10069
-    def plot_embedding_space(self, sample_data: th.Tensor, sample_labels: th.Tensor=None, original_space_centroids: th.Tensor=None, save_path: str = None, output: ModelOutput = None, sampling_reps = 5):
+    def plot_embedding_space(self, sample_data: th.Tensor, 
+                             sample_labels: th.Tensor=None, 
+                             original_space_centroids: th.Tensor=None, 
+                             save_path: str = None, 
+                             output: ModelOutput = None, 
+                             sampling_reps = 5):
         
         with th.no_grad(): 
             encoder_output = self.encoder(sample_data)
@@ -1461,7 +1468,7 @@ class CustomVAE(VAE):
                             for i in range(self.num_contexts)
                         ])
         eval_centroids = th.stack([
-            eval_data[eval_assignments == i].mean(dim=0) if th.any(eval_ground_truth == i) else th.mean(eval_data, dim=0)
+            eval_data[eval_assignments == i].mean(dim=0) if th.any(eval_assignments == i) else th.mean(eval_data, dim=0)
                         
                         for i in range(self.num_contexts)
                     ])

@@ -395,6 +395,14 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
             normalizer = StandardScaler()
             ctx_features = self.get_all_contexts_embeddings()
             ctx_features = normalizer.fit_transform(ctx_features)
+            self.set_context_embeddings(ctx_features)
+            print("NORMALIZED")
+
+    def set_context_embeddings(self, context_embeddings: np.ndarray):
+        if context_embeddings.shape[0] != len(self.data):
+            raise ValueError(f"Context embeddings shape {context_embeddings.shape} does not match dataset length {len(self.data)}.")
+        self.data = self.data.map(lambda x, idx: {self.context_feature_name: context_embeddings[idx]}, with_indices=True, load_from_cache_file=False)
+        
 
 
     

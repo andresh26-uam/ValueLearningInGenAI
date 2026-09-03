@@ -412,9 +412,7 @@ class DkmCompGraph(nn.Module):
 
         # [B]
         min_dist = stack_dist.min(dim=0).values
-        print("MIN DIST", min_dist, min_dist.shape)
-        print("STACK DIST", stack_dist, stack_dist.shape)
-        exit(0)
+        
         # ---------------------------------------------------------------
         # Soft assignment
         #

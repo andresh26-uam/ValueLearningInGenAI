@@ -12,6 +12,8 @@
     "vs_selection_coefficient": 0.0,
     "entropy_coefficient": 0.0,
 
+    "smooth_evaluation": true,
+
     "vae_initial_temperature": 1.0,
     "vae_lambda_clustering": 1.0,
     "vae_pretrain_epochs": 50,

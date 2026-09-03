@@ -2,7 +2,7 @@
 
 
 GPUS="L40S:1"
-CPU=False
+CPU=True
 
 DEBUG=()
 SAVE=(--do_save=False)
@@ -23,14 +23,14 @@ fi
 #DATASET=pku
 #CONFIG=run_configs/smol_ctx_linear.json
 #
-#DATASET=synth
-#CONFIG=run_configs/features_synth_ctx.json
+DATASET=synth
+CONFIG=run_configs/features_synth_ctx.json
 
-DATASET=apollo
-CONFIG=run_configs/features_apollo_ctx.json
+#DATASET=apollo
+#CONFIG=run_configs/features_apollo_ctx.json
 
-#DATASET=pku
-#CONFIG=run_configs/smol_ctx_linear.json
+DATASET=pku
+CONFIG=run_configs/smol_ctx_linear.json
 
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
@@ -118,7 +118,9 @@ fi
 
 NAME="${NAME}_ST_${SENTENCE_TRANS}_${CTX_IMPLEMENTATION}_INITVS_${VS_WEIGHT_INIT}_INITCTX_${DOINIT}_INITVSGR_${DOINIT_VS}_VS_${VS_COEFF}_CTX_${CTX_COEFF}_TM_${TEMP}_LC_${LAMBDA}_NORM_${NORM}_DIRCVS_${DIRCVS}"
 echo "GPUs: $GPUS"
-echo "Training with config $CONFIG on dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON and num_train_epochs: $NUM_TRAIN_EPOCHS"
+echo "Training with config $CONFIG"
+echo "On dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON"
+echo "and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
 

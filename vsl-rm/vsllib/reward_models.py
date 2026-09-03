@@ -403,10 +403,10 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             device=device,
             dtype=dtype,
         ))
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", detach_vs_selection_for_value_system_weight_training: bool = False, dropout=0, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", args_for_ctx_probabilities: dict = {}, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", detach_vs_selection_for_value_system_weight_training: bool = False, dropout=0, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", args_for_ctx_probabilities: dict = {}, smooth_evaluation: bool = True, **kwargs: Any) -> None:
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values,  **kwargs)
-        
-        
+        self.smooth_evaluation=smooth_evaluation
+
         self.weight_initialization = weight_initialization
         self.context_logits = self._construct_context_logprobabilities(
             input_shape=input_shape, 
@@ -548,15 +548,6 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         assert ls_vs_probs.shape==(hidden_state.shape[0], self.num_value_systems)
         assert ls_vs_weights.shape==(self.num_value_systems, self.num_values)
 
-        
-
-        #print(ls_ctx_probs[:,0].shape)
-        #print(ls_ctx_probs[:,0].repeat(self.num_values,1).shape)
-        #print(ls_vs_weights[0,:].shape)
-        """combination = th.stack([
-            th.exp(ls_ctx_probs[:,i].repeat(self.num_values,1) + ls_vs_weights[i,:].unsqueeze(1))
-         for i in range(self.num_value_systems)]).sum(dim=0).T
-""" 
         #print("LS CTX", ls_ctx_probs.device, "LS VS", ls_vs_weights.device)
         vs_predicted = th.exp(ls_vs_probs.T.unsqueeze(2) +   # (num_value_systems, batch, 1)   
                                 ls_vs_weights.unsqueeze(1)      # (num_value_systems, 1, num_values)
@@ -589,26 +580,25 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         return vs_predicted, enriched_data
     
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        
-        vs_assignments = context_data.vs_assignments
-        vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
+        with th.no_grad():
+            if self.smooth_evaluation:
+                return self.value_system_from_context_train(hidden_state, context_data)
+            else:
+                vs_assignments = context_data.vs_assignments
+                vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
 
-        if __debug__:
-            with th.no_grad():
-                assert vs_predicted.shape == (hidden_state.shape[0],self.num_values)
-                
-                th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones((vs_predicted.shape[0],)))
-        enriched_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted, ctx_predicted = context_data.ctx_assignments)
-        return vs_predicted, enriched_data
-    
-    
-class BasicSmoothCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        return self.value_system_from_context_train(hidden_state, context_data)
+                if __debug__:
+                    with th.no_grad():
+                        assert vs_predicted.shape == (hidden_state.shape[0],self.num_values)
+                        
+                        th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones((vs_predicted.shape[0],)))
+                enriched_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted, ctx_predicted = context_data.ctx_assignments)
+                return vs_predicted, enriched_data
 
 
 class BasicHarshCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
-
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: List[int] = [], ctx_intermediate_activation: str = "ReLU", detach_vs_selection_for_value_system_weight_training: bool = False, dropout=0, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", args_for_ctx_probabilities: Dict = {}, smooth_evaluation: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, dropout=dropout, device=device, dtype=dtype, weight_initialization=weight_initialization, args_for_ctx_probabilities=args_for_ctx_probabilities, smooth_evaluation=False, **kwargs)
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return [ ]#.extend([*super().context_parameters()])
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
@@ -619,8 +609,8 @@ class BasicHarshCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         return vs_predicted, context_data
 class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_values: int, ctx_hidden_sizes: List[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, **kwargs: Any) -> None:
-        AbstractCtxDependentAlignmentLayer.__init__(self, *args, input_shape=input_shape, num_contexts=1, num_value_systems=1, num_values=num_values,  **kwargs)
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_values: int, ctx_hidden_sizes: List[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, smooth_evaluation: bool=True, **kwargs: Any) -> None:
+        AbstractCtxDependentAlignmentLayer.__init__(self, *args, input_shape=input_shape, num_contexts=1, num_value_systems=1, num_values=num_values, smooth_evaluation=smooth_evaluation, **kwargs)
         self.log_vs_prediction = nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
             hidden_sizes=ctx_hidden_sizes,
@@ -637,8 +627,7 @@ class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         return context_data.vs_predicted, context_data
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        return self.value_system_from_context_train(hidden_state, context_data)
+    
     def calculate_statistics(self, context_data: CtxData, statistics_before: CtxStatistics= None, update_factor=0.9) -> CtxStatistics:
         return CtxStatistics(
             centroids = th.stack([th.mean(context_data.context_features, dim=0),]),
@@ -680,13 +669,10 @@ class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
 
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-            return self.value_system_from_context_train(hidden_state, context_data)
-    
-    def __init__(self, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, **kwargs: Any) -> None:
+    def __init__(self, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, smooth_evaluation: bool=True,  **kwargs: Any) -> None:
         
         super().__init__(input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, dropout=dropout, dtype=dtype, 
-                         detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training,  weight_initialization=weight_initialization, **kwargs)
+                         detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training,  weight_initialization=weight_initialization, smooth_evaluation=smooth_evaluation, **kwargs)
         self.detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection
         self.direct_context_to_vs_relation = direct_context_to_vs_relation
         self.assume_vs_logprobs_are_normalized = True
@@ -784,13 +770,14 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
 class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLayer):
 
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, ctx_hidden_sizes: list[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, detach_vs_selection_for_value_system_weight_training: bool = False, detach_context_selection_for_value_system_selection: bool = False, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, smooth_evaluation: bool=True,  **kwargs: Any) -> None:
         
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, dropout=dropout, device=device, dtype=dtype,
                          detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training,
                          detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection,
                          weight_initialization=weight_initialization,
                          direct_context_to_vs_relation=direct_context_to_vs_relation,
+                         smooth_evaluation=smooth_evaluation,
                          **kwargs)
         self.vs_logits_network = nn.Sequential(*construct_layers(
                             input_dim=input_shape,
@@ -894,6 +881,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                  device: th.device = None, dtype: th.dtype = None, 
                  weight_initialization: str = "dirichlet", 
                  direct_context_to_vs_relation: bool = False, 
+                 smooth_evaluation: bool=True, 
                  args_for_ctx_probabilities: dict = {},  **kwargs) -> None:
         
         self.direct_context_to_vs_relation = direct_context_to_vs_relation
@@ -903,7 +891,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, 
                          detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, 
                          device=device, dtype=dtype, weight_initialization=weight_initialization, 
-                         args_for_ctx_probabilities=args_for_ctx_probabilities)
+                         args_for_ctx_probabilities=args_for_ctx_probabilities, smooth_evaluation=smooth_evaluation, **kwargs)
         assert isinstance(self.context_logits, CustomVAE)
 
         if not self.direct_context_to_vs_relation:
@@ -933,7 +921,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             centroid_distance = th.norm(self.context_logits.latent_centroids.unsqueeze(0) - self.context_logits.latent_centroids.unsqueeze(1), dim=2).mean().item()
             orthogonality = th.norm(th.mm(self.context_logits.latent_centroids, self.context_logits.latent_centroids.T) - th.eye(self.num_contexts, device=self.context_logits.latent_centroids.device, dtype=self.context_logits.latent_centroids.dtype), dim=(0,1)).item()
             reconstructed_distance = th.norm(reconst.unsqueeze(0) - reconst.unsqueeze(1), dim=2).mean().item()
-        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss}
+        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss, "vae_centroid_norm": th.norm(self.context_logits.latent_centroids, dim=1).mean().item()}
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
             ret = (self.vs_selection_to_logit_vsweights_matrix,)
@@ -946,10 +934,6 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             return (*self.context_logits.context_parameters(),)
         else:
             return (*self.context_logits.context_parameters(), )
-
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-                return self.value_system_from_context_train(hidden_state, context_data)
-
     
     def initialize(self, centroids: th.Tensor=None, data: th.Tensor=None, assignments: th.Tensor=None, eval_assignments: th.Tensor=None, config: MORMForClassificationConfig=None, args: TrainingArguments=None, simple_init=False, eval_data: th.Tensor=None, eval_ground_truth=None, **kwargs) -> None:
         
@@ -1025,8 +1009,8 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 class VaeAndKMeansNoLossCtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
 
     VaeClass = CustomVAENoLoss
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: Dict = {}, **kwargs) -> None:
-        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, device=device, dtype=dtype, weight_initialization=weight_initialization, direct_context_to_vs_relation=direct_context_to_vs_relation, args_for_ctx_probabilities=args_for_ctx_probabilities,  **kwargs)
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: Dict = {}, smooth_evaluation: bool=True,  **kwargs) -> None:
+        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, device=device, dtype=dtype, weight_initialization=weight_initialization, direct_context_to_vs_relation=direct_context_to_vs_relation, args_for_ctx_probabilities=args_for_ctx_probabilities,  smooth_evaluation=smooth_evaluation, **kwargs)
         
         
     
@@ -1035,8 +1019,28 @@ class VaDECtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
     VaeClass = CustomVaDE
     VaeDecoderClass = VaDEDecoder
     VaeEncoderClass = CustomEncoder
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, num_value_systems: int, num_values: int, detach_context_selection_for_value_system_selection: bool = False, detach_vs_selection_for_value_system_weight_training: bool = False, device: th.device = None, dtype: th.dtype = None, weight_initialization: str = "dirichlet", direct_context_to_vs_relation: bool = False, args_for_ctx_probabilities: Dict = {}, **kwargs) -> None:
-        super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, device=device, dtype=dtype, weight_initialization=weight_initialization, direct_context_to_vs_relation=direct_context_to_vs_relation, args_for_ctx_probabilities=args_for_ctx_probabilities,  **kwargs)
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_contexts: int, 
+                 num_value_systems: int, num_values: int, 
+                 detach_context_selection_for_value_system_selection: bool = False, 
+                 detach_vs_selection_for_value_system_weight_training: bool = False, 
+                 device: th.device = None, dtype: th.dtype = None, 
+                 weight_initialization: str = "dirichlet", 
+                 direct_context_to_vs_relation: bool = False, 
+                 args_for_ctx_probabilities: Dict = {}, 
+                 smooth_evaluation: bool=True, **kwargs) -> None:
+        super().__init__(*args, input_shape=input_shape, 
+                         num_contexts=num_contexts, 
+                         num_value_systems=num_value_systems, 
+                         num_values=num_values, 
+                         detach_context_selection_for_value_system_selection=detach_context_selection_for_value_system_selection, 
+                         detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, 
+                         device=device,
+                         dtype=dtype, 
+                         weight_initialization=weight_initialization, 
+                         direct_context_to_vs_relation=direct_context_to_vs_relation, 
+                         args_for_ctx_probabilities=args_for_ctx_probabilities, 
+                         smooth_evaluation=smooth_evaluation, 
+                         **kwargs)
 
 
     def initialize(self, centroids: th.Tensor = None, data: th.Tensor = None, assignments: th.Tensor = None, eval_assignments: th.Tensor = None, config: MORMForClassificationConfig = None, args: TrainingArguments = None, simple_init=False, eval_data: th.Tensor = None, eval_ground_truth=None, **kwargs) -> None:
@@ -1849,9 +1853,9 @@ class MORMForClassification(PreTrainedModel):
             print("Could not get eval ground truth, setting to None. Error:", e)
             eval_ground_truth = None
         #self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
-        if ContextImplementations(self.config.context_implementation) in [ContextImplementations.BASIC_HARSH, ContextImplementations.DIRECT_VS, ContextImplementations.BASIC_SMOOTH]:
+        if ContextImplementations(self.config.context_implementation) in [ContextImplementations.BASIC_HARSH, ContextImplementations.DIRECT_VS, ContextImplementations.BASIC]:
             # NOT REALLY USEFUL: self.train_context_log_probs_network_to_predict_KmeansClusters(pred_one_hot, dataset_ctxs_th)
-            self.pre_train_basic_smooth(train_subdataset, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
+            self.pre_train_basic(train_subdataset, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         # "Pretrain" the network to assign to each cluster the best value system. (given current initialization)
         elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE ]:
             assert isinstance(self.value_system_layer, VaeAndKMeansCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of VaeAndKMeansCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
@@ -1991,7 +1995,7 @@ class MORMForClassification(PreTrainedModel):
         self.train(False)
 
 
-    def pre_train_basic_smooth(self, train_subdataset, dataset_ctxs_th, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
+    def pre_train_basic(self, train_subdataset, dataset_ctxs_th, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
         with th.no_grad():
             dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
             dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
@@ -2044,13 +2048,13 @@ class MORMForClassification(PreTrainedModel):
                                                  eval_dataset_grounding_features2=eval_dataset_grounding_features2, 
                                                  eval_missing_mask_gr=eval_missing_mask_gr, 
                                                  eval_dataset_score_gr_valid=eval_dataset_score_gr_valid, 
-                                                 epoch_multiplier=0.05)
+                                                 epoch_multiplier=0.1)
         print("Initializing Value System Selection Network to Random Probabilities")
         optimizer = th.optim.AdamW((*self.value_system_layer.context_logits.parameters(),), lr=self.config.lr_context, weight_decay=args.weight_decay)
         valid_grounding_features1 = dataset_grounding_features1[~missing_mask]
         valid_grounding_features2 = dataset_grounding_features2[~missing_mask]
         valid_context_features = dataset_ctxs_th[~missing_mask]
-        self.init_random_selection_of_vs(args, optimizer, total_dataset_size, valid_grounding_features1, valid_grounding_features2, valid_context_features)
+        self.init_random_selection_of_vs(args, optimizer, total_dataset_size, valid_grounding_features1, valid_grounding_features2, valid_context_features, epoch_multiplier=0.1)
         
                         
     def pre_train_grounding_and_vs_selection_matrix(self, kmeans: KMeans, train_subdataset: Dataset, pred: np.ndarray, dataset_ctxs_th: th.Tensor, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
@@ -2512,17 +2516,7 @@ class MORMForClassification(PreTrainedModel):
                 config.num_values, 1, device=device, dtype=dtype)
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC:
             return BasicCtxDependentAlignmentLayer(
-                input_shape=config.input_size_vs,
-                #detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
-                detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
-                weight_initialization = config.vs_weight_initialization,
-                num_contexts=config.max_contexts,
-                num_value_systems=config.max_value_systems,
-                ctx_hidden_sizes=config.vs_layer_hidden_sizes,
-                ctx_intermediate_activation=config.vs_layer_intermediate_activation,
-                num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
-        elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC_SMOOTH:
-            return BasicSmoothCtxDependentAlignmentLayer(
+                smooth_evaluation=config.smooth_evaluation,
                 input_shape=config.input_size_vs,
                 #detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
                 detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
@@ -2535,6 +2529,7 @@ class MORMForClassification(PreTrainedModel):
         elif ContextImplementations(config.context_implementation) == ContextImplementations.GMM:
             
             return BasicGmmCtxDependentAlignmentLayer(
+                smooth_evaluation=config.smooth_evaluation,
                 input_shape=config.input_size_vs,
                 direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                 detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
@@ -2546,8 +2541,8 @@ class MORMForClassification(PreTrainedModel):
                 ctx_intermediate_activation=config.vs_layer_intermediate_activation,
                 num_values=config.num_values, dropout=config.vs_layer_dropout, device=device, dtype=dtype)
         elif ContextImplementations(config.context_implementation) == ContextImplementations.GMM_AND_CLASSIFIER:
-                    
                     return GmmAndClassifierCtxDependentAlignmentLayer(
+                        smooth_evaluation=config.smooth_evaluation,
                         input_shape=config.input_size_vs,
                         direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                         detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
@@ -2561,6 +2556,7 @@ class MORMForClassification(PreTrainedModel):
         elif ContextImplementations(config.context_implementation) == ContextImplementations.VAE_AND_KMEANS:
                             
             return VaeAndKMeansCtxDependentAlignmentLayer(
+                smooth_evaluation=config.smooth_evaluation,
                 input_shape=config.input_size_vs,
                 direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                 detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
@@ -2573,6 +2569,7 @@ class MORMForClassification(PreTrainedModel):
                 )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.VAE_KMEANS_NOLOSS:
             return VaeAndKMeansNoLossCtxDependentAlignmentLayer(
+                smooth_evaluation=config.smooth_evaluation,
                             input_shape=config.input_size_vs,
                             direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                             detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
@@ -2584,6 +2581,7 @@ class MORMForClassification(PreTrainedModel):
                             )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.VADE:
                     return VaDECtxDependentAlignmentLayer(
+                        smooth_evaluation=config.smooth_evaluation,
                                     input_shape=config.input_size_vs,
                                     direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                                     detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
@@ -2596,6 +2594,7 @@ class MORMForClassification(PreTrainedModel):
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC_HARSH:
             return BasicHarshCtxDependentAlignmentLayer(
                 input_shape=config.input_size_vs,
+                smooth_evaluation=config.smooth_evaluation,
                 #detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
                 detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
                 weight_initialization = config.vs_weight_initialization,
@@ -2607,6 +2606,7 @@ class MORMForClassification(PreTrainedModel):
             )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.DIRECT_VS:
             return DirectVSCtxDependentAlignmentLayer(
+                smooth_evaluation=config.smooth_evaluation,
                 input_shape=config.input_size_vs,
                 #detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
                 #detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,
