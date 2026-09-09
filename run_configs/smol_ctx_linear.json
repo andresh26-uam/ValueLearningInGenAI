@@ -7,7 +7,7 @@
     "do_initialization": true,
     "do_vs_initialization": false,
     "direct_context_to_vs_relation": true,
-    "vs_weight_initialization": "dirichlet",
+    "vs_weight_initialization": "equal",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": true,
     "ctx_coefficient": 1.0,
@@ -15,7 +15,7 @@
     "entropy_coefficient": 0.0,
 
 
-    "smooth_evaluation": true,
+    "smooth_evaluation": false,
 
     "vae_initial_temperature": 1.0,
     "vae_lambda_clustering": 1.0,
@@ -48,7 +48,7 @@
     "vs_hidden_size": 1024,
     "vs_num_hidden_layers": 3,
     "vs_layer_dropout": 0.0,
-    "vs_layer_activation": "SiLU",
+    "vs_layer_activation": "LeakyReLU",
 
     "vae_latent_dim": 2,
     "vae_type": "ae", 
@@ -83,8 +83,8 @@
     "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
     "weight_decay": 0.001,
-    "extra_weight_decay1": 0.00,
-    "extra_weight_decay2": 0.00,
+    "extra_weight_decay1": 0.001,
+    "extra_weight_decay2": 0.001,
     "bf16": false,
     "num_train_epochs": 1000,
     "gradient_checkpointing": false,

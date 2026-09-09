@@ -761,8 +761,8 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
     script_args.update_tendencies_every_n_steps = script_args.eval_every_steps if script_args.use_validation_for_tendencies else script_args.update_tendencies_every_n_steps
 
     if ContextImplementations(script_args.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER,]:
-        
-        script_args.normalize_context_features = True
+        if script_args.normalize_context_features is False:
+            print(f"Warning: Context implementation {script_args.context_implementation} requires normalized context features, but normalize_context_features is set to False. Make sure the dataset has normalized context features/embeddings!")
     try:
         script_args.training_initialization_data_size = int(script_args.training_initialization_data_size)
     except ValueError:
@@ -853,7 +853,7 @@ def kmeans_clustering(dataset_ctxs: np.ndarray, K=None, max_iter=10000)-> KMeans
         
         return kmeans
 
-def auto_tsne(full_dataset: np.array, n_random_seeds=3, example_perps=(5, 50)) -> tuple[np.array, TSNE, float, float]:
+def auto_tsne(full_dataset: np.array, n_random_seeds=3, example_perps=(5, 30, 50), tsne_perplexity=-1, tsne_seed=-1, **kwargs) -> tuple[np.array, TSNE, float, float]:
         best_metric = None
         best_reducer = None
         best_perp = None
@@ -863,20 +863,31 @@ def auto_tsne(full_dataset: np.array, n_random_seeds=3, example_perps=(5, 50)) -
         else:
             tsne_init = "random"
         """
-        for perp in [*example_perps, 0.01*len(full_dataset), 0.05*len(full_dataset)]:
-            for rs in range(0,n_random_seeds):
+        subset_for_selection = full_dataset if full_dataset.shape[0] < 1000 else full_dataset[np.random.choice(full_dataset.shape[0], 1000, replace=False)]
+                
+        perps_to_test = [*example_perps, 0.01*len(subset_for_selection), 0.05*len(subset_for_selection)]
+        random_seeds = list(range(0,n_random_seeds))
+        if tsne_perplexity > 0:
+            perps_to_test = [tsne_perplexity]
+        if tsne_seed >= 0:
+            random_seeds = [tsne_seed]
+
+        for perp in perps_to_test:
+            for rs in random_seeds:
                 print(f"TSNE {rs} with perplexity {perp}...")
                 reducer_tsne: TSNE = TSNE(n_components=2, perplexity=perp, random_state=rs, init="pca")
-                reduction_tsne = reducer_tsne.fit_transform(full_dataset) #if full_dataset.shape[1] > 50 else reducer_tsne.fit_transform(full_dataset)
+                
+                reduction_tsne = reducer_tsne.fit_transform(subset_for_selection) #if full_dataset.shape[1] > 50 else reducer_tsne.fit_transform(full_dataset)
                     # FROM: https://arxiv.org/pdf/1708.03229
-                metric = 2*reducer_tsne.kl_divergence_ + np.log(len(full_dataset))*perp/len(full_dataset)
+                metric = 2*reducer_tsne.kl_divergence_ + np.log(len(subset_for_selection))*perp/len(subset_for_selection)
                 print("Done")
+                
                 if  best_metric is None or metric < best_metric:
                     best_metric = metric
                     best_reducer = reducer_tsne
                     best_perp = perp
-                    print("Metric: ", metric, "Best so far: ", best_metric)
-                
+                print("Metric: ", metric, "Best so far: ", best_metric)
+        reduction_tsne = best_reducer.fit_transform(full_dataset)
         
         return reduction_tsne, best_reducer, best_perp, best_metric
 
@@ -931,8 +942,8 @@ def plot_alternative_clusterings(
             for j, lab in enumerate(sorted_clusters):
                 mask = labels == lab
                 ax.scatter(
-                    X_reduced[mask, 0],
-                    X_reduced[mask, 1],
+                    X[mask, 0],
+                    X[mask, 1],
                     color=cmap(j),
                     label=f"Cluster {lab} (n={mask.sum()})",
                     s=30,
@@ -961,38 +972,6 @@ def plot_alternative_clusterings(
             ]
 
             cmap = plt.cm.get_cmap(palettes[i % len(palettes)], len(sorted_clusters))
-
-
-def plot_clustering_confusion_matrix(
-    labels_1,
-    labels_2,
-    output_path="confusion_matrix.pdf"
-):
-    labels_1 = np.asarray(labels_1)
-    labels_2 = np.asarray(labels_2)
-
-    cm = confusion_matrix(labels_1, labels_2)
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-
-    cax = ax.imshow(cm)
-
-    ax.set_xlabel("Labels 2")
-    ax.set_ylabel("Labels 1")
-    ax.set_title("Confusion Matrix")
-
-    # Add values inside cells
-    for i in range(cm.shape[0]):
-        for j in range(cm.shape[1]):
-            ax.text(j, i, cm[i, j],
-                    ha="center", va="center")
-
-    fig.colorbar(cax)
-
-    plt.tight_layout()
-
-    plt.savefig(output_path)
-    plt.close(fig)
 
 def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "test_metrics.csv") -> None:
     path = Path(output_path).joinpath(name)

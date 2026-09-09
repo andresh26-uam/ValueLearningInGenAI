@@ -5,7 +5,7 @@ GPUS="L40S:1"
 CPU=True
 
 DEBUG=()
-SAVE=(--do_save=False)
+SAVE=(--do_save=True)
 REPORT_TO=wandb
 
 if [[ "$CPU" == "True" ]]; then
@@ -27,8 +27,8 @@ DATASET=synth
 CONFIG=run_configs/features_synth_ctx.json
 
 #DATASET=apollo
-#CONFIG=run_configs/features_apollo_ctx.json
 
+#CONFIG=run_configs/features_apollo_ctx.json
 DATASET=pku
 CONFIG=run_configs/smol_ctx_linear.json
 
@@ -70,48 +70,42 @@ elif [[ "$DATASET" == "synth" ]]; then
   training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=500
 else
-  echo "Unknown dataset: $DATASET" >&2
+  echo "Unknown dataset: $DATASET"
   exit 1
 fi
 
 
 echo $CONFIG
 if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
-    NAME=ApolloVSLRMv3
+    NAME=ApolloVSLRMv17
 elif [[ "$CONFIG" == "run_configs/features_synth_ctx.json" ]]; then
-    NAME=SynthV3
+    NAME=SynthV17_savetest
 elif [[ "$CONFIG" == "run_configs/llama_ctx_linear.json" ]]; then
     NAME=LlamaCtxVSLRMv5
 elif [[ "$CONFIG" == "run_configs/llama_rlhf_linear.json" ]]; then
   NAME=LlamaBTRMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/llama_linear_firstgr_thenvs.json" ]]; then
   NAME=LlamaSEQ-RMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/llama_linear.json" ]]; then
   NAME=LlamaVSLRMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/llama_grounding_linear.json" ]]; then
   NAME=LlamaGRRMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
-  elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
+elif [[ "$CONFIG" == "run_configs/llama_nolag_linear.json" ]]; then
   NAME=LlamaVSL-NL-RMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
   NAME=SmolBTRMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
+  NAME=SmolCtxVSLRMv17
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_ae_kmeans.json" ]]; then
   NAME=SmolCtxVSLRMv17_AE
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_gmm_and_classifier.json" ]]; then
+  NAME=SmolCtxVSLRMv17_GMMC
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
-  NAME=SmolCtxVSLRMv11_TH50VS
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
-elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline_smooth.json" ]]; then
   NAME=SmolCtxVSLRMv11
-  SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
+elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline_smooth.json" ]]; then
+  NAME=SmolCtxVSLRMv17_BS
 else
   NAME=test
 fi
@@ -125,7 +119,7 @@ echo "Run name: ${GPUS}${NAME}"
 
 
 
-for seed in 42; do
+for seed in 43 44 45 46; do
     args=(
         "$SCRIPT_PYTHON"
         "$CONFIG"

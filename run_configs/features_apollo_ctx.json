@@ -1,24 +1,24 @@
 {
     "task_type": "feature_based",
     "model_name": "mlp",
-    "context_implementation": "BASIC_SMOOTH",
+    "context_implementation": "BASIC",
     "do_initialization": true,
-    "do_vs_initialization": true,
+    "do_vs_initialization": false,
     "direct_context_to_vs_relation": true,
     "vs_weight_initialization": "dirichlet",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": false,
     "ctx_coefficient": 0.0,
-    "vs_selection_coefficient": 100.0,
+    "vs_selection_coefficient": 1.0,
     "entropy_coefficient": 0.0,
-    "normalize_context_features": false,
+    "normalize_context_features": true,
 
     "vae_initial_temperature": 1.0,
     "vae_lambda_clustering": 1.0,
     "vae_pretrain_epochs": 50,
 
     "smooth_evaluation": true,
-    
+
     "vae_latent_dim": 2,
     "vae_type": "ae", 
     "vae_dropout": 0.0,
@@ -58,7 +58,7 @@
     "vs_hidden_size": 32,
     "vs_num_hidden_layers": 4,
     "vs_layer_dropout": 0.0,
-    "vs_layer_activation": "Tanh",
+    "vs_layer_activation": "LeakyReLU",
     
 
     "use_validation_for_tendencies": false,

@@ -37,7 +37,7 @@ from pythae.pipelines.training import TrainingPipeline
 
 from vsllib.training_utils import MORMTrainingVariables
 from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, SENTENCE_MODEL_SIZES, ContextImplementations, MOLossFunctions
-from vsllib.model_utils import ACTIVATE_TEMPERATURE_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
+from vsllib.model_utils import ACTIVATE_THRESHOLD_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
 from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
 from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, transform_weights_to_tuple
@@ -278,6 +278,7 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
     
     def value_system_from_context(self, hidden_state) -> Tuple[th.Tensor, CtxData]:
         assert hidden_state.shape[1] == self.input_shape
+        
         #print("TRAINING??", self.training)
         if self.training:
             _context_stats_before = self.running_context_training_data
@@ -422,7 +423,6 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         if list(self.context_logits.parameters())[0].is_meta:
             logweights = th.empty((num_value_systems, num_values), device=device, dtype=dtype)
         else:
-            print(device, "DEV?")
             if self.weight_initialization == "dirichlet":
                 alpha = th.ones(num_values, device=device, dtype=dtype)
                 weights = sample_dirichlet(alpha, (num_value_systems,))  # rows sum to 1
@@ -474,7 +474,6 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         context_logprobs = th.log_softmax(logit, dim=1)
         
         #raise ValueError("...")
-        #print("WHAT", context_logprobs.dtype)
         
         vs_assignments = random_argmax(context_logprobs, dim=1)
         
@@ -532,9 +531,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             )
 
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        #print("HS DTYPE", hidden_state.dtype)
-        #print("DEVICE h", hidden_state.device, "ctx", context_data.context_features.device, "vs", self.context_to_vslogweights_matrix.device)
-        #print("Device ", context_data.context_logprobs.device)
+        
         if self.detach_vs_selection_for_value_system_weight_training:
             vs_logprobs = context_data.vs_logprobs.detach()
         else:
@@ -548,11 +545,10 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         assert ls_vs_probs.shape==(hidden_state.shape[0], self.num_value_systems)
         assert ls_vs_weights.shape==(self.num_value_systems, self.num_values)
 
-        #print("LS CTX", ls_ctx_probs.device, "LS VS", ls_vs_weights.device)
         vs_predicted = th.exp(ls_vs_probs.T.unsqueeze(2) +   # (num_value_systems, batch, 1)   
                                 ls_vs_weights.unsqueeze(1)      # (num_value_systems, 1, num_values)
                                 ).sum(dim=0)                       # (batch, num_values)
-        #print("vs pred", vs_predicted.device)
+        
         assert vs_predicted.shape == (hidden_state.shape[0], self.num_values)
         assert th.allclose(th.sum(vs_predicted, dim=1), th.ones((hidden_state.shape[0],)).to(vs_predicted.device), atol=1e-5, rtol=0.01)
         
@@ -692,7 +688,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
     def initialize(self, centroids: th.Tensor, data: th.Tensor, assignments: np.ndarray, eval_data: th.Tensor= None, eval_assignments: np.ndarray=None, eval_ground_truth=None, **kwargs) -> None:
         self.context_logits.initialize_from_data(centroids, data, assignments)
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, device: th.device = None, dtype: th.dtype = None, args_for_ctx_probabilities: dict = {}, **kwargs) -> nn.Module:
-        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_TEMPERATURE_GMM)
+        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_THRESHOLD_GMM)
         
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
@@ -703,8 +699,6 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
     
 
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
-            #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
-            #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
             self.context_logits: FastGaussianMixture
             assert isinstance(self.context_logits, FastGaussianMixture)
             gmm_logprob, per_component_logprob, component_logprobs, thresholded_gmm_logit = self.context_logits.forward_all(hidden_state)
@@ -719,7 +713,7 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             assert hidden_state.shape[1] == self.context_logits.input_size
             assert hidden_state[0].norm() <= 1.0001
             #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
-            #print("IT GOES:", context_logprobs)
+            
             #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
             
             ctx_assignments = random_argmax(context_logprobs, dim=1)
@@ -727,7 +721,6 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
             #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
             #raise ValueError("...")
-            #print("WHAT", context_logprobs.dtype)
             assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
 
             # p(v|x) = sum_c p(v|c) p(c|x), computed stably in log-space.
@@ -798,63 +791,58 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
     
     def _construct_context_logprobabilities(self, input_shape: int | Tuple, ctx_hidden_sizes: list[int] = [], ctx_intermediate_activation: str = "ReLU", dropout = 0.0, device: th.device = None, dtype: th.dtype = None, args_for_ctx_probabilities: dict = {}, **kwargs):
         
-        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_TEMPERATURE_GMM)
+        return FastGaussianMixture(input_size=input_shape, num_components=self.num_contexts, device=device, dtype=dtype, activate_threshold=ACTIVATE_THRESHOLD_GMM)
             
     
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
                 
-                #print("CONSTRUCT DTYPE", list(self.context_logprobabilities.parameters())[0].dtype, "HS", hidden_state.dtype)
-                #print("CTX PARAMS FORWARD", [p.dtype for p in self.context_logprobabilities.parameters()])
-                self.context_logits: FastGaussianMixture
-                assert isinstance(self.context_logits, FastGaussianMixture)
-                gmm_logprob, per_component_logprob, component_logprobs, thresholded_logit = self.context_logits.forward_all(hidden_state)
-                #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
-                #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
-                #HARD: context_logprobs = per_component_logprob + component_logprobs
-                context_logprobs = th.log_softmax(thresholded_logit, dim=1)
+        self.context_logits: FastGaussianMixture
+        assert isinstance(self.context_logits, FastGaussianMixture)
+        gmm_logprob, per_component_logprob, component_logprobs, thresholded_logit = self.context_logits.forward_all(hidden_state)
+        #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
+        #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
+        #HARD: context_logprobs = per_component_logprob + component_logprobs
+        context_logprobs = th.log_softmax(thresholded_logit, dim=1)
                 
-                if self.detach_context_selection_for_value_system_selection:
-                    context_logprobs = context_logprobs.detach()
-                    
-                assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
-                assert hidden_state.shape[1] == self.context_logits.input_size
-                
-                #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
-                #print("IT GOES:", context_logprobs)
-                #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
-                
-                ctx_assignments = random_argmax(context_logprobs, dim=1)
-                #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
-                #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
-                #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
-                #raise ValueError("...")
-                #print("WHAT", context_logprobs.dtype)
-                assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+        if self.detach_context_selection_for_value_system_selection:
+            context_logprobs = context_logprobs.detach()
+            
+        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
+        assert hidden_state.shape[1] == self.context_logits.input_size
+        
+        #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
+        #print("IT GOES:", context_logprobs)
+        #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
+        
+        ctx_assignments = random_argmax(context_logprobs, dim=1)
+        #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
+        #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
+        #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
+        #raise ValueError("...")
+        
+        assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
 
-                if THRESHOLD > 0 and ACTIVATE_THRESHOLD_VS:
-                    vs_logprobs = th.log_softmax(th.clamp(self.vs_logits_network(hidden_state), min=-THRESHOLD, max=THRESHOLD), dim=1)
-                else:
-                    vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state), dim=1)
-    
-                if __debug__:
-                    
-                    #print(vs_logprobs.shape)
-                    assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
-    
-                vs_assignments = random_argmax(vs_logprobs, dim=1)
-                
-                assert vs_assignments.shape == (len(hidden_state),)
-                
-                return CtxData(
-                    context_features=hidden_state,
-                    vs_assignments=vs_assignments,
-                    ctx_assignments=ctx_assignments,
-                    context_logprobs=context_logprobs,
-                    vs_logprobs=vs_logprobs,
-                    vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
-                    ctx_possibilities=self.context_logits.centroids,
-                    extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs)
-                )
+        if THRESHOLD > 0 and ACTIVATE_THRESHOLD_VS:
+            vs_logprobs = th.log_softmax(th.clamp(self.vs_logits_network(hidden_state), min=-THRESHOLD, max=THRESHOLD), dim=1)
+        else:
+            vs_logprobs = th.log_softmax(self.vs_logits_network(hidden_state), dim=1)
+
+        assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
+
+        vs_assignments = random_argmax(vs_logprobs, dim=1)
+        
+        assert vs_assignments.shape == (len(hidden_state),)
+        
+        return CtxData(
+            context_features=hidden_state,
+            vs_assignments=vs_assignments,
+            ctx_assignments=ctx_assignments,
+            context_logprobs=context_logprobs,
+            vs_logprobs=vs_logprobs,
+            vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
+            ctx_possibilities=self.context_logits.centroids,
+            extra_for_custom_loss=(gmm_logprob, per_component_logprob, component_logprobs)
+        )
 
 
 class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
@@ -883,7 +871,9 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                  direct_context_to_vs_relation: bool = False, 
                  smooth_evaluation: bool=True, 
                  args_for_ctx_probabilities: dict = {},  **kwargs) -> None:
-        
+        self._last_vae_cluster_loss = 0.0
+        self._last_vae_reconstruction_loss = 0.0
+        self._last_vae_kl_loss = 0.0
         self.direct_context_to_vs_relation = direct_context_to_vs_relation
         self.detach_context_selection_for_value_system_selection = detach_context_selection_for_value_system_selection
         
@@ -927,7 +917,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             ret = (self.vs_selection_to_logit_vsweights_matrix,)
         else:
             ret = (self.vs_selection_to_logit_vsweights_matrix, self.context_to_vs_logits,)
-        print("VALUE SYSTEM PARAMS", [p.shape for p in ret])
+        #print("VALUE SYSTEM PARAMS", [p.shape for p in ret])
         return ret
     def context_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
@@ -982,7 +972,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             )
         else:
             vs_logprobs = context_logprobs_for_vs_selection
-        print("VS LOGPROBS INPUT", vs_logprobs[0:5])
+        #print("VS LOGPROBS INPUT", vs_logprobs[0:5])
         #input()
         assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
 
@@ -1052,7 +1042,7 @@ class VaDECtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
         dataset = BaseDataset(data=data,labels=assignments) #th.utils.data.Dataset(data, )
         self.context_logits: CustomVaDE
         dataloader = th.utils.data.DataLoader(dataset, batch_size=args.per_device_train_batch_size, shuffle=True)
-        print("Initializing through GMM")
+        #print("Initializing through GMM")
         self.context_logits.initialize_gmm(dataloader)
         self.context_logits.gmm_kmeans_cluster(dataloader)
         self.train()
@@ -1078,7 +1068,7 @@ class VaDECtxDependentAlignmentLayer(VaeAndKMeansCtxDependentAlignmentLayer):
                                     mu=mu, logvar=logvar)
                 """
                 z, outputs, out_logvar, mu, logvar = output["z"], output["recon_x"], output["x_logvar"], output["mu"], output["logvar"]    
-                print(z.grad_fn, outputs.grad_fn, out_logvar.grad_fn, mu.grad_fn, logvar.grad_fn)
+                #print(z.grad_fn, outputs.grad_fn, out_logvar.grad_fn, mu.grad_fn, logvar.grad_fn)
                 loss, _, _, _ = self.context_logits.loss_function(outputs, out_logvar, inputs, z, mu, logvar)
                 
                 loss.backward()
@@ -1653,9 +1643,7 @@ def mo_loss_function(logits, labels, others=None, ideal_logits=None, config: MOR
         print("ENTROPY_LOSS", entropy_loss) 
         #input()
     vs_loss = vs_loss + vs_selection_loss*vs_selection_coefficient +ctx_loss*ctx_coefficient + entropy_loss*entropy_coefficient   
-    print("VS SELECTION LOSS", vs_selection_loss, 
-          "CTX LOSS", ctx_loss, 
-          "ENTROPY LOSS", entropy_loss)
+    
     #vs_loss = vs_selection_loss + 0.0000001*vs_loss
     if th.is_grad_enabled() and training_variables is not None:
         with th.no_grad():
@@ -2035,7 +2023,6 @@ class MORMForClassification(PreTrainedModel):
         optimizer = th.optim.AdamW((*self.grounding_parameters(),), lr=self.config.lr_grounding, weight_decay=args.weight_decay)
         #lr 0.0002 very good and weight_decay 0.0001
         
-        loss = 1000.0
         print("Grounding pretrain")
         accuracy = self.grounding_initialization(args=args,
                                                  total_dataset_size=total_dataset_size,
@@ -2049,6 +2036,7 @@ class MORMForClassification(PreTrainedModel):
                                                  eval_missing_mask_gr=eval_missing_mask_gr, 
                                                  eval_dataset_score_gr_valid=eval_dataset_score_gr_valid, 
                                                  epoch_multiplier=0.1)
+        print("Final grounding accuracy: ", accuracy)
         print("Initializing Value System Selection Network to Random Probabilities")
         optimizer = th.optim.AdamW((*self.value_system_layer.context_logits.parameters(),), lr=self.config.lr_context, weight_decay=args.weight_decay)
         valid_grounding_features1 = dataset_grounding_features1[~missing_mask]
@@ -2450,8 +2438,8 @@ class MORMForClassification(PreTrainedModel):
         context_to_vs = context_to_vs.cpu().numpy()
         vs_weights = vs_weights.cpu().numpy()
 
-        print("VSWEIGHT", vs_weights[0:5])
-        print(vs_weights[5:10])
+        #print("VSWEIGHT", vs_weights[0:5])
+        #print(vs_weights[5:10])
         
 
         figure, axes = plt.subplots(1, 4, figsize=(32, 8))

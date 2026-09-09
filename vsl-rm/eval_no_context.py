@@ -82,6 +82,16 @@ class EvalArguments(ScriptArguments):
         metadata={"help": "If True, only extract and save value system weights without running full evaluation."},
     )
 
+    tsne_perplexity: int = field(
+        default=-1,
+        metadata={"help": "Perplexity parameter for t-SNE visualization of value system weights."},
+    )
+
+    tsne_seed: int = field(
+        default=-1,
+        metadata={"help": "Random seed for t-SNE visualization of value system weights."},
+    )
+
 
 def _is_valid_checkpoint_dir(path: Path) -> bool:
     return (
@@ -91,10 +101,30 @@ def _is_valid_checkpoint_dir(path: Path) -> bool:
     )
 
 
-def _normalize_candidate_checkpoint_path(path: str, output_path: str) -> Path:
+def _auto_solve_candidate_checkpoint_path(path: str, output_path: str) -> Path:
+
     path_obj = Path(path).expanduser()
     if not path_obj.is_absolute():
         path_obj = Path(output_path) / path_obj
+    if not _is_valid_checkpoint_dir(path_obj):
+        print(f"Warning: The selected checkpoint path does not contain expected files (config.json): {path_obj}")
+        # Attempt to resolve nested checkpoint path
+        sub_dirs = [item for item in os.listdir(path_obj) if os.path.isdir(os.path.join(path_obj, item))]
+        if len(sub_dirs) == 1:
+            path_obj = path_obj / sub_dirs[0]
+        else:
+            # Try to select last_checkpoint if in the subdirs
+            if "last_checkpoint" in sub_dirs:
+                path_obj = path_obj / "last_checkpoint"
+            else:
+                # get the latest checkpoint, format checkpoint-number (highest is the latest)
+                checkpoint_dirs = [d for d in sub_dirs if d.startswith("checkpoint-")]
+                if checkpoint_dirs:
+                    latest_checkpoint = max(checkpoint_dirs, key=lambda d: int(d.split("-")[1]))
+                    path_obj = path_obj / latest_checkpoint
+                
+
+        
     return path_obj.resolve()
 
 
@@ -207,7 +237,14 @@ def _build_eval_arguments(script_args: EvalArguments, checkpoint_path: Path, res
     arg_values["checkpoint_path"] = str(checkpoint_path)
     arg_values["results_dir"] = str(results_dir)
     return EvalArguments(**arg_values)
-
+def removed_model_path_segment(path: str) -> str:
+        path_obj = Path(path).resolve()
+        models_root = Path(MODEL_DIR).resolve()
+        try:
+            return path_obj.relative_to(models_root).as_posix()
+        except ValueError:
+            return path_obj.name
+        
 def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
     parser1 = HfArgumentParser(EvalArguments)
     args = parser1.parse_args_into_dataclasses()[0]
@@ -215,13 +252,7 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
     script_args, preset = argument_parser(args)
     script_args: EvalArguments
 
-    def removed_model_path_segment(path: str) -> str:
-        path_obj = Path(path).resolve()
-        models_root = Path(MODEL_DIR).resolve()
-        try:
-            return path_obj.relative_to(models_root).as_posix()
-        except ValueError:
-            return path_obj.name
+    
 
     raw_checkpoint_paths: List[str] = []
     checkpoint_paths_value = getattr(script_args, "checkpoint_paths", None)
@@ -237,37 +268,37 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
     resolved_checkpoint_paths: List[Path] = []
 
     for raw_checkpoint_path in raw_checkpoint_paths:
-        candidate_path = _normalize_candidate_checkpoint_path(raw_checkpoint_path, str(output_path))
+        candidate_path = _auto_solve_candidate_checkpoint_path(raw_checkpoint_path, str(output_path))
         if _is_valid_checkpoint_dir(candidate_path):
             resolved_checkpoint_paths.append(candidate_path)
             continue
-
-        print(f"Checkpoint path does not exist: {candidate_path}")
-        prompted_path = _prompt_for_checkpoint_path(
-            output_path,
-            allow_finish=len(resolved_checkpoint_paths) > 0,
-            dataset=script_args.dataset,
-            already_selected=resolved_checkpoint_paths,
-        )
-        if prompted_path is not None:
-            resolved_checkpoint_paths.append(prompted_path)
-
-    while True:
-        prompted_path = _prompt_for_checkpoint_path(
-            output_path,
-            allow_finish=len(resolved_checkpoint_paths) > 0,
-            dataset=script_args.dataset,
-            already_selected=resolved_checkpoint_paths,
-        )
-        if prompted_path is None:
-            if len(resolved_checkpoint_paths) == 0:
-                print(f"There are no valid checkpoint paths available for model type: {script_args.model_name}. Revise the folders in {output_path}")
-                exit(0)
-            assert len(resolved_checkpoint_paths) > 0, "At least one valid checkpoint path must be provided."
-            break
         else:
-            resolved_checkpoint_paths.append(prompted_path)
-        print("trying... 3")
+            print(f"Checkpoint path does not exist: {candidate_path}")
+            prompted_path = _prompt_for_checkpoint_path(
+                output_path,
+                allow_finish=len(resolved_checkpoint_paths) > 0,
+                dataset=script_args.dataset,
+                already_selected=resolved_checkpoint_paths,
+            )
+            if prompted_path is not None:
+                resolved_checkpoint_paths.append(prompted_path)
+    if len(resolved_checkpoint_paths) == 0:
+        while True:
+            prompted_path = _prompt_for_checkpoint_path(
+                output_path,
+                allow_finish=len(resolved_checkpoint_paths) > 0,
+                dataset=script_args.dataset,
+                already_selected=resolved_checkpoint_paths,
+            )
+            if prompted_path is None:
+                if len(resolved_checkpoint_paths) == 0:
+                    print(f"There are no valid checkpoint paths available for model type: {script_args.model_name}. Revise the folders in {output_path}")
+                    exit(0)
+                assert len(resolved_checkpoint_paths) > 0, "At least one valid checkpoint path must be provided."
+                break
+            else:
+                resolved_checkpoint_paths.append(prompted_path)
+        
     print("RESOLVED.")
     results_root = Path(script_args.results_dir) if script_args.results_dir is not None and os.path.exists(script_args.results_dir) else Path(RESULTS_DIR)
 
@@ -455,14 +486,14 @@ def main() -> None:
             print("FEATURES:", script_args.use_extracted_features)
 
             sentence_model = None
-            if script_args.use_sentence_transformer:
+            if model.config.use_sentence_transformer:
                 sentence_model = SentenceTransformer(f'sentence-transformers/{model.config.sentence_transformer_name}')
                 
             dataset = PairwisePreferenceDataset(
                             train_path,
                             tokenizer,
                             from_disk=True,
-                            use_sentence_transformer=script_args.use_sentence_transformer,
+                            use_sentence_transformer=model.config.use_sentence_transformer,
                             sentence_model=sentence_model,
                             normalize_context=script_args.normalize_context_features,
                             extra_keep_keys=extra_keep_keys,
@@ -594,7 +625,10 @@ def main() -> None:
         if isinstance(trainer, CtxMORewardTrainer):
             trainer: CtxMORewardTrainer
 
-            output = trainer.evaluate_contexts(train_set_contexts=dataset.get_all_contexts_embeddings(), validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir)
+            output = trainer.evaluate_contexts(train_set_contexts=dataset.get_all_contexts_embeddings(), validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir, 
+                                               reducer_kwargs={
+                                                   "tsne_perplexity": script_args.tsne_perplexity, 
+                                                   "tsne_seed": script_args.tsne_seed} )
             save_context_evaluation(output, output_dir=script_args.results_dir)
 
             

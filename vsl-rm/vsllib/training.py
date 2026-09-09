@@ -10,7 +10,7 @@ from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
 from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, rewards_and_labels_to_logits_and_targets
-from vsllib.model_utils import MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth
+from vsllib.model_utils import CustomVAE, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
 
 
@@ -1188,7 +1188,7 @@ class CtxMORewardTrainer(MORewardTrainer):
             subset = self.train_dataset
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
     
-    def evaluate_contexts(self, train_set_contexts: np.array, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "") -> None:
+    def evaluate_contexts(self, train_set_contexts: np.array, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}) -> None:
         kmeans = kmeans_clustering(train_set_contexts, K= self.model.config.max_contexts)
         # --- Dimensionality reduction ---
 
@@ -1203,7 +1203,8 @@ class CtxMORewardTrainer(MORewardTrainer):
         if needs_reduction:
             reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)
             reducer_pca.fit(X)
-            reduction_tsne, reducer_tsne, best_perp, best_metric = auto_tsne(X_EVAL_TEST)
+            reduction_tsne, reducer_tsne, best_perp, best_metric = auto_tsne(X_EVAL_TEST, **reducer_kwargs)
+
         
             
         output = {"validation": None if validation_output is None else {}, "test": None if test_output is None else {}}
@@ -1215,6 +1216,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 #dataset_ctxs = np.array(val_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
                 features = context_data
                 kmeans_labels = kmeans.predict(features)
+                kmeans_clusters = kmeans.cluster_centers_
                 labels_1 = kmeans_labels
                 labels_2 = ctxdata.vs_assignments
 
@@ -1222,7 +1224,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 label2_name = f"Value Systems {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"
                 labels = [labels_1, labels_2]
                 labels_set_names = [label1_name, label2_name]
-                if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER]:
+                if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS]:
                      labels_3 = ctxdata.ctx_assignments
                      label3_name = f"Contexts {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"              
                      labels.append(labels_3)
@@ -1231,7 +1233,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 
                 plot_alternative_clusterings(reducer_pca.transform(features) if needs_reduction else features, labels, 
                                              dim_reduction="pca", 
-                                             reduction_kwargs={"svd_solver": "full", "whiten": True},
+                                             #reduction_kwargs={"svd_solver": "full", "whiten": True},
                                              label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
 
                 if needs_reduction:
@@ -1250,8 +1252,14 @@ class CtxMORewardTrainer(MORewardTrainer):
                                              labels,
                                              dim_reduction=f"tsne_p{best_perp}", label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
 
-                 
+                # If using VAE_KMEANS, now plot the latent space, the centroids, and the vs assignments. 
+                if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS]:
+                    vae_or_ae = self.model.value_system_layer.context_logits
+                    vae_or_ae: CustomVAE
+                    vae_or_ae.plot_embedding_space(sample_data=features, sample_labels=ctxdata.ctx_assignments, original_space_centroids=th.as_tensor(kmeans_clusters, dtype=features.dtype, device=features.device), save_path=os.path.join(output_dir, f"{otype}_VAE_latent_space"), low_res=False)
                 output[otype] = stats.to_dict()
+
+                self.model.plot_matrices(t=0, filename=os.path.join(output_dir, f"{otype}_context_matrices"), low_res=False, ctx_data=ctxdata)
         return output
 
     

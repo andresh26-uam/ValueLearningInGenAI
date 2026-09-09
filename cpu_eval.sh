@@ -1,18 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# DEFAULTS
 MODEL_ALIAS="smol"
 DATASET_ALIAS="pku"
 #TASK_TYPE="nlp_based"
 TASK_TYPE="feature_based" # This one for apollo
-if [[ $MODEL_ALIAS == "armo" ]]; then
-    TASK_TYPE="nlp_based"
-fi
-if [[ $MODEL_ALIAS == "smol" ]]; then
-    TASK_TYPE="nlp_based"
-fi
-EXTRA_ARGS=("--task_type=$TASK_TYPE")
-EXTRA_ARGS+=("--use_cpu")
+
+
+EXTRA_ARGS=("--use_cpu")
 
 resolve_model_name() {
     case "$1" in
@@ -63,11 +59,24 @@ EOF
     esac
     shift
 done
-
+if [[ $MODEL_ALIAS == "armo" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+if [[ $MODEL_ALIAS == "smol" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+if [[ $MODEL_ALIAS == "llama" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+if [[ $DATASET_ALIAS == "pku" ]]; then
+    TASK_TYPE="nlp_based"
+fi
+EXTRA_ARGS+=("--task_type=$TASK_TYPE")
 MODEL_NAME="$(resolve_model_name "$MODEL_ALIAS")"
 
-echo "Evaluating model: $MODEL_NAME on dataset: $DATASET_ALIAS with extra args: ${EXTRA_ARGS[*]}"
+echo "Evaluating model: $MODEL_NAME on dataset: $DATASET_ALIAS" 
+echo "with extra args: ${EXTRA_ARGS[*]}"
 
 bash sbatch_script.sh  vsl-rm/eval_no_context.py \
     --model_name="$MODEL_NAME" \
-    --dataset="$DATASET_ALIAS" --use_cpu "${EXTRA_ARGS[@]}" --debug
+    --dataset="$DATASET_ALIAS" --use_cpu "${EXTRA_ARGS[@]}" --debug 

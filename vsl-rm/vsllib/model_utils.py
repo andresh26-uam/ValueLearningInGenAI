@@ -41,7 +41,7 @@ THRESHOLD = 50.0
 ACTIVATE_THRESHOLD_VS =  False
 THRESHOLD_CTX = 50.0
 TEMP_GMM = 1.0
-ACTIVATE_TEMPERATURE_GMM = False
+ACTIVATE_THRESHOLD_GMM = False
 
 def gaussian_prob(
             z: th.Tensor,
@@ -354,7 +354,7 @@ def calculate_training_constants(args: TrainingArguments, total_dataset_size: in
         
             
         iterations_total = int((total_dataset_size//args.train_batch_size)*args.num_train_epochs*epoch_multiplier)
-        print("Iterations total:", iterations_total)
+        #print("Iterations total:", iterations_total)
             
                 
         pbar = tqdm.tqdm(range(iterations_total))
@@ -557,11 +557,14 @@ class FastGaussianMixture(nn.Module):
         )
         logits = th.log_softmax(self.logits, dim=0)
 
+        
         thresholded_gmm_logit = th.clamp((component_log_prob
                             +
                             logits)/TEMP_GMM, min=-THRESHOLD_CTX, max=THRESHOLD_CTX)
         if not self.activate_threshold:
-            logit_sumexp = component_log_prob + logits
+            logit_sumexp = (component_log_prob
+                            +
+                            logits)/TEMP_GMM
         else:
             logit_sumexp = thresholded_gmm_logit
         return th.logsumexp(
@@ -1150,6 +1153,7 @@ class CustomVAE(VAE):
                              original_space_centroids: th.Tensor=None, 
                              save_path: str = None, 
                              output: ModelOutput = None, 
+                             low_res=True,
                              sampling_reps = 5):
         
         with th.no_grad(): 
@@ -1220,7 +1224,10 @@ class CustomVAE(VAE):
                 plt.ylabel('UMAP 2')
             plt.legend()
             if save_path is not None:
-                plt.savefig(save_path + ".png", dpi=50)
+                if low_res:
+                    plt.savefig(save_path + ".png", dpi=50)
+                else:
+                    plt.savefig(save_path + ".pdf")
             plt.show() 
 
     def init_centroids(self, device, dtype) -> th.Tensor:
@@ -1338,11 +1345,7 @@ class CustomVAE(VAE):
             
                     # TODO: ?? self.update_temperature()
             assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
-                    
-                    #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
-                    #print("IT GOES:", context_logprobs)
-                    #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
-                    
+            
             with th.no_grad():
                 ctx_assignments = random_argmax(context_logprobs, dim=1)
                     
@@ -1463,10 +1466,12 @@ class CustomVAE(VAE):
         eval_dataset = BaseDataset(eval_data, eval_data)
         
         if eval_ground_truth is not None:
-                        eval_ground_truth_centroids = th.stack([
-                            eval_data[eval_ground_truth == i].mean(dim=0) if th.any(eval_ground_truth == i) else th.mean(eval_data, dim=0)
-                            for i in range(self.num_contexts)
-                        ])
+            eval_ground_truth = th.as_tensor(eval_ground_truth, device=eval_data.device, dtype=th.long)
+            eval_ground_truth_centroids = th.stack([
+                eval_data[eval_ground_truth == i].mean(dim=0) if th.any(eval_ground_truth == i) else th.mean(eval_data, dim=0)
+                for i in range(self.num_contexts)
+            ])
+        eval_assignments = th.as_tensor(eval_assignments, device=eval_data.device, dtype=th.long)
         eval_centroids = th.stack([
             eval_data[eval_assignments == i].mean(dim=0) if th.any(eval_assignments == i) else th.mean(eval_data, dim=0)
                         
@@ -1496,8 +1501,6 @@ class CustomVAE(VAE):
                 eval_data = eval_dataset
             )
 
-            #print("C After", self.latent_centroids[0])
-            
             encoded_data = self.encoder(data).embedding.detach()
             self.latent_centroids.copy_(th.tensor(
                 kmeans_clustering(encoded_data.cpu().numpy(), self.num_contexts).cluster_centers_, 
@@ -1525,7 +1528,7 @@ class CustomVAE(VAE):
         self.plot_embedding_space(
             sample_data=eval_data,
             sample_labels=None,
-            original_space_centroids=eval_ground_truth_centroids,
+            original_space_centroids=eval_ground_truth_centroids if eval_ground_truth is not None else eval_centroids,
             #original_space_centroids=th.as_tensor(kmeans_model.cluster_centers_, device=device, dtype=th.float32),
             save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}_shouldbe_final",
         )
@@ -1770,12 +1773,12 @@ class CustomVaDE(CustomVAE):
     
     
     def forward_original(self, x) -> ModelOutput:
-            print("FORWARD ORIGINAL")
-            print("X", x[0:5], x.shape)
+            #print("FORWARD ORIGINAL")
+            #print("X", x[0:5], x.shape)
             h = self.encoder(x)
             
             mu, logvar = h.embedding, h.log_covariance
-            print("H", mu.grad_fn, logvar.grad_fn)
+            #print("H", mu.grad_fn, logvar.grad_fn)
             z = self.reparameterize(mu, logvar)
             
             out_dec = self.decoder(z)

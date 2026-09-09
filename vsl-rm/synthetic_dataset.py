@@ -15,7 +15,7 @@ from huggingface_hub import hf_hub_download
 from datasets import Dataset as HFDataset
 from sklearn.decomposition import PCA
 #from sklearn.manifold import TSNE
-from tsnecuda import TSNE
+from sklearn.manifold import TSNE
 from tqdm import tqdm
 from vsllib.defines import SYNTH_PROCESSED_PATH, NO_RATING_MASK, OASST_PROCESSED_PATH, OASSTFL_PROCESSED_PATH, SYNTH_PROCESSED_PATH, VALUES_OASST, VALUES_OASST_ORIG, DOWNLOADED_DATASETS_PATH, DatasetNames, save_processeddataset
 
@@ -246,46 +246,6 @@ def sample_example_profiles(profile_variety, n_values=3) -> List:
 
     return profile_set
 
-def process_dataset() -> tuple[pd.DataFrame, Path]:
-    random.seed(42)
-    """Download the ready trees file and load it into a pandas dataframe."""
-    value_systems = sample_example_profiles(VALUE_SYSTEM_VARIETY, n_values=N_VALUES)
-    features = np.random.randn(N_CONTEXTS*EXAMPLES_PER_CONTEXT, N_FEATURES, dtype=np.float32)
-    context_features = np.random.randn(N_CONTEXTS, CONTEXT_FEATURES, dtype=np.float32)
-
-    to_norm_features = ["hh_inc_abs", ("tt1", "tt2"), ("hw1", "hw2"), ("ch1", "ch2"), ("tc1", "tc2")]
-    for f in to_norm_features:
-        if isinstance(f, tuple):
-            f1, f2 = f[0], f[1]
-            all_data = np.concatenate([full_data[f1].to_numpy(), full_data[f2].to_numpy()])
-            for f_ in (f1,f2):
-                full_data[f_ + "_NORM"] = ((full_data[f_])-np.mean(all_data))/np.std(all_data)
-        else:
-            full_data[f + "_NORM"] = ((full_data[f])-full_data[f].mean())/full_data[f].std()
-    
-    to_scale_features = ["hh_inc_abs", ("tt1", "tt2"), ("hw1", "hw2"), ("ch1", "ch2"), ("tc1", "tc2")]
-    for f in to_scale_features:
-        if isinstance(f, tuple):
-            f1, f2 = f[0], f[1]
-            all_data = np.concatenate([full_data[f1].to_numpy(), full_data[f2].to_numpy()])
-            for f_ in (f1,f2):
-                full_data[f_ + "_SCALED"] = ((full_data[f_]))/max(all_data)
-        else:
-            full_data[f + "_SCALED"] = full_data[f]/max(full_data[f].to_numpy())
-
-    print(full_data.head(5))
-
-    rows = []
-    for i, line in tqdm(full_data.iterrows()):
-        rows.append(process_line(line,i))
-        
-    pdrows = pd.DataFrame(rows)
-    pdrows = pdrows.reset_index(drop=True)
-     # ID,choice,tt1,tc1,hw1,ch1,tt2,tc2,hw2,ch2,hh_inc_abs,car_availability,commute,shopping,business,leisure
-    # shuffle the rows to avoid any ordering bias:
-    pdrows_sh = pdrows.sample(frac=1, random_state=42).reset_index(drop=True)
-    assert len(pdrows_sh) == len(pdrows), f"Shuffled rows length {len(pdrows_sh)} does not match original rows length {len(pdrows)}"
-    return pdrows_sh
 
 if __name__ == "__main__":
     seed = 45376
@@ -294,6 +254,7 @@ if __name__ == "__main__":
     value_systems = sample_example_profiles(VALUE_SYSTEM_VARIETY, n_values=N_VALUES)
     # make gmm
     K = len(value_systems)
+    print(K)
     dim = CONTEXT_FEATURES
     pi = th.softmax(th.randn(K), dim=-1)
     mu = th.rand(K, dim).uniform_(-10, 10)
@@ -365,8 +326,8 @@ if __name__ == "__main__":
     test_indices = np.random.choice(pd_dataset.index.difference(val_indices), len(val_indices)).tolist()
 
     hf_dataset = HFDataset.from_pandas(pd_dataset)
-
-    save_processeddataset(SYNTH_PROCESSED_PATH, hf_dataset, val_indices, test_indices)
+    SYNTH_PROCESSED_PATH_2 = SYNTH_PROCESSED_PATH.parent / "synthetic_dataset_processed_v2"
+    save_processeddataset(SYNTH_PROCESSED_PATH_2, hf_dataset, val_indices, test_indices)
     total_rows = len(hf_dataset)
     print(f"Total merged rows: {total_rows}")
     print(f"Validation rows: {len(val_indices)}")
