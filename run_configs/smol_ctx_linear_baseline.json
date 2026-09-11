@@ -30,13 +30,13 @@
     "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
     "layer_activation": "none",
-    "layer_normalization": "none",
+    "layer_normalization": "BatchNorm",
     "final_layer_activation": "none",
 
     "vs_hidden_size": 1024,
     "vs_num_hidden_layers": 3,
     "vs_layer_dropout": 0.0,
-    "vs_layer_activation": "SiLU",
+    "vs_layer_activation": "LeakyReLU",
     
 
     "use_validation_for_tendencies": false,
@@ -57,7 +57,7 @@
     "use_ideal_grounding_model": false,
     "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
-    "weight_decay": 0.005,
+    "weight_decay": 0.001,
     "bf16": false,
     "num_train_epochs": 1000,
     "gradient_checkpointing": false,

@@ -9,6 +9,24 @@ from torch import nn
 
 from datasets import Dataset
 
+"""
+AVAILABLE METHODS FREE GROQ: openai/gpt-oss-20b
+canopylabs/orpheus-arabic-saudi
+whisper-large-v3-turbo
+groq/compound
+canopylabs/orpheus-v1-english
+whisper-large-v3
+openai/gpt-oss-safeguard-20b
+groq/compound-mini
+meta-llama/llama-prompt-guard-2-22m
+allam-2-7b
+meta-llama/llama-prompt-guard-2-86m
+openai/gpt-oss-120b
+qwen/qwen3.8-27b
+qwen/qwen3.6-27b """
+
+LLM_MODEL_EVAL = "openai/gpt-oss-120b"
+
 NO_RATING_MASK = float('-inf')
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -236,6 +254,7 @@ class MOLossFunctions(enum.Enum):
 class ContextImplementations(enum.Enum):
     NO_CONTEXT = "NO_CONTEXT"
     DIRECT_VS = "DIRECT_VS"
+    KMEANS_THEN_VS = "KMEANS_THEN_VS"
     BASIC = "BASIC"
     BASIC_HARSH = "BASIC_HARSH"
     GMM = "GMM"

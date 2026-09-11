@@ -48,6 +48,7 @@ from vsllib.defines import (
     get_validation_indices,
 )
 from vsllib.reward_models import (
+    CtxData,
     MORMForClassification,
     MORMForSequenceClassification,
     mo_compute_loss_func,
@@ -55,7 +56,7 @@ from vsllib.reward_models import (
 from vsllib.model_utils import (
     MORMForClassificationConfig,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, seed_everything, write_metrics_csv
+from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, kmeans_clustering, obtain_tokenizer, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -600,6 +601,9 @@ def main() -> None:
             data_collator=dc,
             **trainer_extra_kwargs
         )
+        if ContextImplementations(model.config.context_implementation) == ContextImplementations.KMEANS_THEN_VS:
+            model.value_system_layer.kmeans_predictor = kmeans_clustering(dataset_ctxs=dataset.get_all_contexts_embeddings(split="train"), K=model.config.max_contexts)
+
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
         
         metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
@@ -613,7 +617,9 @@ def main() -> None:
         print(f"CSV saved to: {Path(script_args.results_dir).resolve()}")
         print("Starting eval evaluation...")
         metrics_eval = trainer.evaluate(eval_dataset=dataset.eval_dataset, metric_key_prefix="eval")
+        
         if "others" in metrics_eval.keys():
+            
             others_eval = metrics_eval.pop("others")
         flat_metrics_eval = flatten_metrics_for_csv(metrics_eval)
         write_metrics_csv(flat_metrics_eval, script_args.results_dir, name="eval_metrics.csv")
@@ -625,7 +631,10 @@ def main() -> None:
         if isinstance(trainer, CtxMORewardTrainer):
             trainer: CtxMORewardTrainer
 
-            output = trainer.evaluate_contexts(train_set_contexts=dataset.get_all_contexts_embeddings(), validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir, 
+            output = trainer.evaluate_contexts(eval_dataset=dataset.eval_dataset,
+                                                test_dataset=dataset.test_dataset,
+                                                train_dataset=dataset.train_dataset,
+                                                validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir, 
                                                reducer_kwargs={
                                                    "tsne_perplexity": script_args.tsne_perplexity, 
                                                    "tsne_seed": script_args.tsne_seed} )

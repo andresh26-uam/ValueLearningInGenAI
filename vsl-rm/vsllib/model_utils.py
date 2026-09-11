@@ -793,6 +793,8 @@ class MORMForClassificationConfig(PretrainedConfig):
         vae_layer_activation: str = "ReLU",
         vae_reconstruction_loss: str = "mse",
         vae_n_hidden_layers: int = 4,
+        clustering_algorithm: Literal['kmeans', 'gmm',
+                                     'spectral', 'agglomerative', 'kNLPmeans'] = "kmeans",
         vae_hidden_dim: int = 512,
         vae_final_encoder_layer_activation: str = "none",
         vae_resampling_iterations: int = 10,
@@ -886,6 +888,8 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vs_layer_dropout = vs_layer_dropout
         self.vs_layer_intermediate_activation = vs_layer_intermediate_activation
         self.vs_weight_initialization = vs_weight_initialization
+
+        self.clustering_algorithm = clustering_algorithm
 
         self.normalize_context = normalize_context
         self.smooth_evaluation=smooth_evaluation
@@ -1150,6 +1154,7 @@ class CustomVAE(VAE):
     # THIS IS INSPIRED BY: https://arxiv.org/pdf/1806.10069
     def plot_embedding_space(self, sample_data: th.Tensor, 
                              sample_labels: th.Tensor=None, 
+                             sample_label_names: dict=None,
                              original_space_centroids: th.Tensor=None, 
                              save_path: str = None, 
                              output: ModelOutput = None, 
@@ -1208,7 +1213,19 @@ class CustomVAE(VAE):
                     sample_labels_expanded[i*sampling_reps:(i+1)*sampling_reps] = sample_labels[i]
                     
                 sample_labels = sample_labels_expanded
-            plt.scatter(z_umap[:, 0], z_umap[:, 1], c=sample_labels, cmap='viridis', s=5, alpha=0.8)
+            if sample_label_names:
+                sample_labels_array = np.asarray(sample_labels)
+                for label in np.unique(sample_labels_array):
+                    mask = sample_labels_array == label
+                    plt.scatter(
+                        z_umap[mask, 0],
+                        z_umap[mask, 1],
+                        s=5,
+                        alpha=0.8,
+                        label=sample_label_names.get(label, f"Cluster {label}"),
+                    )
+            else:
+                plt.scatter(z_umap[:, 0], z_umap[:, 1], c=sample_labels, cmap='viridis', s=5, alpha=0.8)
             # plot centroids the same color as the closest points in the latent space:
             plt.scatter(z_umap_centroids[:, 0], z_umap_centroids[:, 1], c='red', marker='X', s=100, label='Centroids')
             if original_space_centroids is not None:
@@ -1437,7 +1454,7 @@ class CustomVAE(VAE):
             
             self.latent_centroids.requires_grad_(True)
 
-    def initialize_from_data(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor,  eval_data: th.Tensor, eval_assignments: th.Tensor, eval_ground_truth: th.Tensor=None, args: TrainingArguments=None, config: MORMForClassificationConfig=None, **kwargs):
+    def initialize_from_data(self, centroids: th.Tensor, data: th.Tensor, assignments: th.Tensor,  eval_data: th.Tensor, eval_assignments: th.Tensor, eval_ground_truth: th.Tensor=None, args: TrainingArguments=None, config: MORMForClassificationConfig=None, epoch_multiplier=1.0, **kwargs):
         # This code pretrains the VAE/AE model on the data and initializes the latent centroids with Kmeans
         self.requires_grad_(True)
         
@@ -1450,7 +1467,7 @@ class CustomVAE(VAE):
             learning_rate=config.lr_context,
             per_device_train_batch_size=args.per_device_train_batch_size,
             per_device_eval_batch_size=args.per_device_train_batch_size,
-            num_epochs=max(int(0.01*args.num_train_epochs), 1), # Change this to train the model a bit more
+            num_epochs=max(int(epoch_multiplier*args.num_train_epochs), 1), # Change this to train the model a bit more
             optimizer_cls="AdamW",
             optimizer_params={"weight_decay": args.weight_decay}
         )

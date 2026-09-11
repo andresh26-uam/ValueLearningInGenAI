@@ -1,6 +1,11 @@
 from typing import Any, Dict, NamedTuple, Optional
+import json
+from importlib import import_module
 import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
 from sklearn.decomposition import PCA
+from wordcloud import WordCloud
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
@@ -9,6 +14,8 @@ from transformers.trainer import *
 from transformers.optimization import get_scheduler
 
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
+from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
+from kNLPmeans.summaryCentroids import build_sentence_corpus, embed_sentences, summarize_textrank
 from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, rewards_and_labels_to_logits_and_targets
 from vsllib.model_utils import CustomVAE, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
@@ -17,7 +24,7 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
 from vsllib.utils import auto_tsne, kmeans_clustering, plot_alternative_clusterings, to_float
-from vsllib.defines import ContextImplementations
+from vsllib.defines import LLM_MODEL_EVAL, ContextImplementations
 
 
 from datasets import Dataset
@@ -893,10 +900,18 @@ class MORewardTrainer(Trainer):
                     all_labels.add(labels)
 
             for extra_key in self.keys_to_save_in_prediction:
-                evalue =others.get(extra_key, None)
+                evalue = others.get(extra_key, None)
                 if evalue is not None:
                     others[extra_key] = self.gather_function(evalue)
+                    if extra_key == "ctx":
+                        """evalue = others.pop(extra_key, {})
+                        others[extra_key] = dict()
+                        for evaluek,evaluev in evalue.items():
+                            others[extra_key][evaluek] = self.gather_function(evaluev)"""
+                        print("WHAT 2 OTHERS", others[extra_key]["context_features"].shape)
+                    
                     if not self.args.batch_eval_metrics or description == "Prediction":
+                        
                         all_others[extra_key].add(others[extra_key])
             """if labels_ql is not None:
                 labels_ql = self.gather_function(labels_ql)
@@ -951,7 +966,6 @@ class MORewardTrainer(Trainer):
         # print("LIBRARY ALL LOSSES", all_losses.shape)
         all_preds = all_preds.get_arrays()
         all_labels = all_labels.get_arrays()
-
         for extra_key in self.keys_to_save_in_prediction:
             all_others[extra_key] = all_others[extra_key].get_arrays()
         #all_labels_ql = all_labels_ql.get_arrays()
@@ -1150,6 +1164,9 @@ class CtxMORewardTrainer(MORewardTrainer):
             ignore_keys=ignore_keys,
             metric_key_prefix=metric_key_prefix,
         )
+        #print(output.num_samples, output.others["ctx"]["context_features"].shape)
+        #print("..." ,[output.others[k].shape for k in self.keys_to_save_in_prediction if k != "ctx"])
+        #exit()
 
         total_batch_size = self.args.eval_batch_size * self.args.world_size
         if f"{metric_key_prefix}_model_preparation_time" in output.metrics:
@@ -1187,26 +1204,166 @@ class CtxMORewardTrainer(MORewardTrainer):
         else:
             subset = self.train_dataset
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
+
+    @staticmethod
+    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None) -> None:
+        texts = np.asarray(texts, dtype=object)
+        if isinstance(labels, th.Tensor):
+            labels = labels.detach().cpu().numpy()
+        labels = np.asarray(labels)
+        if len(texts) != len(labels):
+            raise ValueError(
+                f"texts and {clustering_name} labels must have the same length, "
+                f"got {len(texts)} and {len(labels)}"
+            )
+        if vs_predicted is not None:
+            if isinstance(vs_predicted, th.Tensor):
+                vs_predicted = vs_predicted.detach().cpu().numpy()
+            vs_predicted = np.asarray(vs_predicted)
+            if len(vs_predicted) != len(labels):
+                raise ValueError(
+                    f"vs_predicted and {clustering_name} labels must have the same length, "
+                    f"got {len(vs_predicted)} and {len(labels)}"
+                )
+
+        panels = []
+        for cluster_label in np.unique(labels):
+            cluster_mask = labels == cluster_label
+            cluster_texts = [str(text) for text in texts[cluster_mask] if str(text).strip()]
+            if cluster_texts:
+                average_vs = None
+                if vs_predicted is not None:
+                    average_vs = np.mean(vs_predicted[cluster_mask], axis=0)
+                panels.append((cluster_label, len(cluster_texts), " ".join(cluster_texts), average_vs))
+
+        panels.sort(key=lambda panel: -panel[1])
+
+        if not panels:
+            return
+
+        columns = min(4, len(panels))
+        rows = (len(panels) + columns - 1) // columns
+        figure, axes = plt.subplots(
+            rows,
+            columns,
+            figsize=(5 * columns, 4.5 * rows),
+            squeeze=False,
+        )
+        for axis, (cluster_label, cluster_size, text, average_vs) in zip(axes.flat, panels):
+            word_cloud = WordCloud(
+                width=800,
+                height=600,
+                background_color="white",
+                random_state=0,
+            ).generate(text)
+            axis.imshow(word_cloud, interpolation="bilinear")
+            axis.axis("off")
+            category = label_names.get(cluster_label, f"Cluster {cluster_label}") if label_names else f"Cluster {cluster_label}"
+            title = f"{clustering_name}, {category} (n={cluster_size})"
+            if average_vs is not None:
+                average_vs_text = ", ".join(f"{weight:.3f}" for weight in np.ravel(average_vs))
+                title += f"\nmean predicted VS: [{average_vs_text}]"
+            axis.set_title(title)
+        for axis in axes.flat[len(panels):]:
+            axis.axis("off")
+        figure.tight_layout(pad=1)
+        figure.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close(figure)
+
+
+    @staticmethod
+    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: str = LLM_MODEL_EVAL, max_documents: int = 20):
+        """Generate category and description metadata for each text clustering."""
+        try:
+            ChatGroq = import_module("langchain_groq").ChatGroq
+        except ImportError as error:
+            raise ImportError("Install langchain-groq to generate cluster descriptions with Groq.") from error
+
+        texts = np.asarray(texts, dtype=object)
+        groq_api_key = os.environ.get("GROQ_API_KEY")
+        if not groq_api_key:
+            raise RuntimeError("GROQ_API_KEY is not set; cannot generate cluster descriptions.")
+        llm = ChatGroq(model=model_name, temperature=0, api_key=groq_api_key)
+        rows = []
+        category_maps = []
+        for labels, clustering_name in zip(label_sets, clustering_names):
+            labels = np.asarray(labels)
+            category_map = {}
+            for cluster_label in sorted(np.unique(labels), key=lambda label: (-np.sum(labels == label), str(label))):
+                cluster_texts = [str(text) for text in texts[labels == cluster_label] if str(text).strip()]
+                sample = cluster_texts[:max_documents]
+                if not sample:
+                    category = f"Cluster {cluster_label}"
+                    description = "No text was available for this cluster."
+                else:
+                    prompt = (
+                        "Analyze the following documents from one cluster.\n"
+                        "Return exactly two lines:\n"
+                        "CATEGORY: a concise descriptive label of at most six words\n"
+                        "DESCRIPTION: one concise sentence describing the common themes\n\n"
+                        + "\n---\n".join(sample)
+                    )
+                    response = llm.invoke(prompt)
+                    response_text = getattr(response, "content", str(response)).strip()
+                    parsed = {}
+                    for line in response_text.splitlines():
+                        key, separator, value = line.partition(":")
+                        if separator:
+                            parsed[key.strip().upper()] = value.strip()
+                    category = parsed.get("CATEGORY", response_text.splitlines()[0]).strip()
+                    description = parsed.get("DESCRIPTION", response_text).strip()
+
+                category_map[cluster_label] = category
+                textrank_summary = CtxMORewardTrainer.summarize_cluster_with_textrank(cluster_texts)
+                                
+                rows.append({
+                    "clustering": clustering_name,
+                    "cluster": cluster_label,
+                    "category": category,
+                    "description": description,
+                    "summary_textrank": textrank_summary,
+                    "size": len(cluster_texts),
+                })
+            category_maps.append(category_map)
+
+        descriptions = pd.DataFrame(rows)
+        os.makedirs(output_dir, exist_ok=True)
+        descriptions.to_csv(os.path.join(output_dir, "cluster_descriptions.csv"), index=False)
+        descriptions.to_json(os.path.join(output_dir, "cluster_descriptions.json"), orient="records", indent=2)
+        return descriptions, category_maps
+
+    @staticmethod
+    def summarize_cluster_with_textrank(cluster_texts, top_k: int = 5, emb_type: str = "all-MiniLM-L6-v2") -> str:
+        if not cluster_texts:
+            return "No text was available for this cluster."
+
+        sentences, _ = build_sentence_corpus(cluster_texts)
+        if not sentences:
+            return "No sentence was available for this cluster."
+
+        sentence_embeddings, _ = embed_sentences(sentences, emb_type=emb_type)
+        summary = summarize_textrank(sentences, sentence_embeddings, top_k=top_k)
+        return " ".join(sentence for sentence, _ in summary)
     
-    def evaluate_contexts(self, train_set_contexts: np.array, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}) -> None:
+    def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}) -> None:
+        
+        train_set_contexts = np.array(train_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
+        train_set_contexts = self.remove_duplicates(train_set_contexts)
+
         kmeans = kmeans_clustering(train_set_contexts, K= self.model.config.max_contexts)
         # --- Dimensionality reduction ---
 
-        validation_data = CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features
-        test_data = CtxData.from_dict(test_output["ctx"], to_tensor=True).context_features
-        
-
+        assert CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features.shape[0] == len(eval_dataset)*2, f"Validation dataset size {len(eval_dataset)} does not match validation output size {CtxData.from_dict(validation_output['ctx'], to_tensor=True).context_features.shape[0]}"
+        validation_data = self.remove_duplicates(CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features)
+        test_data = self.remove_duplicates(CtxData.from_dict(test_output["ctx"], to_tensor=True).context_features)
+    
         X = train_set_contexts
         X_EVAL_TEST = np.concatenate([train_set_contexts, validation_data, test_data], axis=0)
         assert X_EVAL_TEST.shape == (len(train_set_contexts) + len(validation_data) + len(test_data), train_set_contexts.shape[1])
         needs_reduction = X.shape[1] > 2
-        if needs_reduction:
-            reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)
-            reducer_pca.fit(X)
-            reduction_tsne, reducer_tsne, best_perp, best_metric = auto_tsne(X_EVAL_TEST, **reducer_kwargs)
-
         
-            
+        
+        reducer_pca = None
         output = {"validation": None if validation_output is None else {}, "test": None if test_output is None else {}}
         for otype, output_per_type, context_data in zip(("validation", "test",), (validation_output, test_output), (validation_data, test_data)):
             if output_per_type is not None:
@@ -1214,27 +1371,80 @@ class CtxMORewardTrainer(MORewardTrainer):
                 stats = self.model.value_system_layer.calculate_statistics(ctxdata)
                 
                 #dataset_ctxs = np.array(val_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
-                features = context_data
+                original_context = np.array(eval_dataset.select_columns(["context"])["context"] if otype == "validation" else test_dataset.select_columns(["context"])["context"])
+                
+                features = self.remove_duplicates(context_data)
+                assert len(features) == len(original_context), f"Got: {len(features)} and {len(original_context)}"
+
+            
+                print("OG", original_context[0:5], original_context.shape)
+                print("FEAT", features[0:5], features.shape)
+                
                 kmeans_labels = kmeans.predict(features)
                 kmeans_clusters = kmeans.cluster_centers_
                 labels_1 = kmeans_labels
-                labels_2 = ctxdata.vs_assignments
+                labels_2 = self.remove_duplicates(ctxdata.vs_assignments)
 
                 label1_name = f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}"
                 label2_name = f"Value Systems {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"
                 labels = [labels_1, labels_2]
                 labels_set_names = [label1_name, label2_name]
                 if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VAE_AND_KMEANS]:
-                     labels_3 = ctxdata.ctx_assignments
+                     labels_3 = self.remove_duplicates(ctxdata.ctx_assignments)
                      label3_name = f"Contexts {self.model.config.context_implementation} K={len(np.unique(np.array(labels_2)))}/{self.model.config.max_value_systems}"              
                      labels.append(labels_3)
                      labels_set_names.append(label3_name)
 
+                category_maps = [{label: f"Cluster {label}" for label in np.unique(labels_1)},
+                                 {label: f"Cluster {label}" for label in np.unique(labels_2)}]
+                if len(labels) == 3:
+                    category_maps.append({label: f"Cluster {label}" for label in np.unique(labels_3)})
+                if isinstance(original_context[0], str):
+                    try:
+                        descriptions, category_maps = self.describe_clusters_with_llm(
+                            original_context,
+                            labels,
+                            ["kmeans", "value_system", "context"][:len(labels)],
+                            os.path.join(output_dir, f"{otype}_cluster_descriptions"),
+                        )
+                    except (ImportError, RuntimeError) as error:
+                        print(f"Could not generate LLM cluster descriptions: {error}")
+                    self.plot_cluster_word_clouds(
+                        texts=original_context,
+                        labels=labels_1,
+                        output_path=os.path.join(output_dir, f"{otype}_kmeans_word_clouds.png"),
+                        clustering_name="kmeans",
+                        vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
+                        label_names=category_maps[0],
+                    )
+                    self.plot_cluster_word_clouds(
+                        texts=original_context,
+                        labels=labels_2,
+                        output_path=os.path.join(output_dir, f"{otype}_value_system_word_clouds.png"),
+                        clustering_name="value_system",
+                        vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
+                        label_names=category_maps[1],
+                    )
+                    if len(labels) == 3:
+                        self.plot_cluster_word_clouds(
+                            texts=original_context,
+                            labels=labels_3,
+                            output_path=os.path.join(output_dir, f"{otype}_context_word_clouds.png"),
+                            clustering_name="context",
+                            vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
+                            label_names=category_maps[2],
+                        )
+                if needs_reduction and reducer_pca is None:
+                    reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)
+                    reducer_pca.fit(X)
+                    reduction_tsne, reducer_tsne, best_perp, best_metric = auto_tsne(X_EVAL_TEST, **reducer_kwargs)
                 
                 plot_alternative_clusterings(reducer_pca.transform(features) if needs_reduction else features, labels, 
                                              dim_reduction="pca", 
                                              #reduction_kwargs={"svd_solver": "full", "whiten": True},
-                                             label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
+                                             label_set_names=labels_set_names,
+                                             label_display_sets=category_maps,
+                                             output_path=os.path.join(output_dir, f"{otype}_PCA_context_clustering.pdf"))
 
                 if needs_reduction:
                     eval_reduction = reduction_tsne[len(train_set_contexts):len(train_set_contexts)+len(validation_data)]
@@ -1250,17 +1460,28 @@ class CtxMORewardTrainer(MORewardTrainer):
                     
                 plot_alternative_clusterings(tsne_features if needs_reduction else features, 
                                              labels,
-                                             dim_reduction=f"tsne_p{best_perp}", label_set_names=labels_set_names, output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
+                                             dim_reduction=f"tsne_p{best_perp}",
+                                             label_set_names=labels_set_names,
+                                             label_display_sets=category_maps,
+                                             output_path=os.path.join(output_dir, f"{otype}_TSNE_context_clustering.pdf"))
 
                 # If using VAE_KMEANS, now plot the latent space, the centroids, and the vs assignments. 
                 if ContextImplementations(self.model.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS]:
                     vae_or_ae = self.model.value_system_layer.context_logits
                     vae_or_ae: CustomVAE
-                    vae_or_ae.plot_embedding_space(sample_data=features, sample_labels=ctxdata.ctx_assignments, original_space_centroids=th.as_tensor(kmeans_clusters, dtype=features.dtype, device=features.device), save_path=os.path.join(output_dir, f"{otype}_VAE_latent_space"), low_res=False)
+                    vae_or_ae.plot_embedding_space(sample_data=features, sample_labels=self.remove_duplicates(ctxdata.ctx_assignments), sample_label_names=category_maps[2], original_space_centroids=th.as_tensor(kmeans_clusters, dtype=features.dtype, device=features.device), save_path=os.path.join(output_dir, f"{otype}_VAE_latent_space"), low_res=False)
                 output[otype] = stats.to_dict()
 
                 self.model.plot_matrices(t=0, filename=os.path.join(output_dir, f"{otype}_context_matrices"), low_res=False, ctx_data=ctxdata)
         return output
+
+    def remove_duplicates(self, train_set_contexts):
+        if np.allclose(train_set_contexts[::2], train_set_contexts[1::2]) and len(train_set_contexts) % 2 == 0:
+            bsz = train_set_contexts.size(0)                
+            jidx = th.arange(0, bsz, 2, device=train_set_contexts.device)
+            kidx = jidx + 1
+            train_set_contexts = train_set_contexts[jidx]
+        return train_set_contexts
 
     
     

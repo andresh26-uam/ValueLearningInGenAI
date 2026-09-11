@@ -75,6 +75,9 @@ ordered-set==4.1.0
 packaging==26.0
 pandas==2.3.3
 pillow==12.2.0
+wordcloud==1.9.4
+langchain-openai==0.3.35
+langchain-groq==0.3.8
 platformdirs==4.9.4
 propcache==0.4.1
 protobuf==6.33.6

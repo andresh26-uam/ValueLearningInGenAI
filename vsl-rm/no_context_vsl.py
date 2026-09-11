@@ -159,7 +159,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
 
             use_sentence_transformer=script_args.use_sentence_transformer,
             sentence_transformer_name=script_args.sentence_transformer_name,
-
+            clustering_algorithm=script_args.clustering_algorithm,
             vae_latent_dim=script_args.vae_latent_dim,
             vae_pretrain_epochs=script_args.vae_pretrain_epochs,
             vae_type=script_args.vae_type,
@@ -267,7 +267,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.KMEANS_THEN_VS, ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(

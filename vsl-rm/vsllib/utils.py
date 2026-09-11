@@ -397,6 +397,10 @@ class ScriptArguments:
             metadata={"help": "The name of the sentence transformer model to use for context embedding. This is only used if use_sentence_transformer is True."},
         )
 
+    clustering_algorithm: Optional[str] = field(
+        default="kmeans",
+        metadata={"help": "The clustering algorithm to use for context selection. Options: kmeans, gmm, spectral, agglomerative, kNLPmeans."},
+    )
         
     save_postprocessed_and_feature_extracted_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
@@ -763,8 +767,11 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
     if ContextImplementations(script_args.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER,]:
         if script_args.normalize_context_features is False:
             print(f"Warning: Context implementation {script_args.context_implementation} requires normalized context features, but normalize_context_features is set to False. Make sure the dataset has normalized context features/embeddings!")
+    if ContextImplementations(script_args.context_implementation) in [ContextImplementations.KMEANS_THEN_VS,]:
+            script_args.do_initialization = True
     try:
         script_args.training_initialization_data_size = int(script_args.training_initialization_data_size)
+    
     except ValueError:
         if script_args.training_initialization_data_size != "all":
             raise ValueError(
@@ -898,6 +905,7 @@ def plot_alternative_clusterings(
     features,
     label_sets,
     label_set_names=None,
+    label_display_sets=None,
     dim_reduction="pca",
     output_path="clusterings.pdf"
 ):
@@ -909,6 +917,11 @@ def plot_alternative_clusterings(
 
     if len(label_set_names) != len(label_sets):
         raise ValueError("label_set_names must match label_sets length")
+
+    if label_display_sets is None:
+        label_display_sets = [{} for _ in label_sets]
+    if len(label_display_sets) != len(label_sets):
+        raise ValueError("label_display_sets must match label_sets length")
 
     title_suffix = f"({dim_reduction.upper()})" if dim_reduction is not None else ""
 
@@ -945,7 +958,7 @@ def plot_alternative_clusterings(
                     X[mask, 0],
                     X[mask, 1],
                     color=cmap(j),
-                    label=f"Cluster {lab} (n={mask.sum()})",
+                    label=f"{label_display_sets[i].get(lab, f'Cluster {lab}')} (n={mask.sum()})",
                     s=30,
                 )
 

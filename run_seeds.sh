@@ -5,7 +5,7 @@ GPUS="L40S:1"
 CPU=True
 
 DEBUG=()
-SAVE=(--do_save=True)
+SAVE=(--do_save=True --do_checkpointing=False)
 REPORT_TO=wandb
 
 if [[ "$CPU" == "True" ]]; then
@@ -30,7 +30,7 @@ CONFIG=run_configs/features_synth_ctx.json
 
 #CONFIG=run_configs/features_apollo_ctx.json
 DATASET=pku
-CONFIG=run_configs/smol_ctx_linear.json
+CONFIG=run_configs/smol_ctx_linear_baseline.json
 
 CTX_IMPLEMENTATION=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["context_implementation"])' "$CONFIG")
 DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_initialization", False))' "$CONFIG")
@@ -74,6 +74,11 @@ else
   exit 1
 fi
 
+if [[ "$CTX_IMPLEMENTATION" == "KMEANS_THEN_VS" ]]; then
+        training_initialization_data_size="all"
+else
+    training_initialization_data_size=10000
+fi
 
 echo $CONFIG
 if [[ "$CONFIG" == "run_configs/features_apollo_ctx.json" ]]; then
@@ -97,13 +102,13 @@ elif [[ "$CONFIG" == "run_configs/smol_rlhf_linear.json" ]]; then
 elif [[ "$CONFIG" == "run_configs/smol_linear.json" ]]; then
   NAME=SmolVSLRMv2
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear.json" ]]; then
-  NAME=SmolCtxVSLRMv17
+  NAME=SmolCtxVSLRMv17_AEDET
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_ae_kmeans.json" ]]; then
   NAME=SmolCtxVSLRMv17_AE
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_gmm_and_classifier.json" ]]; then
   NAME=SmolCtxVSLRMv17_GMMC
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline.json" ]]; then
-  NAME=SmolCtxVSLRMv11
+  NAME=SmolCtxVSLRMv17_DIRECTVS
 elif [[ "$CONFIG" == "run_configs/smol_ctx_linear_baseline_smooth.json" ]]; then
   NAME=SmolCtxVSLRMv17_BS
 else
@@ -119,7 +124,7 @@ echo "Run name: ${GPUS}${NAME}"
 
 
 
-for seed in 43 44 45 46; do
+for seed in 42; do
     args=(
         "$SCRIPT_PYTHON"
         "$CONFIG"

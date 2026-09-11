@@ -287,9 +287,14 @@ class BasePairwisePreferenceDataset():
         return self.data
         
 
-    def get_all_contexts_embeddings(self, recalculate=False) -> List[th.Tensor]:
-        
-        return np.asarray(self.data[self.context_feature_name])
+    def get_all_contexts_embeddings(self, recalculate=False, split=None) -> List[th.Tensor]:
+        if split == "train":
+            dataset = self.train_dataset
+        elif split == "eval":
+            dataset = self.eval_dataset
+        else:
+            dataset = self.data
+        return np.asarray(dataset[self.context_feature_name])
         
     
     def __len__(self):
