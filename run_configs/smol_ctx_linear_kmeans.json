@@ -42,7 +42,7 @@
     "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
     "layer_activation": "none",
-    "layer_normalization": "none",
+    "layer_normalization": "BatchNorm",
     "final_layer_activation": "none",
     
 

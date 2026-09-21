@@ -43,7 +43,7 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 from vsllib.model_utils import ACTIVATE_THRESHOLD_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
 from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
-from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, transform_weights_to_tuple
+from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, sample_example_value_systems_exact, transform_weights_to_tuple
 
 logger = logging.get_logger(__name__)
 
@@ -439,11 +439,19 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
     def get_statistics(self):
         return {}
 
-    
+    @property
+    def _is_initialized(self) -> bool:
+        return bool(self._is_initialized_flag.item())
+
+    @_is_initialized.setter
+    def _is_initialized(self, value: bool) -> None:
+        self._is_initialized_flag.fill_(bool(value))
+
     def initialize(self,  centroids: th.Tensor, data: th.Tensor, assignments: np.ndarray, eval_data: th.Tensor= None, eval_assignments: np.ndarray=None, eval_ground_truth=None, kmeans_object: KMeans = None, original_texts: np.ndarray=None, config: MORMForClassificationConfig=None, **kwargs) -> None:
         if self.clustering_algorithm =="kmeans":
             assert kmeans_object is not None
             self.kmeans_predictor = kmeans_object
+            fitted_centers = kmeans_object.cluster_centers_
         else:
             if "kNLPmeans" in self.clustering_algorithm:
                 assert original_texts is not None
@@ -457,29 +465,35 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
                 nlp_type = self.clustering_algorithm.split("_")[1]
                 assert nlp_type in ["centroid", "lsa", "textrank"]
                 cluster_assignments, summaries, summary_embeddings, cluster_centroids, summaries_evolution, centroids_evolution = kNLPmeans(
-                    text_data=text_data, nlp=nlp_type,text_features=text_features, 
+                    text_data=text_data, nlp=nlp_type,text_features=text_features,
                                                   num_clusters=self.num_contexts, max_llm_iter=5,
                                                   top_k=5, max_iter=100, emb_type=config.sentence_transformer_name)
                 self._cluster_assignments = cluster_assignments
                 self._summaries= summaries
                 self._cluster_centroids= cluster_centroids
+                fitted_centers = cluster_centroids
+        # `kmeans_predictor` (a fitted sklearn estimator) and the kNLPmeans-only python
+        # attributes above are plain python objects, so they are NOT part of this
+        # nn.Module's state_dict and do not survive save_pretrained/from_pretrained.
+        # The centers themselves are the only part of this fitted state that's needed at
+        # inference time (see `clustering_predict`), so mirror them into a persistent
+        # buffer that *does* round-trip through the standard checkpointing machinery.
+        with th.no_grad():
+            self._cluster_centers.copy_(
+                th.as_tensor(np.asarray(fitted_centers), device=self._cluster_centers.device, dtype=self._cluster_centers.dtype)
+            )
         self._is_initialized = True
-        
+
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
             return (self.vs_selection_to_logit_vsweights_matrix,)
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return []
 
     @property
-    def cluster_centroids(self) -> th.Tensor:
-        if self.clustering_algorithm == "kmeans":
-            if self.kmeans_predictor is None:
-                return None
-            return self.kmeans_predictor.cluster_centers_
-        elif "kNLPmeans" in self.clustering_algorithm:
-            return self._cluster_centroids
-        else:
-            raise ValueError(f"Unknown clustering algorithm: {self.clustering_algorithm}")
+    def cluster_centroids(self) -> Optional[np.ndarray]:
+        if not self._is_initialized:
+            return None
+        return self._cluster_centers.detach().cpu().numpy()
     
     def get_value_systems(self) -> Tuple[Iterable[Any], Iterable[th.Tensor]]:
         value_systems = th.nn.functional.softmax(self.vs_selection_to_logit_vsweights_matrix, dim=1)
@@ -493,13 +507,13 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
     def clustering_predict(self, features):
         if not self._is_initialized:
             return np.zeros((features.shape[0],), dtype=np.int64)
-        if self.clustering_algorithm == "kmeans":
-            cluster_assignments = self.kmeans_predictor.predict(features)
-        elif "kNLPmeans" in self.clustering_algorithm:
-            distances = ((features[:, None, :] - self._cluster_centroids[None, :, :]) ** 2).sum(axis=2)
-            cluster_assignments = np.argmin(distances, axis=1)
-        else:
-            raise ValueError(f"Unknown clustering algorithm: {self.clustering_algorithm}")
+        # Nearest-centroid assignment against the persisted `_cluster_centers` buffer.
+        # This is exactly what `KMeans.predict()` does internally, and it means
+        # prediction no longer depends on the live (unpersisted) `kmeans_predictor`
+        # estimator, so it keeps working after a save_pretrained/from_pretrained cycle.
+        centers = self.cluster_centroids
+        distances = ((features[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+        cluster_assignments = np.argmin(distances, axis=1)
         return cluster_assignments
 
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
@@ -550,7 +564,13 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
             
             self.clustering_algorithm = clustering_algorithm
             assert self.num_contexts == self.num_value_systems, "KMeansThenVsCtxDependentAlignmentLayer requires num_contexts == num_value_systems"
-            self._is_initialized = False
+            # Registered as buffers (rather than plain python attributes) so that the
+            # fitted state produced by `initialize()` is included in this module's
+            # state_dict and round-trips through the standard save_pretrained/
+            # from_pretrained machinery, instead of being reset every time the model is
+            # reconstructed from its config.
+            self.register_buffer("_is_initialized_flag", th.tensor(False))
+            self.register_buffer("_cluster_centers", th.zeros(num_contexts, self.input_shape, device=device, dtype=dtype))
             self.kmeans_predictor=None #KMeans(n_clusters=num_contexts, init="k-means++", n_init=20, max_iter=10000)
             self.weight_initialization = weight_initialization
             #print("CTX PARAMS", [p.dtype for p in self.context_logprobabilities.parameters()])
@@ -781,8 +801,8 @@ class BasicHarshCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
     
-    def __init__(self, *args: Any, input_shape: int | Tuple, num_values: int, ctx_hidden_sizes: List[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, **kwargs: Any) -> None:
-        AbstractCtxDependentAlignmentLayer.__init__(self, *args, input_shape=input_shape, num_contexts=1, num_value_systems=1, num_values=num_values, **kwargs)
+    def __init__(self, *args: Any, input_shape: int | Tuple, num_values: int, num_value_systems: int, ctx_hidden_sizes: List[int], ctx_intermediate_activation: str = "ReLU", dropout=0, device: th.device = None, dtype: th.dtype = None, **kwargs: Any) -> None:
+        AbstractCtxDependentAlignmentLayer.__init__(self, *args, input_shape=input_shape, num_contexts=num_value_systems, num_value_systems=num_value_systems, num_values=num_values, **kwargs)
         self.log_vs_prediction = nn.Sequential(*construct_layers(
             input_dim=self.input_shape,
             hidden_sizes=ctx_hidden_sizes,
@@ -795,46 +815,61 @@ class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             dtype=dtype,
         ))
         self.softmaxctx = th.nn.Softmax(dim=1)
-        self._last_vs_pred = th.ones((self.num_values,))/self.num_values
+
+        fixed_value_systems = np.asarray(
+            sample_example_value_systems_exact(profile_variety=num_value_systems, n_values=num_values),
+            dtype=np.float32,
+        )
+        self.register_buffer(
+            "fixed_value_systems",
+            th.as_tensor(fixed_value_systems, dtype=dtype or th.float32, device=device),
+        )
 
     def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         return context_data.vs_predicted, context_data
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         return self.value_system_from_context_train(hidden_state, context_data)
-    def calculate_statistics(self, context_data: CtxData, statistics_before: CtxStatistics= None, update_factor=0.9) -> CtxStatistics:
-        return CtxStatistics(
-            centroids = th.stack([th.mean(context_data.context_features, dim=0),]),
-            deviations= th.stack([th.std(context_data.context_features, dim=0),]),
-            frequencies=th.tensor([1.0,]),
-            vs_frequencies=th.tensor([1.0,]),
-            update_factor=update_factor,
-        )
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         return self.log_vs_prediction.parameters()
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return []
-    
+
     def get_value_systems(self) -> Tuple[Iterable[Any], Iterable[th.Tensor]]:
-        return [0,], [self._last_vs_pred,]
+        return list(range(self.num_value_systems)), [row for row in self.fixed_value_systems.detach().cpu().numpy()]
 
     def get_context_ids_mapped_to_value_system(self, index_context: int) -> Iterable[Any]:
-        return [0,]
-    
+        return [index_context,]
+
 
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
         log_vs_pred = self.log_vs_prediction(hidden_state)
         vs_pred = self.softmaxctx(log_vs_pred)
-        
-        self._last_vs_pred = th.mean(vs_pred, dim=0)
-        assert self._last_vs_pred.shape == (self.num_values,)
+
         #th.testing.assert_close(th.sum(vs_pred, dim=1), th.ones((len(vs_pred)), dtype=th.float32))
+        with th.no_grad():
+            distances = th.cdist(vs_pred.detach(), self.fixed_value_systems)
+            assignments = th.argmin(distances, dim=1)
+
+        # DirectVS has no real per-context/per-vs categorical distribution (value systems are
+        # predicted directly as continuous weights), so these fields are unused placeholders --
+        # only kept because CtxData requires them. They must NOT scale with batch size (unlike a
+        # previous `th.eye(batch_size)` filler): a per-sample width that varies from batch to
+        # batch breaks the shared eval loop's pad_across_processes/gather_for_metrics machinery
+        # (used for every context implementation's "ctx" dict), corrupting the row count of the
+        # gathered "ctx" fields relative to other same-length prediction tensors.
+        uniform_log_prob = th.full(
+            (hidden_state.shape[0], self.num_value_systems),
+            fill_value=-th.log(th.tensor(float(self.num_value_systems))),
+            device=hidden_state.device, dtype=hidden_state.dtype, requires_grad=False,
+        ).detach()
+
         return CtxData(
             context_features=hidden_state,
             vs_predicted=vs_pred,
-            vs_assignments=th.range(0, hidden_state.shape[0], requires_grad=False, device=hidden_state.device, dtype=th.long),
-            ctx_assignments=th.range(0, hidden_state.shape[0],  requires_grad=False, device=hidden_state.device, dtype=th.long),
-            context_logprobs=th.eye(hidden_state.shape[0], device=hidden_state.device, dtype=hidden_state.dtype, requires_grad=False).detach()*100.0+0.5,
-            vs_logprobs=th.eye(hidden_state.shape[0], device=hidden_state.device, dtype=hidden_state.dtype, requires_grad=False).detach()*100.0+0.5,
+            vs_assignments=assignments,
+            ctx_assignments=assignments,
+            context_logprobs=uniform_log_prob,
+            vs_logprobs=uniform_log_prob,
             log_vs_possibilities=log_vs_pred,
             ctx_possibilities=log_vs_pred
 
@@ -1303,11 +1338,15 @@ def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=T
         labels_2 = None
 
     logits_new, target_probs, others = reward_pairs_and_scores_to_logits_and_targets(
-        rewards_1, rewards_2, labels_1, labels_2, 
-        reward_diff_threshold=config.reward_diff_threshold, 
-        assume_qualitative_labels=config.assume_qualitative_labels, 
-        check_undefined_label=config.check_undefined_label, 
+        rewards_1, rewards_2, labels_1, labels_2,
+        reward_diff_threshold=config.reward_diff_threshold,
+        assume_qualitative_labels=config.assume_qualitative_labels,
+        check_undefined_label=config.check_undefined_label,
         assume_torch=assume_torch)
+    # Per-value grounding predictions (reward heads' raw output) for every sample in the
+    # batch, in original (interleaved chosen/rejected) order -- i.e. aligned with `others_logits`
+    # (e.g. the "ctx" dict's per-sample cluster assignments), not with the pairwise `logits_new`.
+    others["groundings"] = logits_[..., :-1]
     if others_logits is not None:
         others.update(others_logits)
     return logits_new, target_probs, others
@@ -2607,7 +2646,11 @@ class MORMForClassification(PreTrainedModel):
             
     def plot_matrices(self, t: int, filename, low_res=False, save_npy=True, ctx_data: CtxData = None):
         self.value_system_layer: BasicGmmCtxDependentAlignmentLayer
-        if isinstance(self.value_system_layer, GmmAndClassifierCtxDependentAlignmentLayer) or self.value_system_layer.direct_context_to_vs_relation:
+        if hasattr(self.value_system_layer, "context_to_vs_logits") and self.value_system_layer.context_to_vs_logits is not None:
+            context_to_vs = th.softmax(
+                                        self.value_system_layer.context_to_vs_logits, dim=1
+                                    ).detach()
+        else:
             assert ctx_data is not None, "ctx_data must be provided for GmmAndClassifierCtxDependentAlignmentLayer"
             log_probs1 = ctx_data.vs_logprobs
             log_probs2 = ctx_data.context_logprobs
@@ -2626,11 +2669,7 @@ class MORMForClassification(PreTrainedModel):
             #log_marginal2 = th.logsumexp(log_joint, dim=0, keepdim=True)
 
             context_to_vs = th.exp((log_joint - log_marginal1)).detach()
-        else:
-
-            context_to_vs = th.softmax(
-                            self.value_system_layer.context_to_vs_logits, dim=1
-                        ).detach()
+            
         vs_weights = th.softmax(
                         self.value_system_layer.vs_selection_to_logit_vsweights_matrix, dim=1
                     ).detach()
@@ -2811,9 +2850,10 @@ class MORMForClassification(PreTrainedModel):
                 #weight_initialization = config.vs_weight_initialization,
                 ctx_hidden_sizes=config.vs_layer_hidden_sizes,
                 ctx_intermediate_activation=config.vs_layer_intermediate_activation,
-                num_values=config.num_values, 
-                dropout=config.vs_layer_dropout, 
-                device=device, 
+                num_values=config.num_values,
+                num_value_systems=config.max_value_systems,
+                dropout=config.vs_layer_dropout,
+                device=device,
                 dtype=dtype)
         else:
             raise NotImplementedError(f"This type of context implementation is not implemented yet. {config.context_implementation}")

@@ -30,6 +30,7 @@ from pythae.pipelines.training import TrainingPipeline
 
 
 from umap import UMAP
+from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import pairwise_distances_argmin_min
@@ -1185,7 +1186,8 @@ class CustomVAE(VAE):
                 z = encoder_output.embedding.cpu().numpy()
             # Fit a tsne model to the latent space and the centroids
             
-            umap = UMAP(n_components=2, random_state=42)
+            #umap = UMAP(n_components=2, random_state=42)
+            umap = PCA(n_components=2)
             z_with_centroids = np.concatenate([z, self.latent_centroids.detach().cpu().numpy()], axis=0)
             if self.latent_dim > 2:
                 z_umap_with_centroids = umap.fit_transform(z_with_centroids)

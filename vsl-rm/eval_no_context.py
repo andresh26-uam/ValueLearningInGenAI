@@ -56,7 +56,7 @@ from vsllib.reward_models import (
 from vsllib.model_utils import (
     MORMForClassificationConfig,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, kmeans_clustering, obtain_tokenizer, seed_everything, write_metrics_csv
+from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -414,17 +414,17 @@ def main() -> None:
 
         if script_args.task_type == "nlp_based":
                     model = MORMForSequenceClassification.from_pretrained(
-                            str(script_args.checkpoint_path),
+                            str(script_args.checkpoint_path)
                         ).to(device="cpu" if script_args.use_cpu else "cuda:0")
 
         else:
             model = MORMForClassification.from_pretrained(
                     str(script_args.checkpoint_path),
                 ).to(device="cpu" if script_args.use_cpu else "cuda:0")
-        model: MORMForClassification     
-        
+        model: MORMForClassification
+
         torch_dtype = model.config.dtype
-        print("VS", model.value_system_layer.get_value_system_info())
+        #print("VS", model.value_system_layer.get_value_system_info())
         print("MODEL DETAILS:", model, "MODEL DTYPE:", model.dtype, "MODEL CONFIG DTYPE:", torch_dtype)
         print("MODEL DTYPE", list(model.value_system_layer.parameters())[0].dtype)
         print("FIRST PARAMETER:", next(model.parameters()), next(model.parameters()).dtype)
@@ -601,8 +601,6 @@ def main() -> None:
             data_collator=dc,
             **trainer_extra_kwargs
         )
-        if ContextImplementations(model.config.context_implementation) == ContextImplementations.KMEANS_THEN_VS:
-            model.value_system_layer.kmeans_predictor = kmeans_clustering(dataset_ctxs=dataset.get_all_contexts_embeddings(split="train"), K=model.config.max_contexts)
 
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
         
@@ -630,6 +628,59 @@ def main() -> None:
 
         if isinstance(trainer, CtxMORewardTrainer):
             trainer: CtxMORewardTrainer
+
+            value_names = list(dataset.value_keys)
+            for split_name, others_split, split_dataset in (
+                ("eval", others_eval, dataset.eval_dataset),
+                ("test", others_test, dataset.test_dataset),
+            ):
+                groundings = others_split.get("groundings")
+                ctx_dict = others_split.get("ctx")
+                cluster_labels = ctx_dict.get("vs_assignments") if isinstance(ctx_dict, dict) else None
+                if groundings is not None:
+                    groundings = np.asarray(groundings)
+                    cluster_labels = np.asarray(cluster_labels) if cluster_labels is not None else None
+                    if cluster_labels is not None and len(cluster_labels) != len(groundings):
+                        raise RuntimeError(
+                            f"Evaluation output alignment failure for {split_name}: "
+                            f"groundings has {len(groundings)} rows but cluster labels "
+                            f"has {len(cluster_labels)} rows."
+                        )
+                    plot_groundings_violin(
+                        groundings,
+                        value_names,
+                        os.path.join(script_args.results_dir, f"{split_name}_groundings_violin.png"),
+                        cluster_labels=cluster_labels,
+                        title=f"Grounding predictions ({split_name} set)"
+                        + (" by value-system cluster" if cluster_labels is not None else ""),
+                    )
+                    plot_grounding_differences_violin(
+                        groundings,
+                        value_names,
+                        os.path.join(script_args.results_dir, f"{split_name}_groundings_diff_violin.png"),
+                        cluster_labels=cluster_labels,
+                        title=f"Grounding differences, chosen - rejected ({split_name} set)"
+                        + (" by value-system cluster" if cluster_labels is not None else ""),
+                    )
+
+                    # Ground-truth dataset labels (as opposed to the model's predicted
+                    # groundings above), one (chosen, rejected) pair per row, aligned to
+                    # the same pairs/clusters via the split dataset's original order.
+                    n_pairs = len(groundings) // 2
+                    pair_cluster_labels = cluster_labels[0:2 * n_pairs:2] if cluster_labels is not None else None
+                    value_labels = np.asarray(split_dataset["labels"])[:, :, :-1]  # (N_pairs, 2, num_values)
+                    n_label_pairs = min(n_pairs, len(value_labels))
+                    if pair_cluster_labels is not None:
+                        pair_cluster_labels = pair_cluster_labels[:n_label_pairs]
+                    plot_label_differences_violin(
+                        value_labels[:n_label_pairs, 0, :],
+                        value_labels[:n_label_pairs, 1, :],
+                        value_names,
+                        os.path.join(script_args.results_dir, f"{split_name}_label_diff_violin.png"),
+                        cluster_labels=pair_cluster_labels,
+                        title=f"Ground-truth value label differences, chosen - rejected ({split_name} set)"
+                        + (" by value-system cluster" if pair_cluster_labels is not None else ""),
+                    )
 
             output = trainer.evaluate_contexts(eval_dataset=dataset.eval_dataset,
                                                 test_dataset=dataset.test_dataset,

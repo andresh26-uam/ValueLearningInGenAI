@@ -84,7 +84,7 @@ class MORewardTrainer(Trainer):
     training_variables: MORMTrainingVariables
     model: MORMForSequenceClassification
     accelerator: Accelerator
-    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative"]
+    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative", "groundings"]
 
     def __init__(self, **kwargs: Any) -> None:
         args = kwargs.get("args")
@@ -876,6 +876,11 @@ class MORewardTrainer(Trainer):
                 
             for extra_key in self.keys_to_save_in_prediction:
                 if others.get(extra_key, None) is not None:
+                    if extra_key == "groundings":
+                        others[extra_key] = {
+                            "values": others[extra_key],
+                            "dummy": th.tensor(0.0, device=others[extra_key].device),
+                        }
                     others[extra_key] = self.accelerator.pad_across_processes(
                     others[extra_key], dim=1, pad_index=-100)
             """if labels_ql is not None:
@@ -903,13 +908,6 @@ class MORewardTrainer(Trainer):
                 evalue = others.get(extra_key, None)
                 if evalue is not None:
                     others[extra_key] = self.gather_function(evalue)
-                    if extra_key == "ctx":
-                        """evalue = others.pop(extra_key, {})
-                        others[extra_key] = dict()
-                        for evaluek,evaluev in evalue.items():
-                            others[extra_key][evaluek] = self.gather_function(evaluev)"""
-                        print("WHAT 2 OTHERS", others[extra_key]["context_features"].shape)
-                    
                     if not self.args.batch_eval_metrics or description == "Prediction":
                         
                         all_others[extra_key].add(others[extra_key])
@@ -968,6 +966,8 @@ class MORewardTrainer(Trainer):
         all_labels = all_labels.get_arrays()
         for extra_key in self.keys_to_save_in_prediction:
             all_others[extra_key] = all_others[extra_key].get_arrays()
+        if isinstance(all_others.get("groundings"), dict):
+            all_others["groundings"] = all_others["groundings"]["values"]
         #all_labels_ql = all_labels_ql.get_arrays()
         #all_labels_qt = all_labels_qt.get_arrays()
         all_inputs = all_inputs.get_arrays()
@@ -1047,7 +1047,7 @@ class CtxMORewardTrainer(MORewardTrainer):
     training_variables: MORMTrainingVariables
     model: MORMForClassification
     accelerator: Accelerator
-    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative", "ctx"]
+    keys_to_save_in_prediction=["target_probs_quantitative", "target_probs_qualitative", "groundings", "ctx"]
     
     def log(self, logs: Dict[str, float], start_time: Optional[float] = None) -> None:
         """
@@ -1383,6 +1383,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 kmeans_labels = kmeans.predict(features)
                 kmeans_clusters = kmeans.cluster_centers_
                 labels_1 = kmeans_labels
+                
                 labels_2 = self.remove_duplicates(ctxdata.vs_assignments)
 
                 label1_name = f"Kmeans K={len(np.unique(np.array(labels_1)))}/{self.model.config.max_contexts}"
@@ -1471,8 +1472,8 @@ class CtxMORewardTrainer(MORewardTrainer):
                     vae_or_ae: CustomVAE
                     vae_or_ae.plot_embedding_space(sample_data=features, sample_labels=self.remove_duplicates(ctxdata.ctx_assignments), sample_label_names=category_maps[2], original_space_centroids=th.as_tensor(kmeans_clusters, dtype=features.dtype, device=features.device), save_path=os.path.join(output_dir, f"{otype}_VAE_latent_space"), low_res=False)
                 output[otype] = stats.to_dict()
-
-                self.model.plot_matrices(t=0, filename=os.path.join(output_dir, f"{otype}_context_matrices"), low_res=False, ctx_data=ctxdata)
+                if ContextImplementations(self.model.config.context_implementation) not in [ContextImplementations.DIRECT_VS]:
+                    self.model.plot_matrices(t=0, filename=os.path.join(output_dir, f"{otype}_context_matrices"), low_res=False, ctx_data=ctxdata)
         return output
 
     def remove_duplicates(self, train_set_contexts):

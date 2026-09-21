@@ -7,7 +7,7 @@
     "do_initialization": true,
     "do_vs_initialization": false,
     "direct_context_to_vs_relation": true,
-    "vs_weight_initialization": "equal",
+    "vs_weight_initialization": "dirichlet",
     "detach_vs_selection_for_value_system_weight_training": false,
     "detach_context_selection_for_value_system_selection": true,
     "ctx_coefficient": 1.0,
@@ -41,7 +41,7 @@
     "num_hidden_layers": 0,
     "value_layer_dropout": 0.0,
     "layer_activation": "none",
-    "layer_normalization": "BatchNorm",
+    "layer_normalization": "LayerNorm",
     "final_layer_activation": "none",
     
 
@@ -69,9 +69,9 @@
 
     "rew_center_coefficient": 0.001,
     
-    "learning_rate": 0.0001,
-    "grounding_learning_rate": 0.0001,
-    "context_learning_rate": 0.0001,
+    "learning_rate": 0.0005,
+    "grounding_learning_rate": 0.0005,
+    "context_learning_rate": 0.0005,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 10.0,
@@ -82,7 +82,7 @@
     "use_ideal_grounding_model": false,
     "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
-    "weight_decay": 0.001,
+    "weight_decay": 0.0,
     "extra_weight_decay1": 0.0,
     "extra_weight_decay2": 0.0,
     "bf16": false,

@@ -38,7 +38,7 @@ from transformers import (
 )
 from triton.language import assume
 
-from vsllib.defines import MODEL_DIR, MODEL_PRESETS, ContextImplementations, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
+from vsllib.defines import MODEL_DIR, MODEL_PRESETS, NO_RATING_MASK, ContextImplementations, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
 
 
 def seed_everything(seed: int, deterministic: bool = True):
@@ -284,7 +284,7 @@ def sample_example_profiles_scipy(profile_variety, n_values=3,
     return ret
 
 
-def sample_example_profiles_exact(profile_variety: int, n_values: int = 3):
+def sample_example_value_systems_exact(profile_variety: int, n_values: int = 3):
     """
     Return exactly `profile_variety` profiles distributed as evenly
     as possible on the (n_values-1)-simplex.
@@ -985,6 +985,141 @@ def plot_alternative_clusterings(
             ]
 
             cmap = plt.cm.get_cmap(palettes[i % len(palettes)], len(sorted_clusters))
+
+def plot_groundings_violin(
+    groundings: np.ndarray,
+    value_names: Iterable[str],
+    output_path: str,
+    cluster_labels: Optional[np.ndarray] = None,
+    title: str = "",
+    ylabel: str = "predicted grounding",
+    reference_line: Optional[float] = None,
+) -> None:
+    """
+    Violin plots of the reward heads' per-value predictions (`groundings`, shape
+    (num_samples, num_values)), one subplot per cluster id (a single "all" subplot if
+    `cluster_labels` is None), with one violin per value inside each subplot.
+    """
+    value_names = list(value_names)
+    num_values = groundings.shape[1]
+    cluster_ids = np.zeros(len(groundings), dtype=int) if cluster_labels is None else np.asarray(cluster_labels)
+    unique_clusters = [c for c in sorted(np.unique(cluster_ids).tolist()) if np.sum(cluster_ids == c) > 0]
+
+    columns = min(4, len(unique_clusters))
+    rows = (len(unique_clusters) + columns - 1) // columns
+    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+    for i, c in enumerate(unique_clusters):
+        ax = axes.flat[i]
+        data = [groundings[cluster_ids == c, v] for v in range(num_values)]
+        ax.violinplot(data, showmeans=True, showmedians=True)
+        if reference_line is not None:
+            ax.axhline(reference_line, color="gray", linestyle="--", linewidth=1)
+        ax.set_xticks(range(1, num_values + 1))
+        ax.set_xticklabels(value_names, rotation=45, ha="right")
+        ax.set_title(f"cluster {c}" if cluster_labels is not None else "all")
+        ax.set_ylabel(ylabel)
+    for ax in axes.flat[len(unique_clusters):]:
+        ax.axis("off")
+    fig.suptitle(title)
+    fig.tight_layout()
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_grounding_differences_violin(
+    groundings: np.ndarray,
+    value_names: Iterable[str],
+    output_path: str,
+    cluster_labels: Optional[np.ndarray] = None,
+    title: str = "",
+) -> None:
+    """
+    Violin plots of the per-value grounding difference between the chosen and rejected
+    response of each preference pair (chosen - rejected), one subplot per cluster id,
+    one violin per value inside each subplot.
+
+    `groundings` (shape (num_samples, num_values)) and `cluster_labels` (shape
+    (num_samples,)) must be in the original interleaved
+    (chosen, rejected, chosen, rejected, ...) order produced by the model -- i.e. the
+    same order as `others["groundings"]` in `rewards_and_labels_to_logits_and_targets`
+    (`logits[:, :-1]`), where consecutive rows (2*p, 2*p+1) form preference pair `p`.
+    """
+    n_pairs = len(groundings) // 2
+    chosen = groundings[0:2 * n_pairs:2]
+    rejected = groundings[1:2 * n_pairs:2]
+    diffs = chosen - rejected
+    pair_cluster_labels = np.asarray(cluster_labels)[0:2 * n_pairs:2] if cluster_labels is not None else None
+    plot_groundings_violin(
+        diffs,
+        value_names,
+        output_path,
+        cluster_labels=pair_cluster_labels,
+        title=title,
+        ylabel="grounding difference (chosen - rejected)",
+        reference_line=0.0,
+    )
+
+
+def plot_label_differences_violin(
+    chosen_labels: np.ndarray,
+    rejected_labels: np.ndarray,
+    value_names: Iterable[str],
+    output_path: str,
+    cluster_labels: Optional[np.ndarray] = None,
+    title: str = "",
+    missing_value: float = NO_RATING_MASK,
+) -> None:
+    """
+    Violin plots of the *ground-truth dataset* per-value label difference between the
+    chosen and rejected response of each preference pair (chosen - rejected), one
+    subplot per cluster id, one violin per value inside each subplot.
+
+    `chosen_labels`/`rejected_labels` (shape (num_pairs, num_values), e.g.
+    `dataset["labels"][:, 0, :-1]` / `[:, 1, :-1]`) and `cluster_labels` (shape
+    (num_pairs,)) must be aligned row-for-row (one row per preference pair). A pair
+    whose chosen or rejected rating for a given value equals `missing_value` (an
+    undefined rating) is dropped from that value's violin rather than plotted as a
+    bogus difference.
+    """
+    value_names = list(value_names)
+    num_values = chosen_labels.shape[1]
+    diffs = np.asarray(chosen_labels) - np.asarray(rejected_labels)
+    invalid = (np.asarray(chosen_labels) == missing_value) | (np.asarray(rejected_labels) == missing_value)
+    diffs = np.where(invalid, np.nan, diffs)
+
+    cluster_ids = np.zeros(len(diffs), dtype=int) if cluster_labels is None else np.asarray(cluster_labels)
+    unique_clusters = [c for c in sorted(np.unique(cluster_ids).tolist()) if np.sum(cluster_ids == c) > 0]
+
+    columns = min(4, len(unique_clusters))
+    rows = (len(unique_clusters) + columns - 1) // columns
+    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+    for i, c in enumerate(unique_clusters):
+        ax = axes.flat[i]
+        positions, data = [], []
+        for v in range(num_values):
+            column = diffs[cluster_ids == c, v]
+            column = column[~np.isnan(column)]
+            if len(column) > 0:
+                positions.append(v + 1)
+                data.append(column)
+        if data:
+            ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
+        ax.axhline(0.0, color="gray", linestyle="--", linewidth=1)
+        ax.set_xticks(range(1, num_values + 1))
+        ax.set_xticklabels(value_names, rotation=45, ha="right")
+        ax.set_title(f"cluster {c}" if cluster_labels is not None else "all")
+        ax.set_ylabel("label difference (chosen - rejected)")
+    for ax in axes.flat[len(unique_clusters):]:
+        ax.axis("off")
+    fig.suptitle(title)
+    fig.tight_layout()
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
 
 def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "test_metrics.csv") -> None:
     path = Path(output_path).joinpath(name)
