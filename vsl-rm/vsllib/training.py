@@ -1,10 +1,13 @@
 from typing import Any, Dict, NamedTuple, Optional
 import json
+import re
 from importlib import import_module
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.decomposition import PCA
+from scipy import stats as scipy_stats
 from wordcloud import WordCloud
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
@@ -23,7 +26,7 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-from vsllib.utils import auto_tsne, kmeans_clustering, plot_alternative_clusterings, to_float
+from vsllib.utils import auto_tsne, flatten_metrics_for_csv, kmeans_clustering, plot_alternative_clusterings, to_float
 from vsllib.defines import LLM_MODEL_EVAL, ContextImplementations
 
 
@@ -78,6 +81,184 @@ class EvalLoopOutputWithExtraLabels(NamedTuple):
 
     #labels_qt: np.ndarray | tuple[np.ndarray] | None
     #labels_ql: np.ndarray | tuple[np.ndarray] | None
+
+
+def _pairwise_accuracy_metrics(logits_shortened, labels_shortened, labels_quantitative, config: MORMForClassificationConfig) -> Dict[str, float]:
+    """Grounding/value-system accuracy metrics (representativeness*, coherence_{i}*, avg_coherence*)
+    for a set of preference pairs. Shared by `compute_metrics_custom` (whole split) and
+    `compute_metrics_per_cluster` (one call per cluster subset) so both stay in sync.
+    """
+    with th.no_grad():
+        epsilon_list = set([0.0, 0.001, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5])
+        epsilon_list.add(config.discordance_epsilon)
+
+        result = {}
+
+        represent = accuracy_logits(
+            logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
+        result['representativeness'] = represent
+
+        represent_usual = accuracy_logits(
+            logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
+        result['representativeness_usual'] = represent_usual
+
+        represent_smooth = accuracy_logits_smooth(
+            logits_shortened[..., -1], labels_quantitative[..., -1], assume_torch=False)
+        result['representativeness_smooth'] = represent_smooth
+
+        for epsilon in epsilon_list:
+            represent = accuracy_logits(
+                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=epsilon)
+            result[f'representativeness_e{epsilon}'] = represent
+
+        chr = accuracy_logits(
+            logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
+        coherences = chr.tolist()
+        chr_usual = accuracy_logits(
+            logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
+        coherences_usual = chr_usual.tolist()
+
+        chr_smooth = accuracy_logits_smooth(
+            logits_shortened[..., 0:-1], labels_quantitative[..., 0:-1], assume_torch=False)
+        coherences_smooth = chr_smooth.tolist()
+
+        per_epsilon_chr = []
+        for epsilon in epsilon_list:
+            cohr = accuracy_logits(
+                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=epsilon)
+            per_epsilon_chr.append(cohr)
+
+        result["coherences"] = coherences
+        for i, ch in enumerate(coherences):
+            result[f'coherence_{i}'] = float(ch)
+            for j, epsilon in enumerate(epsilon_list):
+                result[f'coherence_e{epsilon}_{i}'] = float(per_epsilon_chr[j][i])
+
+        for i, ch in enumerate(coherences_smooth):
+            result[f'coherence_smooth_{i}'] = float(ch)
+        for i, ch in enumerate(coherences_usual):
+            result[f'coherence_usual_{i}'] = float(ch)
+
+        result['avg_coherence'] = np.mean(coherences)
+        result['avg_coherence_smooth'] = np.mean(coherences_smooth)
+        result['avg_coherence_usual'] = np.mean(coherences_usual)
+        for j, epsilon in enumerate(epsilon_list):
+            result[f'avg_coherence_e{epsilon}'] = np.mean([float(per_epsilon_chr[j][i]) for i in range(len(coherences))])
+        assert chr.shape == (
+            logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
+
+        return result
+
+
+def compute_metrics_per_cluster(logits_shortened, labels_shortened, labels_quantitative, cluster_ids, config: MORMForClassificationConfig) -> Dict[Any, Dict[str, float]]:
+    """Applies `_pairwise_accuracy_metrics` separately to each cluster's subset of pairs.
+
+    `cluster_ids` must be a per-pair array (one label per row of `logits_shortened`/
+    `labels_shortened`), i.e. already deduplicated from the interleaved (chosen, rejected)
+    per-sample order the same way `CtxMORewardTrainer.remove_duplicates` does.
+    """
+    if isinstance(cluster_ids, th.Tensor):
+        cluster_ids = cluster_ids.detach().cpu().numpy()
+    cluster_ids = np.asarray(cluster_ids)
+    results = {}
+    for c in sorted(np.unique(cluster_ids).tolist()):
+        mask = cluster_ids == c
+        metrics = _pairwise_accuracy_metrics(
+            logits_shortened[mask], labels_shortened[mask],
+            labels_quantitative[mask] if labels_quantitative is not None else None, config)
+        metrics.pop("coherences", None)
+        metrics["size"] = int(mask.sum())
+        results[c] = metrics
+    return results
+
+
+def _to_numpy(x) -> Optional[np.ndarray]:
+    if x is None:
+        return None
+    if isinstance(x, th.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _safe_corr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
+    """Pearson/Spearman correlation, returning NaN instead of raising on degenerate
+    input (fewer than 2 samples, or a constant array -- both make correlation undefined).
+    """
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    if len(x) < 2 or np.std(x) == 0 or np.std(y) == 0:
+        return float("nan"), float("nan")
+    pearson_r = float(scipy_stats.pearsonr(x, y)[0])
+    spearman_r = float(scipy_stats.spearmanr(x, y)[0])
+    return pearson_r, spearman_r
+
+
+def _length_correlation_metrics(groundings: np.ndarray, value_system_reward: np.ndarray, response_lengths: np.ndarray) -> Dict[str, float]:
+    """Pearson/Spearman correlation between response length (in tokens) and (a) each
+    value's predicted grounding reward, (b) the model's predicted overall value-system
+    reward, over a set of individual responses (one row per response, not per pair --
+    `groundings`/`value_system_reward`/`response_lengths` must all be in the same
+    per-sample order).
+    """
+    result = {}
+    num_values = groundings.shape[1]
+    for i in range(num_values):
+        pearson_r, spearman_r = _safe_corr(response_lengths, groundings[:, i])
+        result[f"length_pearson_{i}"] = pearson_r
+        result[f"length_spearman_{i}"] = spearman_r
+    pearson_vs, spearman_vs = _safe_corr(response_lengths, value_system_reward)
+    result["length_pearson_vs"] = pearson_vs
+    result["length_spearman_vs"] = spearman_vs
+    return result
+
+
+def compute_length_correlations_per_cluster(groundings: np.ndarray, value_system_reward: np.ndarray, response_lengths: np.ndarray, cluster_ids) -> Dict[Any, Dict[str, float]]:
+    """Applies `_length_correlation_metrics` separately to each cluster's subset of
+    individual responses. `cluster_ids` must be a per-sample array, aligned one-per-row
+    with `groundings`/`value_system_reward`/`response_lengths` (unlike the per-pair
+    `cluster_ids` used by `compute_metrics_per_cluster` -- repeat a per-pair cluster
+    label array twice, e.g. `np.repeat(pair_cluster_ids, 2)`, to get this).
+    """
+    if isinstance(cluster_ids, th.Tensor):
+        cluster_ids = cluster_ids.detach().cpu().numpy()
+    cluster_ids = np.asarray(cluster_ids)
+    results = {}
+    for c in sorted(np.unique(cluster_ids).tolist()):
+        mask = cluster_ids == c
+        results[c] = _length_correlation_metrics(groundings[mask], value_system_reward[mask], response_lengths[mask])
+    return results
+
+
+def _coherence_and_representativeness_title_lines(cm: Dict[str, float]) -> list:
+    """Coherence_{i}/representativeness lines for a wordcloud/bar-plot title, in value
+    order (no per-value labels -- just the values, in the same order as the value-system
+    weights), and the length-vs-reward Pearson/Spearman correlation lines that go with
+    them, if present.
+    """
+    lines = []
+    coherence_keys = sorted(
+        (k for k in cm if re.fullmatch(r"coherence_\d+", k)),
+        key=lambda k: int(k.split("_")[1]))
+    if coherence_keys:
+        lines.append("coherence: [" + ", ".join(f"{cm[k]:.3f}" for k in coherence_keys) + "]")
+    if "representativeness" in cm:
+        lines.append(f"representativeness: {cm['representativeness']:.3f}")
+
+    pearson_keys = sorted(
+        (k for k in cm if re.fullmatch(r"length_pearson_\d+", k)),
+        key=lambda k: int(k.rsplit("_", 1)[-1]))
+    spearman_keys = sorted(
+        (k for k in cm if re.fullmatch(r"length_spearman_\d+", k)),
+        key=lambda k: int(k.rsplit("_", 1)[-1]))
+    if pearson_keys:
+        lines.append("length-reward pearson: [" + ", ".join(f"{cm[k]:.3f}" for k in pearson_keys) + "]")
+    if spearman_keys:
+        lines.append("length-reward spearman: [" + ", ".join(f"{cm[k]:.3f}" for k in spearman_keys) + "]")
+    if "length_pearson_vs" in cm or "length_spearman_vs" in cm:
+        pr_vs = cm.get("length_pearson_vs", float("nan"))
+        sr_vs = cm.get("length_spearman_vs", float("nan"))
+        lines.append(f"length-VS reward pearson: {pr_vs:.3f}, spearman: {sr_vs:.3f}")
+    return lines
 
 
 class MORewardTrainer(Trainer):
@@ -182,79 +363,23 @@ class MORewardTrainer(Trainer):
 
     def compute_metrics_custom(eval_pred: EvalPredictionWithExtraLabels, config: MORMForClassificationConfig, training_variables: MORMTrainingVariables) -> Dict[str, float]:
         with th.no_grad():
-            epsilon_list = set([0.0, 0.001, 0.01, 0.02, 0.05, 0.1, 0.25, 0.5])
-            epsilon_list.add(config.discordance_epsilon)
-
-            result = {}
             logits_shortened = eval_pred.predictions
             labels_shortened = eval_pred.label_ids
             labels_quantitative = eval_pred.labels_qt
             labels_qualitative = eval_pred.labels_ql
-
 
             loss_all = eval_pred.losses
             losses = np.mean(loss_all, axis=0)
             loss_vs = losses[-1]
             loss_gr = losses[0:-1]
 
+            result = {}
             result['grounding_loss'] = loss_gr.tolist()
             for i in range(len(loss_gr)):
                 result[f'grounding_loss_{i}'] = to_float(loss_gr[i])
             result['value_system_loss'] = to_float(loss_vs)
 
-            represent = accuracy_logits(
-                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
-            result['representativeness'] = represent
-
-            represent_usual = accuracy_logits(
-                logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
-            result['representativeness_usual'] = represent_usual
-
-            represent_smooth = accuracy_logits_smooth(
-                logits_shortened[..., -1], labels_quantitative[..., -1], assume_torch=False)
-            result['representativeness_smooth'] = represent_smooth
-
-            for epsilon in epsilon_list:
-                represent = accuracy_logits(
-                    logits_shortened[..., -1], labels_shortened[..., -1], assume_torch=False, discordance_epsilon=epsilon)
-                result[f'representativeness_e{epsilon}'] = represent
-
-            chr = accuracy_logits(
-                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon)
-            coherences = chr.tolist()
-            chr_usual = accuracy_logits(
-                logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=config.discordance_epsilon, hard_classification=False)
-            coherences_usual = chr_usual.tolist()
-
-            chr_smooth = accuracy_logits_smooth(
-                logits_shortened[..., 0:-1], labels_quantitative[..., 0:-1], assume_torch=False)
-            coherences_smooth = chr_smooth.tolist()
-
-            per_epsilon_chr = []
-            for epsilon in epsilon_list:
-                cohr = accuracy_logits(
-                    logits_shortened[..., 0:-1], labels_shortened[..., 0:-1], assume_torch=False, discordance_epsilon=epsilon)
-                per_epsilon_chr.append(cohr)
-
-            result["coherences"] = coherences
-            for i, ch in enumerate(coherences):
-                result[f'coherence_{i}'] = float(ch)
-                for j, epsilon in enumerate(epsilon_list):
-                    result[f'coherence_e{epsilon}_{i}'] = float(per_epsilon_chr[j][i])
-                
-
-            for i, ch in enumerate(coherences_smooth):
-                result[f'coherence_smooth_{i}'] = float(ch)
-            for i, ch in enumerate(coherences_usual):
-                result[f'coherence_usual_{i}'] = float(ch)
-
-            result['avg_coherence'] = np.mean(coherences)
-            result['avg_coherence_smooth'] = np.mean(coherences_smooth)
-            result['avg_coherence_usual'] = np.mean(coherences_usual)
-            for j, epsilon in enumerate(epsilon_list):
-                result[f'avg_coherence_e{epsilon}'] = np.mean([float(per_epsilon_chr[j][i]) for i in range(len(coherences))])
-            assert chr.shape == (
-                logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
+            result.update(_pairwise_accuracy_metrics(logits_shortened, labels_shortened, labels_quantitative, config))
 
             training_variables.record_metrics(result, metric_type='validation')
             training_variables.record_grounding_loss(gr_loss_detached=th.tensor(loss_gr, requires_grad=False, device=training_variables.lagrange_multipliers.device, dtype=training_variables.lagrange_multipliers.dtype) if loss_gr is not None else None, 
@@ -1189,6 +1314,8 @@ class CtxMORewardTrainer(MORewardTrainer):
 
         self._memory_tracker.stop_and_update_metrics(output.metrics)
 
+        output.others["pairwise_predictions"] = output.predictions
+        output.others["pairwise_labels"] = output.label_ids
         output.metrics["others"] = output.others # Just changed this.  
 
         return output.metrics 
@@ -1206,7 +1333,7 @@ class CtxMORewardTrainer(MORewardTrainer):
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
 
     @staticmethod
-    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None) -> None:
+    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None, descriptions=None, cluster_metrics=None) -> None:
         texts = np.asarray(texts, dtype=object)
         if isinstance(labels, th.Tensor):
             labels = labels.detach().cpu().numpy()
@@ -1263,6 +1390,12 @@ class CtxMORewardTrainer(MORewardTrainer):
             if average_vs is not None:
                 average_vs_text = ", ".join(f"{weight:.3f}" for weight in np.ravel(average_vs))
                 title += f"\nmean predicted VS: [{average_vs_text}]"
+            if cluster_metrics is not None and cluster_label in cluster_metrics:
+                for line in _coherence_and_representativeness_title_lines(cluster_metrics[cluster_label]):
+                    title += f"\n{line}"
+            """THIS IS TOO MUCH INFO... if descriptions is not None and cluster_label in descriptions:
+                title += f"\n{descriptions[cluster_label]}"
+            """
             axis.set_title(title)
         for axis in axes.flat[len(panels):]:
             axis.axis("off")
@@ -1270,9 +1403,65 @@ class CtxMORewardTrainer(MORewardTrainer):
         figure.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(figure)
 
+    @staticmethod
+    def plot_cluster_metrics_bars(cluster_metrics: Dict[Any, Dict[str, float]], value_names, output_path: str, clustering_name: str) -> None:
+        """Bar-plot grid (one subplot per cluster) of per-value grounding accuracy
+        (`coherence_{i}`) and value-system accuracy (`representativeness`) for a single
+        clustering (as produced by `compute_metrics_per_cluster`).
+        """
+        value_names = list(value_names)
+        panels = sorted(cluster_metrics.items(), key=lambda kv: -kv[1].get("size", 0))
+        if not panels:
+            return
+
+        bar_labels = value_names + ["representativeness"]
+        colors = ["tab:blue"] * len(value_names) + ["tab:orange"]
+
+        columns = min(4, len(panels))
+        rows = (len(panels) + columns - 1) // columns
+        figure, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+        for axis, (cluster_label, metrics) in zip(axes.flat, panels):
+            values = [metrics.get(f"coherence_{i}", np.nan) for i in range(len(value_names))] + [metrics.get("representativeness", np.nan)]
+            bars = axis.bar(range(len(bar_labels)), values, color=colors)
+            axis.bar_label(bars, labels=[f"{v:.3f}" for v in values], padding=2, fontsize=8)
+            axis.set_xticks(range(len(bar_labels)))
+            axis.set_xticklabels(bar_labels, rotation=45, ha="right")
+            axis.set_ylim(0, 1.08)
+            axis.set_ylabel("accuracy")
+            label_text = f"Cluster {cluster_label}" if isinstance(cluster_label, (int, np.integer)) else str(cluster_label)
+            title = f"{clustering_name}, {label_text} (n={metrics.get('size', 0)})"
+            for line in _coherence_and_representativeness_title_lines(metrics):
+                if not line.startswith("coherence:") and not line.startswith("representativeness:"):
+                    title += f"\n{line}"
+            axis.set_title(title)
+        for axis in axes.flat[len(panels):]:
+            axis.axis("off")
+        figure.tight_layout(pad=1)
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(path, dpi=150, bbox_inches="tight")
+        plt.close(figure)
 
     @staticmethod
-    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: str = LLM_MODEL_EVAL, max_documents: int = 20):
+    def save_cluster_metrics(cluster_metrics_by_clustering: Dict[str, Dict[Any, Dict[str, float]]], output_dir: str) -> pd.DataFrame:
+        """Writes every accuracy metric from `compute_metrics_per_cluster`, for every
+        clustering, to `{output_dir}/cluster_metrics.csv` and `.json` -- one row per
+        (clustering, cluster) pair.
+        """
+        rows = []
+        for clustering_name, per_cluster in cluster_metrics_by_clustering.items():
+            for cluster_label, metrics in per_cluster.items():
+                row = {"clustering": clustering_name, "cluster": cluster_label}
+                row.update(flatten_metrics_for_csv(metrics))
+                rows.append(row)
+        descriptions = pd.DataFrame(rows)
+        os.makedirs(output_dir, exist_ok=True)
+        descriptions.to_csv(os.path.join(output_dir, "cluster_metrics.csv"), index=False)
+        descriptions.to_json(os.path.join(output_dir, "cluster_metrics.json"), orient="records", indent=2)
+        return descriptions
+
+    @staticmethod
+    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: str = LLM_MODEL_EVAL, max_documents: int = 20, cluster_metrics: Optional[Dict[str, Dict[Any, Dict[str, float]]]] = None):
         """Generate category and description metadata for each text clustering."""
         try:
             ChatGroq = import_module("langchain_groq").ChatGroq
@@ -1315,15 +1504,20 @@ class CtxMORewardTrainer(MORewardTrainer):
 
                 category_map[cluster_label] = category
                 textrank_summary = CtxMORewardTrainer.summarize_cluster_with_textrank(cluster_texts)
-                                
-                rows.append({
+
+                row = {
                     "clustering": clustering_name,
                     "cluster": cluster_label,
                     "category": category,
                     "description": description,
                     "summary_textrank": textrank_summary,
                     "size": len(cluster_texts),
-                })
+                }
+                cm = (cluster_metrics or {}).get(clustering_name, {}).get(cluster_label, {})
+                for key, value in cm.items():
+                    if key == "representativeness" or re.fullmatch(r"coherence_\d+", key):
+                        row[key] = value
+                rows.append(row)
             category_maps.append(category_map)
 
         descriptions = pd.DataFrame(rows)
@@ -1345,7 +1539,7 @@ class CtxMORewardTrainer(MORewardTrainer):
         summary = summarize_textrank(sentences, sentence_embeddings, top_k=top_k)
         return " ".join(sentence for sentence, _ in summary)
     
-    def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}) -> None:
+    def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}, value_names=None, eval_response_lengths=None, test_response_lengths=None) -> None:
         
         train_set_contexts = np.array(train_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
         train_set_contexts = self.remove_duplicates(train_set_contexts)
@@ -1365,7 +1559,10 @@ class CtxMORewardTrainer(MORewardTrainer):
         
         reducer_pca = None
         output = {"validation": None if validation_output is None else {}, "test": None if test_output is None else {}}
-        for otype, output_per_type, context_data in zip(("validation", "test",), (validation_output, test_output), (validation_data, test_data)):
+        for otype, output_per_type, context_data, response_lengths in zip(
+            ("validation", "test",), (validation_output, test_output), (validation_data, test_data),
+            (eval_response_lengths, test_response_lengths),
+        ):
             if output_per_type is not None:
                 ctxdata: CtxData = CtxData.from_dict(output_per_type["ctx"], to_tensor=True)
                 stats = self.model.value_system_layer.calculate_statistics(ctxdata)
@@ -1400,16 +1597,122 @@ class CtxMORewardTrainer(MORewardTrainer):
                                  {label: f"Cluster {label}" for label in np.unique(labels_2)}]
                 if len(labels) == 3:
                     category_maps.append({label: f"Cluster {label}" for label in np.unique(labels_3)})
+
+                clustering_names_used = ["kmeans", "value_system", "context"][:len(labels)]
+
+                # Per-cluster grounding/value-system accuracy: replicates the accuracy
+                # portion of compute_metrics_custom (representativeness*, coherence_{i}*,
+                # avg_coherence*) separately for each cluster of each clustering, without
+                # touching training_variables. Requires the raw pairwise predictions/labels
+                # that CtxMORewardTrainer.evaluate() stashes into the "ctx"-sibling "others"
+                # dict (pairwise_predictions/pairwise_labels), aligned pair-for-pair with
+                # labels_1/labels_2/labels_3 above (all deduplicated the same way).
+                pairwise_predictions = output_per_type.get("pairwise_predictions")
+                pairwise_labels = output_per_type.get("pairwise_labels")
+                pairwise_labels_quantitative = output_per_type.get("target_probs_quantitative")
+                assert pairwise_predictions is not None and pairwise_labels is not None, (
+                    f"{otype}: CtxMORewardTrainer.evaluate() did not expose "
+                    "pairwise_predictions/pairwise_labels in its \"others\" output -- "
+                    "per-cluster accuracy metrics cannot be computed."
+                )
+
+                # Per-sample (interleaved chosen/rejected) grounding rewards and the
+                # model's predicted overall value-system reward for that same sample,
+                # used for the response-length-vs-reward correlation below. groundings is
+                # already per-sample; vs_predicted (the predicted value-system weights) is
+                # also per-sample here (only `remove_duplicates`d elsewhere in this method
+                # when a per-*pair* quantity is needed) -- both come from the same "ctx"
+                # others dict, so they're aligned row-for-row by construction.
+                groundings_per_sample = _to_numpy(output_per_type.get("groundings"))
+                vs_predicted_per_sample = _to_numpy(ctxdata.vs_predicted)
+                assert groundings_per_sample is not None and vs_predicted_per_sample is not None, (
+                    f"{otype}: groundings/vs_predicted are required to compute the "
+                    "value-system reward for the length-correlation analysis."
+                )
+                value_system_reward_per_sample = np.sum(groundings_per_sample * vs_predicted_per_sample, axis=1)
+                assert response_lengths is not None, (
+                    f"{otype}: response_lengths was not provided -- required for the "
+                    "length-vs-reward correlation metrics. Pass eval_response_lengths/"
+                    "test_response_lengths (computed via compute_response_token_lengths, "
+                    "which itself requires an nlp_based tokenizer and response1/response2 "
+                    "dataset columns -- re-run preprocessing with --repostprocess if missing)."
+                )
+                assert len(response_lengths) == len(groundings_per_sample), (
+                    f"response_lengths ({len(response_lengths)}) and groundings "
+                    f"({len(groundings_per_sample)}) must be aligned one-per-sample."
+                )
+
+                cluster_metrics_by_clustering = {}
+                for label_array, clustering_name in zip(labels, clustering_names_used):
+                    assert len(label_array) == len(pairwise_predictions), (
+                        f"{clustering_name} labels ({len(label_array)}) and pairwise predictions "
+                        f"({len(pairwise_predictions)}) must be aligned one-per-pair."
+                    )
+                    cluster_metrics_by_clustering[clustering_name] = compute_metrics_per_cluster(
+                        pairwise_predictions, pairwise_labels, pairwise_labels_quantitative,
+                        label_array, self.model.config,
+                    )
+                    # label_array is per-pair; repeat each pair's label across its two
+                    # samples (chosen, rejected always share a cluster -- both derive
+                    # from the same prompt's context) to mask per-sample data.
+                    sample_label_array = np.repeat(_to_numpy(label_array), 2)
+                    length_metrics = compute_length_correlations_per_cluster(
+                        groundings_per_sample, value_system_reward_per_sample, response_lengths,
+                        sample_label_array,
+                    )
+                    for cluster_label, metrics in cluster_metrics_by_clustering[clustering_name].items():
+                        assert cluster_label in length_metrics, (
+                            f"{clustering_name} cluster {cluster_label}: no length-correlation "
+                            "metrics were computed for this cluster."
+                        )
+                        metrics.update(length_metrics[cluster_label])
+                    self.plot_cluster_metrics_bars(
+                        cluster_metrics_by_clustering[clustering_name],
+                        value_names if value_names is not None else [],
+                        os.path.join(output_dir, f"{otype}_{clustering_name}_cluster_metrics_bars.png"),
+                        clustering_name,
+                    )
+
+                # Same accuracy + length-correlation metrics, but over the whole split
+                # at once (no clustering) -- one extra "overall" bar-plot panel per
+                # split, in addition to (not instead of) the per-cluster ones above.
+                n_pairs = len(pairwise_predictions)
+                overall_metrics = _pairwise_accuracy_metrics(
+                    pairwise_predictions, pairwise_labels, pairwise_labels_quantitative, self.model.config)
+                overall_metrics.pop("coherences", None)
+                overall_metrics["size"] = n_pairs
+                overall_metrics.update(_length_correlation_metrics(
+                    groundings_per_sample, value_system_reward_per_sample, response_lengths))
+                cluster_metrics_by_clustering["overall"] = {"all": overall_metrics}
+                self.plot_cluster_metrics_bars(
+                    cluster_metrics_by_clustering["overall"],
+                    value_names if value_names is not None else [],
+                    os.path.join(output_dir, f"{otype}_overall_cluster_metrics_bars.png"),
+                    "overall",
+                )
+
+                self.save_cluster_metrics(
+                    cluster_metrics_by_clustering,
+                    os.path.join(output_dir, f"{otype}_cluster_metrics"),
+                )
+
                 if isinstance(original_context[0], str):
                     try:
                         descriptions, category_maps = self.describe_clusters_with_llm(
                             original_context,
                             labels,
-                            ["kmeans", "value_system", "context"][:len(labels)],
+                            clustering_names_used,
                             os.path.join(output_dir, f"{otype}_cluster_descriptions"),
+                            cluster_metrics=cluster_metrics_by_clustering,
                         )
                     except (ImportError, RuntimeError) as error:
                         print(f"Could not generate LLM cluster descriptions: {error}")
+                        descriptions = None
+                    description_text_maps = {name: {} for name in clustering_names_used}
+                    if descriptions is not None:
+                        for clustering_name in clustering_names_used:
+                            subset = descriptions[descriptions["clustering"] == clustering_name]
+                            description_text_maps[clustering_name] = dict(zip(subset["cluster"], subset["description"]))
                     self.plot_cluster_word_clouds(
                         texts=original_context,
                         labels=labels_1,
@@ -1417,6 +1720,8 @@ class CtxMORewardTrainer(MORewardTrainer):
                         clustering_name="kmeans",
                         vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
                         label_names=category_maps[0],
+                        descriptions=description_text_maps.get("kmeans"),
+                        cluster_metrics=cluster_metrics_by_clustering.get("kmeans"),
                     )
                     self.plot_cluster_word_clouds(
                         texts=original_context,
@@ -1425,6 +1730,8 @@ class CtxMORewardTrainer(MORewardTrainer):
                         clustering_name="value_system",
                         vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
                         label_names=category_maps[1],
+                        descriptions=description_text_maps.get("value_system"),
+                        cluster_metrics=cluster_metrics_by_clustering.get("value_system"),
                     )
                     if len(labels) == 3:
                         self.plot_cluster_word_clouds(
@@ -1434,6 +1741,8 @@ class CtxMORewardTrainer(MORewardTrainer):
                             clustering_name="context",
                             vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
                             label_names=category_maps[2],
+                            descriptions=description_text_maps.get("context"),
+                            cluster_metrics=cluster_metrics_by_clustering.get("context"),
                         )
                 if needs_reduction and reducer_pca is None:
                     reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)

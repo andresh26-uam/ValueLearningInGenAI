@@ -840,6 +840,33 @@ def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
             flat[key] = str(value)
     return flat
 
+
+def compute_response_token_lengths(hf_dataset, tokenizer) -> np.ndarray:
+    """Per-sample (interleaved option1, option2, option1, option2, ...) response token
+    counts, tokenized from the dataset's raw `response1`/`response2` text columns
+    (not the chat-templated `option1`/`option2`, so prompt tokens aren't counted).
+
+    Requires a tokenizer (nlp_based task_type) and `response1`/`response2` columns on
+    the dataset -- these are only retained when the dataset was (re)processed with them
+    in `extra_keep_keys` (see `defines.py`'s `*_EXTRA_KEYS`). Asserts rather than
+    degrading silently: re-run preprocessing with `--repostprocess` if this fails on a
+    dataset processed before they were added.
+    """
+    assert tokenizer is not None, (
+        "compute_response_token_lengths requires a tokenizer (nlp_based task_type); got tokenizer=None."
+    )
+    columns = hf_dataset.column_names
+    assert "response1" in columns and "response2" in columns, (
+        f"compute_response_token_lengths requires response1/response2 columns, got columns={columns!r}. "
+        "Re-run preprocessing with --repostprocess to retain them (see defines.py's *_EXTRA_KEYS)."
+    )
+    response1 = hf_dataset["response1"]
+    response2 = hf_dataset["response2"]
+    lengths = np.empty(2 * len(response1), dtype=np.int64)
+    lengths[0::2] = [len(tokenizer(str(text), add_special_tokens=False)["input_ids"]) for text in response1]
+    lengths[1::2] = [len(tokenizer(str(text), add_special_tokens=False)["input_ids"]) for text in response2]
+    return lengths
+
 def entropy(p, eps=1e-12):    
         p = p.cpu().detach().numpy()    
         p = np.clip(p, eps, 1.0)  # avoid log(0)    

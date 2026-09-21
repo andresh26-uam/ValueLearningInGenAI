@@ -56,7 +56,7 @@ from vsllib.reward_models import (
 from vsllib.model_utils import (
     MORMForClassificationConfig,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
+from vsllib.utils import  ScriptArguments, argument_parser, compute_response_token_lengths, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -630,6 +630,8 @@ def main() -> None:
             trainer: CtxMORewardTrainer
 
             value_names = list(dataset.value_keys)
+            eval_response_lengths = compute_response_token_lengths(dataset.eval_dataset, tokenizer)
+            test_response_lengths = compute_response_token_lengths(dataset.test_dataset, tokenizer)
             for split_name, others_split, split_dataset in (
                 ("eval", others_eval, dataset.eval_dataset),
                 ("test", others_test, dataset.test_dataset),
@@ -685,10 +687,13 @@ def main() -> None:
             output = trainer.evaluate_contexts(eval_dataset=dataset.eval_dataset,
                                                 test_dataset=dataset.test_dataset,
                                                 train_dataset=dataset.train_dataset,
-                                                validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir, 
+                                                validation_output=others_eval, test_output=others_test, output_dir=script_args.results_dir,
                                                reducer_kwargs={
-                                                   "tsne_perplexity": script_args.tsne_perplexity, 
-                                                   "tsne_seed": script_args.tsne_seed} )
+                                                   "tsne_perplexity": script_args.tsne_perplexity,
+                                                   "tsne_seed": script_args.tsne_seed},
+                                               value_names=value_names,
+                                               eval_response_lengths=eval_response_lengths,
+                                               test_response_lengths=test_response_lengths)
             save_context_evaluation(output, output_dir=script_args.results_dir)
 
             

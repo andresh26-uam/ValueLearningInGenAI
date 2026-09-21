@@ -38,10 +38,14 @@ MODEL_DIR = str(PROJECT_ROOT / "models")
 RESULTS_DIR = str(PROJECT_ROOT / "results")
 
 ULTRAFEEDBACK_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "ultrafeedback")
-ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels"]
+# response1/response2 are retained (rather than only the chat-templated option1/option2)
+# so eval-time analysis (e.g. response-length-vs-reward correlation) can tokenize the raw
+# response text without the prompt. Re-run preprocessing with --repostprocess to pick up
+# this column on datasets processed before this was added.
+ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels", "response1", "response2"]
 
 PKUALIGNMENT_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "pkuAlignment")
-PKUALIGNMENT_EXTRA_KEYS = ["labels"]
+PKUALIGNMENT_EXTRA_KEYS = ["labels", "response1", "response2"]
 
 PRISM_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "prism")
 
@@ -52,9 +56,9 @@ APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
 SYNTH_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "synth")
 
 PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
-OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank"]
-SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real"]
-APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
+OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank", "response1", "response2"]
+SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real", "response1", "response2"]
+APOLLO_EXTRA_KEYS = ["labels", "user_id", "context", "response1", "response2"]
 class SupportedDatasets(enum.Enum):
     ULTRAFEEDBACK = "ultra"
     PKUALIGNMENT = "pku"
