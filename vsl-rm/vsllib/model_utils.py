@@ -35,7 +35,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import pairwise_distances_argmin_min
                 
-from vsllib.defines import MIN_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
+from vsllib.defines import DEFAULT_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
 from vsllib.utils import kmeans_clustering
 
 THRESHOLD = 50.0
@@ -248,7 +248,7 @@ def print_logits_target_mismatches(logits: th.Tensor, target_probs: th.Tensor, l
             pass
 
 
-def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True, discordance_epsilon=MIN_EPSILON, hard_classification=True) -> th.Tensor:
+def accuracy_logits(logits: th.Tensor, target_probs: th.Tensor, missing_mask=None, assume_torch=True, discordance_epsilon=DEFAULT_EPSILON, hard_classification=True) -> th.Tensor:
 
     with th.no_grad():
         score_diff_epsilon = 1.0/(1.0+np.exp(-discordance_epsilon)) -0.5 if discordance_epsilon > 0 else 0.0
@@ -826,7 +826,7 @@ class MORMForClassificationConfig(PretrainedConfig):
                             
         reward_diff_threshold: float = 50.0,
         assume_qualitative_labels: bool = True,
-        discordance_epsilon=MIN_EPSILON,
+        discordance_epsilon=DEFAULT_EPSILON,
         activate_discordance_epsilon_for_loss: bool = False,
         check_undefined_label: bool = True,
         grounding_loss_tendency_update_ratio: float = 0.001,
@@ -1581,7 +1581,7 @@ class CustomVAE(VAE):
             loss_unreduced_total = 0.0
             assert isinstance(self.model_config, CustomVAEConfig) #and self.model_config.resampling_iterations > 0, "resampling_iterations must be a positive integer"
             for _ in range(self.model_config.resampling_iterations):
-                if self.model_config.type == "vae":
+                if self.model_config.type == "vae" and self.training:
                     z, eps = self._sample_gauss(mu, std)
                 else:
                     z = mu
