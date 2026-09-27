@@ -36,7 +36,7 @@ from vsllib.dataset_processing import PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, CtxMORewardTrainer
 from vsllib.reward_models import CtxMORMForSequenceClassification, CtxMORMForSequenceClassificationConfig, MORMForSequenceClassification, MORMForClassificationConfig, mo_compute_loss_func
-from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.defines import DEFAULT_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 
 load_dotenv()
@@ -88,7 +88,7 @@ def main_fun(script_args, training_args, tokenizer) -> None:
             suggested_epsilon =dataset.calculate_suggested_epsilon()
         else:
             suggested_epsilon = script_args.discordance_epsilon
-        suggested_epsilon = max(suggested_epsilon, MIN_EPSILON)  # Avoid too small epsilon
+        suggested_epsilon = max(suggested_epsilon, DEFAULT_EPSILON)  # Avoid too small epsilon
         print("Suggested discordance_epsilon based on eval dataset: ", suggested_epsilon)
         
         print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(

@@ -39,7 +39,7 @@ from pythae.trainers import BaseTrainerConfig
 from pythae.pipelines.training import TrainingPipeline
 
 from vsllib.training_utils import MORMTrainingVariables
-from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, MIN_EPSILON, NO_RATING_MASK, SENTENCE_MODEL_SIZES, ContextImplementations, MOLossFunctions
+from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME, DEFAULT_EPSILON, NO_RATING_MASK, SENTENCE_MODEL_SIZES, ContextImplementations, MOLossFunctions
 from vsllib.model_utils import ACTIVATE_THRESHOLD_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
 from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
@@ -930,8 +930,8 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
             
             #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
-            
-            ctx_assignments = random_argmax(context_logprobs, dim=1)
+
+            ctx_assignments = random_argmax(context_logprobs, dim=1, use_random=self.training)
             #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
             #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
             #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
@@ -960,10 +960,10 @@ class BasicGmmCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
                 
                 assert th.allclose(vs_logprobs, vs_logprobs_aux, atol=1e-4, rtol=0.03), f"VS logprobs mismatch: {vs_logprobs[0:5]} vs {vs_logprobs_aux[0:5]}"
-            vs_assignments = random_argmax(vs_logprobs, dim=1)
-            
+            vs_assignments = random_argmax(vs_logprobs, dim=1, use_random=self.training)
+
             assert vs_assignments.shape == (len(hidden_state),)
-            
+
             return CtxData(
                 context_features=hidden_state,
                 vs_assignments=vs_assignments,
@@ -1028,13 +1028,13 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
         #print("SHOULD BE", th.log(per_component_logprob.exp() * component_logprobs.exp()))
         #print("IT GOES:", context_logprobs)
         #assert th.allclose(th.log(per_component_logprob.exp() * component_logprobs.exp()), context_logprobs, atol=1e-3, rtol=0.03)
-        
-        ctx_assignments = random_argmax(context_logprobs, dim=1)
+
+        ctx_assignments = random_argmax(context_logprobs, dim=1, use_random=self.training)
         #context_logprobs_with_default = th.cat([th.tensor((-th.sum(context_logprobs, dim=1)+1.0).unsqueeze(0), dtype=context_logprobs.dtype, device=context_logprobs.device), context_logprobs], dim=1 )
         #assert context_logprobs_with_default.shape == (context_logprobs.shape[0], context_logprobs.shape[1] +1)
         #context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
         #raise ValueError("...")
-        
+
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
 
         if THRESHOLD > 0 and ACTIVATE_THRESHOLD_VS:
@@ -1044,8 +1044,8 @@ class GmmAndClassifierCtxDependentAlignmentLayer(BasicGmmCtxDependentAlignmentLa
 
         assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
 
-        vs_assignments = random_argmax(vs_logprobs, dim=1)
-        
+        vs_assignments = random_argmax(vs_logprobs, dim=1, use_random=self.training)
+
         assert vs_assignments.shape == (len(hidden_state),)
         
         return CtxData(
@@ -1195,8 +1195,8 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         #input()
         assert vs_logprobs.shape == (hidden_state.shape[0], self.num_value_systems)
 
-        vs_assignments = random_argmax(vs_logprobs, dim=1)
-        
+        vs_assignments = random_argmax(vs_logprobs, dim=1, use_random=self.training)
+
         assert vs_assignments.shape == (len(hidden_state),)
 
         self._last_vae_cluster_loss = loss_clustering.mean().item() if isinstance(loss_clustering, th.Tensor) else float(loss_clustering)
@@ -1307,7 +1307,7 @@ def parse_loss_function(config: MORMForClassificationConfig) -> LossFuncType:
     return mo_loss_function
 
 
-def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True, discordance_epsilon=MIN_EPSILON) -> th.Tensor:
+def accuracy_rewards_labels(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, threshold=50.0, assume_qualitative_labels=False, check_undefined_label=True, missing_mask=None, assume_torch=True, discordance_epsilon=DEFAULT_EPSILON) -> th.Tensor:
 
     logits, targets, others = reward_pairs_and_scores_to_logits_and_targets(reward1, reward2, scores1, scores2, reward_diff_threshold=threshold,
                                                                             assume_qualitative_labels=assume_qualitative_labels, check_undefined_label=check_undefined_label, 
@@ -1344,7 +1344,7 @@ def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=T
         check_undefined_label=config.check_undefined_label,
         assume_torch=assume_torch)
     # Per-value grounding predictions (reward heads' raw output) for every sample in the
-    # batch, in original (interleaved chosen/rejected) order -- i.e. aligned with `others_logits`
+    # batch, in original (interleaved option1/option2) order -- i.e. aligned with `others_logits`
     # (e.g. the "ctx" dict's per-sample cluster assignments), not with the pairwise `logits_new`.
     others["groundings"] = logits_[..., :-1]
     if others_logits is not None:
@@ -1352,7 +1352,7 @@ def rewards_and_labels_to_logits_and_targets(logits, labels=None, assume_torch=T
     return logits_new, target_probs, others
 
 
-def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, no_grad_on_indexes: Optional[list[int]] = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
+def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, no_grad_on_indexes: Optional[list[int]] = None, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
 
     missing_mask = get_missing_rating_mask(
@@ -1425,7 +1425,7 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
     return mean
 
 
-def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
+def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_sum: th.Tensor = None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     missing_mask = get_missing_rating_mask(
         target_probs_p) if check_undefined_label and missing_mask is None else missing_mask
 
@@ -1470,7 +1470,7 @@ def value_system_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew
     return loss
 
 
-def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
+def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
    
 
     if ctx.vs_logprobs is not None:
@@ -1534,7 +1534,7 @@ def entropy_loss_logits(config: MORMForClassificationConfig, ctx: CtxData) -> th
     return -mi, CtxData.from_previous(ctx, extra_for_custom_loss=(*ctx.extra_for_custom_loss, mi))
     
     
-def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
+def value_system_selection_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, ctx: CtxData, gr_rew_sum: th.Tensor=None, return_metrics: bool = False, check_undefined_label=True, rew_center_coefficient=0.0, missing_mask: th.Tensor = None, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False, sharp_classification=False) -> th.Tensor:
     missing_mask = get_missing_rating_mask(
         target_probs_p)
     
@@ -1669,7 +1669,7 @@ def reward_pairs_and_scores_to_logits_and_targets(reward1: th.Tensor, reward2: t
     return logits_p, target_probs_p.detach(), others
 
 
-def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = None, scores2: th.Tensor = None, reward_diff_threshold: float = 50.0, return_metrics: bool = False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
+def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = None, scores2: th.Tensor = None, reward_diff_threshold: float = 50.0, return_metrics: bool = False, assume_qualitative_labels=False, check_undefined_label=True, rew_center_coefficient=0.0, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     """Multi-objective Cross-entropy loss: target_probs(1,2)*log(exp(r1) / (exp(r1) + exp(r2)))- (1-target_probs(1,2))*log(exp(r2) / (exp(r1) + exp(r2)))"""
 
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(
@@ -1683,7 +1683,7 @@ def grounding_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor = 
     return grounding_loss_logits(logits_p, target_probs_p, rew_sum=rew_sum, return_metrics=return_metrics, check_undefined_label=check_undefined_label, rew_center_coefficient=rew_center_coefficient, missing_mask=missing_mask, discordance_epsilon=discordance_epsilon, activate_disc_epsilon_for_loss=activate_disc_epsilon_for_loss)
 
 
-def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0, discordance_epsilon=MIN_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
+def value_system_loss(reward1: th.Tensor, reward2: th.Tensor, scores1: th.Tensor, scores2: th.Tensor, reward_diff_threshold=50.0, assume_qualitative_labels=False, check_undefined_label=False, return_metrics=False, rew_center_coefficient=0.0, discordance_epsilon=DEFAULT_EPSILON, activate_disc_epsilon_for_loss=False) -> th.Tensor:
     logits_p, target_probs_p, others = reward_pairs_and_scores_to_logits_and_targets(
         reward1, reward2, scores1, scores2, reward_diff_threshold, assume_qualitative_labels, check_undefined_label)
 
@@ -2003,13 +2003,9 @@ class MORMForClassification(PreTrainedModel):
 
         self.post_init()
 
-        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
         self.zero_grad(set_to_none=True)
 
     def init_networks(self, config, *args, **kwargs) -> None:
-
-        # TODO: Apparetly this is much faster. See https://docs.pytorch.org/tutorials/recipes/recipes/tuning_guide.html.
-        
 
         model_device = "cuda:0" if th.cuda.is_available() else "cpu"
         

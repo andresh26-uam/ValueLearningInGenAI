@@ -38,7 +38,7 @@ from transformers import (
 )
 from triton.language import assume
 
-from vsllib.defines import MODEL_DIR, MODEL_PRESETS, NO_RATING_MASK, ContextImplementations, infer_variant, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
+from vsllib.defines import MODEL_DIR, MODEL_PRESETS, NO_RATING_MASK, ContextImplementations, infer_variant, LLMProvider, MOLossFunctions, SupportedDatasets, VALUE_LAYER_ACTIVATIONS
 
 
 def seed_everything(seed: int, deterministic: bool = True):
@@ -559,6 +559,10 @@ class ScriptArguments:
         default_factory=lambda: f"run_",
         metadata={"help": "The name of the run for logging purposes."},
     )
+    run_name_file: Optional[str] = field(
+        default=None,
+        metadata={"help": "Path to a file where the actual run name will be written by the main process. Useful for tracking runs across subprocesses."},
+    )
     discordance_epsilon: Optional[float] = field(
         default=-1,
         metadata={"help": "The epsilon to use for calculating discordance-aware representativeness. If None, will be set to half of the minimum nonzero difference between any pair of labels in the training dataset."},
@@ -690,9 +694,13 @@ class ScriptArguments:
         default=1.0,
         metadata={"help": "The lambda parameter for the clustering loss used for context selection in VAE KMEANS: https://arxiv.org/pdf/1806.10069."},
     )
+    llm_provider: Optional[str] = field(
+        default=LLMProvider.OPENROUTER.value,
+        metadata={"help": "Choose between LLMProvider in defines.py: GROQ, OPENROUTER. Used for LLM-based context cluster summarization."},
+    )
 
 
-    
+
 def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) -> Tuple[ScriptArguments, Dict[str, Any]]:
 
     if script_args.config_file:
@@ -733,6 +741,7 @@ def argument_parser(script_args: ScriptArguments, class_source=ScriptArguments) 
     # Parsing enum values
     script_args.dataset = SupportedDatasets(script_args.dataset)
     script_args.loss_func_type = MOLossFunctions(script_args.loss_func_type)
+    script_args.llm_provider = LLMProvider(script_args.llm_provider).value
     if script_args.use_cpu:
         # bf16 is not supported on CPU, so we disable it if use_cpu is True.
         script_args.bf16 = False
@@ -841,30 +850,26 @@ def flatten_metrics_for_csv(metrics: Dict[str, Any]) -> Dict[str, Any]:
     return flat
 
 
-def compute_response_token_lengths(hf_dataset, tokenizer) -> np.ndarray:
-    """Per-sample (interleaved option1, option2, option1, option2, ...) response token
-    counts, tokenized from the dataset's raw `response1`/`response2` text columns
-    (not the chat-templated `option1`/`option2`, so prompt tokens aren't counted).
-
-    Requires a tokenizer (nlp_based task_type) and `response1`/`response2` columns on
-    the dataset -- these are only retained when the dataset was (re)processed with them
-    in `extra_keep_keys` (see `defines.py`'s `*_EXTRA_KEYS`). Asserts rather than
-    degrading silently: re-run preprocessing with `--repostprocess` if this fails on a
-    dataset processed before they were added.
+def compute_response_token_lengths(hf_dataset) -> np.ndarray:
+    """Per-sample (interleaved option1, option2, option1, option2, ...) token counts,
+    read directly from the dataset's already-tokenized `input_ids_1`/`input_ids_2`
+    columns -- the exact tokenization used for the model's chat-templated (prompt +
+    response) `option1`/`option2` inputs (not re-tokenized here, and not the response
+    alone). These columns are always retained by preprocessing for nlp_based datasets
+    (no `--repostprocess` re-run needed); feature_based datasets don't keep them. Since
+    prompt length varies across examples, this length proxy can confound a
+    length-vs-reward correlation with prompt-length effects.
     """
-    assert tokenizer is not None, (
-        "compute_response_token_lengths requires a tokenizer (nlp_based task_type); got tokenizer=None."
-    )
     columns = hf_dataset.column_names
-    assert "response1" in columns and "response2" in columns, (
-        f"compute_response_token_lengths requires response1/response2 columns, got columns={columns!r}. "
-        "Re-run preprocessing with --repostprocess to retain them (see defines.py's *_EXTRA_KEYS)."
+    assert "input_ids_1" in columns and "input_ids_2" in columns, (
+        f"compute_response_token_lengths requires input_ids_1/input_ids_2 columns "
+        f"(nlp_based datasets only), got columns={columns!r}."
     )
-    response1 = hf_dataset["response1"]
-    response2 = hf_dataset["response2"]
-    lengths = np.empty(2 * len(response1), dtype=np.int64)
-    lengths[0::2] = [len(tokenizer(str(text), add_special_tokens=False)["input_ids"]) for text in response1]
-    lengths[1::2] = [len(tokenizer(str(text), add_special_tokens=False)["input_ids"]) for text in response2]
+    input_ids_1 = hf_dataset["input_ids_1"]
+    input_ids_2 = hf_dataset["input_ids_2"]
+    lengths = np.empty(2 * len(input_ids_1), dtype=np.int64)
+    lengths[0::2] = [len(ids) for ids in input_ids_1]
+    lengths[1::2] = [len(ids) for ids in input_ids_2]
     return lengths
 
 def entropy(p, eps=1e-12):    
@@ -1013,6 +1018,168 @@ def plot_alternative_clusterings(
 
             cmap = plt.cm.get_cmap(palettes[i % len(palettes)], len(sorted_clusters))
 
+def _to_numpy_array(x) -> Optional[np.ndarray]:
+    if x is None:
+        return None
+    if isinstance(x, th.Tensor):
+        return x.detach().cpu().numpy()
+    return np.asarray(x)
+
+
+def _cross_agreement(value_side, outcome_side, value_threshold: float, outcome_threshold: float,
+                      value_missing: Optional[float] = None, outcome_missing: Optional[float] = None) -> np.ndarray:
+    """Per-value percentage of pairs where `value_side`'s sign (relative to
+    `value_threshold`) agrees with `outcome_side`'s sign (relative to
+    `outcome_threshold`): both favor option1, both favor option2, or both are exactly
+    tied at their own threshold. `value_side` has shape (n_pairs, num_values);
+    `outcome_side` has shape (n_pairs,), broadcast across values. A ground-truth label
+    uses threshold 0.5 and `NO_RATING_MASK` as its missing-value sentinel (undefined
+    ratings are excluded from that value's percentage); a raw model prediction
+    (logit) uses threshold 0.0 and has no missing-value concept (`*_missing=None`).
+    """
+    value_side = _to_numpy_array(value_side)
+    outcome_side = _to_numpy_array(outcome_side)[:, None]
+
+    missing = np.zeros_like(value_side, dtype=bool)
+    if value_missing is not None:
+        missing = missing | (value_side == value_missing)
+    if outcome_missing is not None:
+        missing = missing | (outcome_side == outcome_missing)
+
+    agreement = (np.sign(value_side - value_threshold) == np.sign(outcome_side - outcome_threshold)).astype(float)
+    agreement[missing] = np.nan
+    with np.errstate(invalid="ignore"):
+        return np.nanmean(agreement, axis=0) * 100.0
+
+
+def compute_value_outcome_agreement(pairwise_labels) -> np.ndarray:
+    """GTGR-To-GTVS: per-value percentage of pairs, over a whole set of pairs (not
+    model-dependent), where the Ground-Truth per-value GRounding label (GTGR) agrees
+    with the Ground-Truth overall Value-System/preference label (GTVS): value_i favors
+    option1 (>0.5) and the overall label favors option1 (>0.5), value_i favors option2
+    (<0.5) and the overall label favors option2 (<0.5), or value_i and the overall
+    label are both exactly tied (==0.5).
+
+    `pairwise_labels` is the ground-truth target-probability array (n_pairs, num_values
+    + 1) -- i.e. `target_probs_p`/`pairwise_labels` as produced by
+    `reward_pairs_and_scores_to_logits_and_targets` -- whose last column is the overall
+    preference label and >0.5/<0.5/==0.5 already encode the sign of the underlying
+    score difference (see `scores_to_target_probs`). Pairs where the value's own label
+    or the overall label is undefined (`NO_RATING_MASK`) are excluded from that value's
+    percentage, matching how `accuracy_logits`/`get_missing_rating_mask` treat
+    undefined ratings elsewhere.
+    """
+    pairwise_labels = _to_numpy_array(pairwise_labels)
+    return _cross_agreement(
+        pairwise_labels[..., :-1], pairwise_labels[..., -1],
+        value_threshold=0.5, outcome_threshold=0.5,
+        value_missing=NO_RATING_MASK, outcome_missing=NO_RATING_MASK,
+    )
+
+
+def compute_lrgr_to_gtvs_agreement(pairwise_predictions, pairwise_labels) -> np.ndarray:
+    """LRGR-To-GTVS: per-value percentage of pairs where the model's *predicted*
+    per-value grounding (LRGR: Learned/predicted GRounding -- `pairwise_predictions`,
+    raw logits, sign relative to 0) agrees with the *ground-truth* overall preference
+    (GTVS: Ground-Truth Value-System/preference -- `pairwise_labels[..., -1]`, a
+    probability, sign relative to 0.5). Both are (n_pairs, num_values + 1), aligned
+    pair-for-pair (see `compute_value_outcome_agreement` for the ground-truth-only
+    equivalent, GTGR-To-GTVS).
+    """
+    pairwise_predictions = _to_numpy_array(pairwise_predictions)
+    pairwise_labels = _to_numpy_array(pairwise_labels)
+    return _cross_agreement(
+        pairwise_predictions[..., :-1], pairwise_labels[..., -1],
+        value_threshold=0.0, outcome_threshold=0.5,
+        value_missing=None, outcome_missing=NO_RATING_MASK,
+    )
+
+
+def compute_lrgr_to_lrvs_agreement(pairwise_predictions) -> np.ndarray:
+    """LRGR-To-LRVS: per-value percentage of pairs where the model's *predicted*
+    per-value grounding (LRGR) agrees with the model's own *predicted* overall
+    value-system preference (LRVS: Learned/predicted Value-System --
+    `pairwise_predictions[..., -1]`) -- both raw logits, sign relative to 0.
+    `pairwise_predictions` is (n_pairs, num_values + 1); entirely model-derived, no
+    ground truth involved.
+    """
+    pairwise_predictions = _to_numpy_array(pairwise_predictions)
+    return _cross_agreement(
+        pairwise_predictions[..., :-1], pairwise_predictions[..., -1],
+        value_threshold=0.0, outcome_threshold=0.0,
+        value_missing=None, outcome_missing=None,
+    )
+
+
+def compute_value_outcome_agreement_per_cluster(pairwise_labels, cluster_ids) -> Dict[Any, np.ndarray]:
+    """`compute_value_outcome_agreement` (GTGR-To-GTVS), applied separately to each
+    cluster's subset of pairs. `cluster_ids` must be a per-pair array, aligned
+    one-per-row with `pairwise_labels` (one label per pair, not per sample).
+    """
+    pairwise_labels = _to_numpy_array(pairwise_labels)
+    cluster_ids = _to_numpy_array(cluster_ids)
+    return {
+        c: compute_value_outcome_agreement(pairwise_labels[cluster_ids == c])
+        for c in sorted(np.unique(cluster_ids).tolist())
+    }
+
+
+def compute_lrgr_to_gtvs_agreement_per_cluster(pairwise_predictions, pairwise_labels, cluster_ids) -> Dict[Any, np.ndarray]:
+    """`compute_lrgr_to_gtvs_agreement` (LRGR-To-GTVS), applied separately to each
+    cluster's subset of pairs.
+    """
+    pairwise_predictions = _to_numpy_array(pairwise_predictions)
+    pairwise_labels = _to_numpy_array(pairwise_labels)
+    cluster_ids = _to_numpy_array(cluster_ids)
+    return {
+        c: compute_lrgr_to_gtvs_agreement(pairwise_predictions[cluster_ids == c], pairwise_labels[cluster_ids == c])
+        for c in sorted(np.unique(cluster_ids).tolist())
+    }
+
+
+def compute_lrgr_to_lrvs_agreement_per_cluster(pairwise_predictions, cluster_ids) -> Dict[Any, np.ndarray]:
+    """`compute_lrgr_to_lrvs_agreement` (LRGR-To-LRVS), applied separately to each
+    cluster's subset of pairs.
+    """
+    pairwise_predictions = _to_numpy_array(pairwise_predictions)
+    cluster_ids = _to_numpy_array(cluster_ids)
+    return {
+        c: compute_lrgr_to_lrvs_agreement(pairwise_predictions[cluster_ids == c])
+        for c in sorted(np.unique(cluster_ids).tolist())
+    }
+
+
+def format_value_outcome_agreements(agreements: Optional[Dict[str, Optional[np.ndarray]]]) -> Optional[str]:
+    """Multi-line rendering of one or more named agreement results -- e.g.
+    `{"GTGR-To-GTVS": compute_value_outcome_agreement(...), "LRGR-To-GTVS":
+    compute_lrgr_to_gtvs_agreement(...), "LRGR-To-LRVS":
+    compute_lrgr_to_lrvs_agreement(...)}` -- as one "<LABEL>: [...]" line per entry, in
+    `agreements`' insertion order, e.g. for a figure suptitle or a per-cluster subplot
+    title. Returns None if `agreements` is empty/None or every value in it is None.
+    """
+    if not agreements:
+        return None
+    lines = [
+        f"{label}: [" + ", ".join(f"{pct:.1f}%" for pct in values) + "]"
+        for label, values in agreements.items() if values is not None
+    ]
+    return "\n".join(lines) if lines else None
+
+
+def _agreements_for_cluster(agreements_per_cluster: Optional[Dict[str, Optional[Dict[Any, np.ndarray]]]], cluster_id) -> Dict[str, np.ndarray]:
+    """Picks out one cluster's row from each named `compute_*_agreement_per_cluster`
+    result in `agreements_per_cluster` (a dict of label -> {cluster_id -> array}),
+    for `format_value_outcome_agreements`.
+    """
+    if not agreements_per_cluster:
+        return {}
+    return {
+        label: per_cluster.get(cluster_id)
+        for label, per_cluster in agreements_per_cluster.items()
+        if per_cluster is not None
+    }
+
+
 def plot_groundings_violin(
     groundings: np.ndarray,
     value_names: Iterable[str],
@@ -1021,11 +1188,20 @@ def plot_groundings_violin(
     title: str = "",
     ylabel: str = "predicted grounding",
     reference_line: Optional[float] = None,
+    value_outcome_agreements: Optional[Dict[str, Optional[np.ndarray]]] = None,
+    value_outcome_agreements_per_cluster: Optional[Dict[str, Optional[Dict[Any, np.ndarray]]]] = None,
 ) -> None:
     """
     Violin plots of the reward heads' per-value predictions (`groundings`, shape
     (num_samples, num_values)), one subplot per cluster id (a single "all" subplot if
     `cluster_labels` is None), with one violin per value inside each subplot.
+
+    `value_outcome_agreements`/`value_outcome_agreements_per_cluster` -- named results
+    from `compute_value_outcome_agreement` (GTGR-To-GTVS), `compute_lrgr_to_gtvs_agreement`
+    (LRGR-To-GTVS), `compute_lrgr_to_lrvs_agreement` (LRGR-To-LRVS), and their
+    `_per_cluster` counterparts, keyed by those same labels -- are diagnostics unrelated
+    to the violins' own data, shown once above the whole figure (dataset-wide) and, per
+    cluster id, inside that subplot's own title.
     """
     value_names = list(value_names)
     num_values = groundings.shape[1]
@@ -1034,21 +1210,36 @@ def plot_groundings_violin(
 
     columns = min(4, len(unique_clusters))
     rows = (len(unique_clusters) + columns - 1) // columns
-    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 5.5 * rows), squeeze=False)
     for i, c in enumerate(unique_clusters):
         ax = axes.flat[i]
-        data = [groundings[cluster_ids == c, v] for v in range(num_values)]
-        ax.violinplot(data, showmeans=True, showmedians=True)
+        positions, data = [], []
+        for v in range(num_values):
+            column = groundings[cluster_ids == c, v]
+            column = column[~np.isnan(column)]
+            if len(column) > 0:
+                positions.append(v + 1)
+                data.append(column)
+        if data:
+            ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
         if reference_line is not None:
             ax.axhline(reference_line, color="gray", linestyle="--", linewidth=1)
         ax.set_xticks(range(1, num_values + 1))
         ax.set_xticklabels(value_names, rotation=45, ha="right")
-        ax.set_title(f"cluster {c}" if cluster_labels is not None else "all")
+        subplot_title = f"cluster {c}" if cluster_labels is not None else "all"
+        cluster_agreement = format_value_outcome_agreements(
+            _agreements_for_cluster(value_outcome_agreements_per_cluster, c))
+        if cluster_agreement is not None:
+            subplot_title += f"\n{cluster_agreement}"
+        ax.set_title(subplot_title)
         ax.set_ylabel(ylabel)
     for ax in axes.flat[len(unique_clusters):]:
         ax.axis("off")
-    fig.suptitle(title)
-    fig.tight_layout()
+    suptitle_agreement = format_value_outcome_agreements(value_outcome_agreements)
+    full_title = f"{title}\n{suptitle_agreement}" if suptitle_agreement is not None else title
+    fig.tight_layout(pad=2.5, h_pad=5.0, w_pad=3.0)
+    fig.subplots_adjust(hspace=1.0, wspace=0.4, top=0.86 if suptitle_agreement is not None else None)
+    fig.suptitle(full_title)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")
@@ -1057,26 +1248,55 @@ def plot_groundings_violin(
 
 def plot_grounding_differences_violin(
     groundings: np.ndarray,
+    value_labels: np.ndarray,
     value_names: Iterable[str],
     output_path: str,
     cluster_labels: Optional[np.ndarray] = None,
     title: str = "",
+    missing_value: float = NO_RATING_MASK,
+    value_outcome_agreements: Optional[Dict[str, Optional[np.ndarray]]] = None,
+    value_outcome_agreements_per_cluster: Optional[Dict[str, Optional[Dict[Any, np.ndarray]]]] = None,
 ) -> None:
     """
-    Violin plots of the per-value grounding difference between the chosen and rejected
-    response of each preference pair (chosen - rejected), one subplot per cluster id,
-    one violin per value inside each subplot.
+    Violin plots of the per-value grounding (model-predicted reward) difference
+    between the two responses of each preference pair, ordered *independently per
+    value*: for value `v`, the response with the higher ground-truth `v` rating goes
+    first in the subtraction (so the sign always means "response rated higher on this
+    value, minus response rated lower on this value" for that value's own label --
+    unlike `plot_grounding_differences_violin_by_overall_score`, which uses a single
+    ordering, from the overall preference score, applied to every value column alike).
+    One subplot per cluster id, one violin per value inside each subplot.
 
     `groundings` (shape (num_samples, num_values)) and `cluster_labels` (shape
-    (num_samples,)) must be in the original interleaved
-    (chosen, rejected, chosen, rejected, ...) order produced by the model -- i.e. the
-    same order as `others["groundings"]` in `rewards_and_labels_to_logits_and_targets`
+    (num_samples,)) must be in the original interleaved (option1, option2, option1,
+    option2, ...) order produced by the model -- i.e. the same order as
+    `others["groundings"]` in `rewards_and_labels_to_logits_and_targets`
     (`logits[:, :-1]`), where consecutive rows (2*p, 2*p+1) form preference pair `p`.
+    Note this is NOT (preferred, non-preferred, preferred, non-preferred, ...):
+    `response1`/`option1` is not guaranteed to be the preferred response (see
+    `score1`/`score2` in the preprocessing scripts) -- that's exactly why per-value
+    and per-overall-score orderings can disagree and are both worth plotting.
+
+    `value_labels` (shape (num_pairs, 2, num_values), e.g. `dataset["labels"][:, :,
+    :-1]`) are the ground-truth per-value ratings for option1 (`value_labels[:, 0, :]`)
+    and option2 (`value_labels[:, 1, :]`), aligned one-row-per-pair with `groundings`'
+    pairs. A (pair, value) entry where either rating equals `missing_value` (an
+    undefined rating -- ordering is undefined without it) is dropped from that value's
+    violin rather than plotted with an arbitrary sign.
     """
     n_pairs = len(groundings) // 2
-    chosen = groundings[0:2 * n_pairs:2]
-    rejected = groundings[1:2 * n_pairs:2]
-    diffs = chosen - rejected
+    option1 = groundings[0:2 * n_pairs:2]
+    option2 = groundings[1:2 * n_pairs:2]
+    n_pairs = min(n_pairs, len(value_labels))
+    option1, option2 = option1[:n_pairs], option2[:n_pairs]
+    label1 = np.asarray(value_labels)[:n_pairs, 0, :]
+    label2 = np.asarray(value_labels)[:n_pairs, 1, :]
+
+    option1_is_higher = label1 >= label2
+    diffs = np.where(option1_is_higher, option1 - option2, option2 - option1)
+    invalid = (label1 == missing_value) | (label2 == missing_value)
+    diffs = np.where(invalid, np.nan, diffs)
+
     pair_cluster_labels = np.asarray(cluster_labels)[0:2 * n_pairs:2] if cluster_labels is not None else None
     plot_groundings_violin(
         diffs,
@@ -1084,36 +1304,119 @@ def plot_grounding_differences_violin(
         output_path,
         cluster_labels=pair_cluster_labels,
         title=title,
-        ylabel="grounding difference (chosen - rejected)",
+        ylabel="grounding difference",
         reference_line=0.0,
+        value_outcome_agreements=value_outcome_agreements,
+        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
     )
 
 
-def plot_label_differences_violin(
-    chosen_labels: np.ndarray,
-    rejected_labels: np.ndarray,
+def plot_grounding_differences_violin_by_overall_score(
+    groundings: np.ndarray,
+    overall_scores: np.ndarray,
     value_names: Iterable[str],
     output_path: str,
     cluster_labels: Optional[np.ndarray] = None,
     title: str = "",
     missing_value: float = NO_RATING_MASK,
+    value_outcome_agreements: Optional[Dict[str, Optional[np.ndarray]]] = None,
+    value_outcome_agreements_per_cluster: Optional[Dict[str, Optional[Dict[Any, np.ndarray]]]] = None,
+) -> None:
+    """
+    Violin plots of the per-value grounding (model-predicted reward) difference
+    between the two responses of each preference pair, ordered by the ground-truth
+    *overall* preference score -- one ordering per pair (whichever response has the
+    higher overall score goes first), applied identically to every value column,
+    regardless of that value's own label. This answers "for the response actually
+    preferred overall, does the model predict higher per-value rewards across all
+    values?" -- unlike `plot_grounding_differences_violin`, which orders each value
+    column independently by that value's own ground-truth label.
+
+    `groundings`/`cluster_labels` must be in the interleaved (option1, option2, ...)
+    order, same convention as `plot_grounding_differences_violin`. `overall_scores`
+    (shape (num_pairs, 2), e.g. `dataset["labels"][:, :, -1]`) are the ground-truth
+    overall preference score for option1/option2, aligned one-row-per-pair.
+    """
+    n_pairs = len(groundings) // 2
+    option1 = groundings[0:2 * n_pairs:2]
+    option2 = groundings[1:2 * n_pairs:2]
+    n_pairs = min(n_pairs, len(overall_scores))
+    option1, option2 = option1[:n_pairs], option2[:n_pairs]
+    score1 = np.asarray(overall_scores)[:n_pairs, 0]
+    score2 = np.asarray(overall_scores)[:n_pairs, 1]
+
+    option1_is_preferred = score1 >= score2
+    diffs = np.where(option1_is_preferred[:, None], option1 - option2, option2 - option1)
+    invalid = (score1 == missing_value) | (score2 == missing_value)
+    diffs = np.where(invalid[:, None], np.nan, diffs)
+
+    pair_cluster_labels = np.asarray(cluster_labels)[0:2 * n_pairs:2] if cluster_labels is not None else None
+    plot_groundings_violin(
+        diffs,
+        value_names,
+        output_path,
+        cluster_labels=pair_cluster_labels,
+        title=title,
+        ylabel="grounding difference",
+        reference_line=0.0,
+        value_outcome_agreements=value_outcome_agreements,
+        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
+    )
+
+
+def plot_label_differences_violin(
+    value_labels: np.ndarray,
+    overall_scores: np.ndarray,
+    value_names: Iterable[str],
+    output_path: str,
+    cluster_labels: Optional[np.ndarray] = None,
+    title: str = "",
+    missing_value: float = NO_RATING_MASK,
+    value_outcome_agreements: Optional[Dict[str, Optional[np.ndarray]]] = None,
+    value_outcome_agreements_per_cluster: Optional[Dict[str, Optional[Dict[Any, np.ndarray]]]] = None,
 ) -> None:
     """
     Violin plots of the *ground-truth dataset* per-value label difference between the
-    chosen and rejected response of each preference pair (chosen - rejected), one
-    subplot per cluster id, one violin per value inside each subplot.
+    two responses of each preference pair, ordered by the ground-truth *overall*
+    preference score -- one ordering per pair (whichever response has the higher
+    overall score goes first), applied identically to every value column, regardless
+    of that value's own label (same convention as
+    `plot_grounding_differences_violin_by_overall_score`, applied to the ground-truth
+    labels instead of the model's predicted groundings). One subplot per cluster id,
+    one violin per value inside each subplot.
 
-    `chosen_labels`/`rejected_labels` (shape (num_pairs, num_values), e.g.
-    `dataset["labels"][:, 0, :-1]` / `[:, 1, :-1]`) and `cluster_labels` (shape
-    (num_pairs,)) must be aligned row-for-row (one row per preference pair). A pair
-    whose chosen or rejected rating for a given value equals `missing_value` (an
-    undefined rating) is dropped from that value's violin rather than plotted as a
-    bogus difference.
+    There is no fixed "preferred" side by construction -- `option1`/`option2` (and
+    correspondingly `value_labels[:, 0, :]`/`value_labels[:, 1, :]`) carry no inherent
+    preference ordering; for each pair, whichever option's overall score is higher is
+    used as the first term of the subtraction.
+
+    `value_labels` (shape (num_pairs, 2, num_values), e.g. `dataset["labels"][:, :,
+    :-1]`) are the ground-truth per-value ratings for option1/option2, and
+    `overall_scores` (shape (num_pairs, 2), e.g. `dataset["labels"][:, :, -1]`) are
+    the ground-truth overall preference score for option1/option2, aligned
+    one-row-per-pair with `cluster_labels`. A pair whose overall score, or whose
+    rating for a given value, equals `missing_value` (an undefined rating -- ordering
+    is undefined without it) is dropped from that value's violin rather than plotted
+    with an arbitrary sign.
+
+    `value_outcome_agreements`/`value_outcome_agreements_per_cluster` -- see
+    `plot_groundings_violin` -- are named diagnostics shown above the whole figure and
+    inside each subplot's own title, respectively.
     """
     value_names = list(value_names)
-    num_values = chosen_labels.shape[1]
-    diffs = np.asarray(chosen_labels) - np.asarray(rejected_labels)
-    invalid = (np.asarray(chosen_labels) == missing_value) | (np.asarray(rejected_labels) == missing_value)
+    value_labels = np.asarray(value_labels)
+    num_values = value_labels.shape[-1]
+    score1 = np.asarray(overall_scores)[:, 0]
+    score2 = np.asarray(overall_scores)[:, 1]
+    label1 = value_labels[:, 0, :]
+    label2 = value_labels[:, 1, :]
+
+    option1_is_preferred = score1 >= score2
+    diffs = np.where(option1_is_preferred[:, None], label1 - label2, label2 - label1)
+    invalid = (
+        (score1 == missing_value)[:, None] | (score2 == missing_value)[:, None]
+        | (label1 == missing_value) | (label2 == missing_value)
+    )
     diffs = np.where(invalid, np.nan, diffs)
 
     cluster_ids = np.zeros(len(diffs), dtype=int) if cluster_labels is None else np.asarray(cluster_labels)
@@ -1121,7 +1424,7 @@ def plot_label_differences_violin(
 
     columns = min(4, len(unique_clusters))
     rows = (len(unique_clusters) + columns - 1) // columns
-    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+    fig, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 5.5 * rows), squeeze=False)
     for i, c in enumerate(unique_clusters):
         ax = axes.flat[i]
         positions, data = [], []
@@ -1136,12 +1439,20 @@ def plot_label_differences_violin(
         ax.axhline(0.0, color="gray", linestyle="--", linewidth=1)
         ax.set_xticks(range(1, num_values + 1))
         ax.set_xticklabels(value_names, rotation=45, ha="right")
-        ax.set_title(f"cluster {c}" if cluster_labels is not None else "all")
-        ax.set_ylabel("label difference (chosen - rejected)")
+        subplot_title = f"cluster {c}" if cluster_labels is not None else "all"
+        cluster_agreement = format_value_outcome_agreements(
+            _agreements_for_cluster(value_outcome_agreements_per_cluster, c))
+        if cluster_agreement is not None:
+            subplot_title += f"\n{cluster_agreement}"
+        ax.set_title(subplot_title)
+        ax.set_ylabel("label difference")
     for ax in axes.flat[len(unique_clusters):]:
         ax.axis("off")
-    fig.suptitle(title)
-    fig.tight_layout()
+    suptitle_agreement = format_value_outcome_agreements(value_outcome_agreements)
+    full_title = f"{title}\n{suptitle_agreement}" if suptitle_agreement is not None else title
+    fig.tight_layout(pad=2.5, h_pad=5.0, w_pad=3.0)
+    fig.subplots_adjust(hspace=1.0, wspace=0.4, top=0.86 if suptitle_agreement is not None else None)
+    fig.suptitle(full_title)
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, dpi=150, bbox_inches="tight")

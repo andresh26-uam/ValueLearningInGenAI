@@ -56,7 +56,7 @@ from vsllib.reward_models import (
 from vsllib.model_utils import (
     MORMForClassificationConfig,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, compute_response_token_lengths, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
+from vsllib.utils import  ScriptArguments, argument_parser, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_gtvs_agreement_per_cluster, compute_lrgr_to_lrvs_agreement, compute_lrgr_to_lrvs_agreement_per_cluster, compute_response_token_lengths, compute_value_outcome_agreement, compute_value_outcome_agreement_per_cluster, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_grounding_differences_violin_by_overall_score, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -81,6 +81,10 @@ class EvalArguments(ScriptArguments):
     weights_only: bool = field(
         default=False,
         metadata={"help": "If True, only extract and save value system weights without running full evaluation."},
+    )
+    do_llm_summarization: bool = field(
+        default=True,
+        metadata={"help": "Whether to generate LLM-based context cluster summaries."},
     )
 
     tsne_perplexity: int = field(
@@ -603,8 +607,10 @@ def main() -> None:
         )
 
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
+        pprint(vars(dataset))
         
         metrics_test = trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test")
+        
         if "others" in metrics_test.keys():
             others_test = metrics_test.pop("others")
         flat_metrics_test = flatten_metrics_for_csv(metrics_test)
@@ -630,8 +636,8 @@ def main() -> None:
             trainer: CtxMORewardTrainer
 
             value_names = list(dataset.value_keys)
-            eval_response_lengths = compute_response_token_lengths(dataset.eval_dataset, tokenizer)
-            test_response_lengths = compute_response_token_lengths(dataset.test_dataset, tokenizer)
+            eval_response_lengths = compute_response_token_lengths(dataset.eval_dataset)
+            test_response_lengths = compute_response_token_lengths(dataset.test_dataset)
             for split_name, others_split, split_dataset in (
                 ("eval", others_eval, dataset.eval_dataset),
                 ("test", others_test, dataset.test_dataset),
@@ -639,6 +645,8 @@ def main() -> None:
                 groundings = others_split.get("groundings")
                 ctx_dict = others_split.get("ctx")
                 cluster_labels = ctx_dict.get("vs_assignments") if isinstance(ctx_dict, dict) else None
+                pairwise_labels = others_split.get("pairwise_labels")
+                pairwise_predictions = others_split.get("pairwise_predictions")
                 if groundings is not None:
                     groundings = np.asarray(groundings)
                     cluster_labels = np.asarray(cluster_labels) if cluster_labels is not None else None
@@ -648,6 +656,60 @@ def main() -> None:
                             f"groundings has {len(groundings)} rows but cluster labels "
                             f"has {len(cluster_labels)} rows."
                         )
+
+                    # Ground-truth dataset labels, one (option1, option2) pair per row,
+                    # aligned to the same pairs/clusters via the split dataset's
+                    # original order. NOTE: option1 is NOT guaranteed to be the
+                    # preferred response (score1/score2 -- the last column of labels --
+                    # determine that independently per pair); that's why the diff plots
+                    # below reorder explicitly rather than assuming index 0 is preferred.
+                    n_pairs = len(groundings) // 2
+                    pair_cluster_labels = cluster_labels[0:2 * n_pairs:2] if cluster_labels is not None else None
+
+                    # Grounding-to-outcome sign-agreement diagnostics -- GTGR-To-GTVS
+                    # (dataset-only/model-independent), LRGR-To-GTVS and LRGR-To-LRVS
+                    # (involve the model's own predictions) -- shown above every violin
+                    # plot below, both dataset-wide and per value-system cluster.
+                    gtgr_to_gtvs_agreement = None
+                    lrgr_to_gtvs_agreement = None
+                    lrgr_to_lrvs_agreement = None
+                    gtgr_to_gtvs_agreement_per_cluster = None
+                    lrgr_to_gtvs_agreement_per_cluster = None
+                    lrgr_to_lrvs_agreement_per_cluster = None
+                    if pairwise_labels is not None:
+                        pairwise_labels_arr = np.asarray(pairwise_labels)
+                        m = min(len(pairwise_labels_arr), n_pairs)
+                        gtgr_to_gtvs_agreement = compute_value_outcome_agreement(pairwise_labels_arr[:m])
+                        if pair_cluster_labels is not None:
+                            gtgr_to_gtvs_agreement_per_cluster = compute_value_outcome_agreement_per_cluster(
+                                pairwise_labels_arr[:m], pair_cluster_labels[:m])
+                        if pairwise_predictions is not None:
+                            pairwise_predictions_arr = np.asarray(pairwise_predictions)
+                            m = min(m, len(pairwise_predictions_arr))
+                            lrgr_to_gtvs_agreement = compute_lrgr_to_gtvs_agreement(
+                                pairwise_predictions_arr[:m], pairwise_labels_arr[:m])
+                            if pair_cluster_labels is not None:
+                                lrgr_to_gtvs_agreement_per_cluster = compute_lrgr_to_gtvs_agreement_per_cluster(
+                                    pairwise_predictions_arr[:m], pairwise_labels_arr[:m], pair_cluster_labels[:m])
+                    if pairwise_predictions is not None:
+                        pairwise_predictions_arr = np.asarray(pairwise_predictions)
+                        m = min(len(pairwise_predictions_arr), n_pairs)
+                        lrgr_to_lrvs_agreement = compute_lrgr_to_lrvs_agreement(pairwise_predictions_arr[:m])
+                        if pair_cluster_labels is not None:
+                            lrgr_to_lrvs_agreement_per_cluster = compute_lrgr_to_lrvs_agreement_per_cluster(
+                                pairwise_predictions_arr[:m], pair_cluster_labels[:m])
+
+                    value_outcome_agreements = {
+                        "GTGR-To-GTVS": gtgr_to_gtvs_agreement,
+                        "LRGR-To-GTVS": lrgr_to_gtvs_agreement,
+                        "LRGR-To-LRVS": lrgr_to_lrvs_agreement,
+                    }
+                    value_outcome_agreements_per_cluster = {
+                        "GTGR-To-GTVS": gtgr_to_gtvs_agreement_per_cluster,
+                        "LRGR-To-GTVS": lrgr_to_gtvs_agreement_per_cluster,
+                        "LRGR-To-LRVS": lrgr_to_lrvs_agreement_per_cluster,
+                    }
+
                     plot_groundings_violin(
                         groundings,
                         value_names,
@@ -655,33 +717,50 @@ def main() -> None:
                         cluster_labels=cluster_labels,
                         title=f"Grounding predictions ({split_name} set)"
                         + (" by value-system cluster" if cluster_labels is not None else ""),
-                    )
-                    plot_grounding_differences_violin(
-                        groundings,
-                        value_names,
-                        os.path.join(script_args.results_dir, f"{split_name}_groundings_diff_violin.png"),
-                        cluster_labels=cluster_labels,
-                        title=f"Grounding differences, chosen - rejected ({split_name} set)"
-                        + (" by value-system cluster" if cluster_labels is not None else ""),
+                        value_outcome_agreements=value_outcome_agreements,
+                        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
                     )
 
-                    # Ground-truth dataset labels (as opposed to the model's predicted
-                    # groundings above), one (chosen, rejected) pair per row, aligned to
-                    # the same pairs/clusters via the split dataset's original order.
-                    n_pairs = len(groundings) // 2
-                    pair_cluster_labels = cluster_labels[0:2 * n_pairs:2] if cluster_labels is not None else None
-                    value_labels = np.asarray(split_dataset["labels"])[:, :, :-1]  # (N_pairs, 2, num_values)
+                    labels_array = np.asarray(split_dataset["labels"])  # (N_pairs, 2, num_values + 1)
+                    value_labels = labels_array[:, :, :-1]  # (N_pairs, 2, num_values)
+                    overall_scores = labels_array[:, :, -1]  # (N_pairs, 2)
                     n_label_pairs = min(n_pairs, len(value_labels))
                     if pair_cluster_labels is not None:
                         pair_cluster_labels = pair_cluster_labels[:n_label_pairs]
+
+                    plot_grounding_differences_violin(
+                        groundings,
+                        value_labels,
+                        value_names,
+                        os.path.join(script_args.results_dir, f"{split_name}_groundings_diff_violin.png"),
+                        cluster_labels=cluster_labels,
+                        title=f"Grounding differences, higher-labeled - lower-labeled per value ({split_name} set)"
+                        + (" by value-system cluster" if cluster_labels is not None else ""),
+                        value_outcome_agreements=value_outcome_agreements,
+                        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
+                    )
+                    plot_grounding_differences_violin_by_overall_score(
+                        groundings,
+                        overall_scores,
+                        value_names,
+                        os.path.join(script_args.results_dir, f"{split_name}_groundings_diff_by_overall_score_violin.png"),
+                        cluster_labels=cluster_labels,
+                        title=f"Grounding differences, preferred - non-preferred by overall score ({split_name} set)"
+                        + (" by value-system cluster" if cluster_labels is not None else ""),
+                        value_outcome_agreements=value_outcome_agreements,
+                        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
+                    )
+
                     plot_label_differences_violin(
-                        value_labels[:n_label_pairs, 0, :],
-                        value_labels[:n_label_pairs, 1, :],
+                        value_labels[:n_label_pairs],
+                        overall_scores[:n_label_pairs],
                         value_names,
                         os.path.join(script_args.results_dir, f"{split_name}_label_diff_violin.png"),
                         cluster_labels=pair_cluster_labels,
-                        title=f"Ground-truth value label differences, chosen - rejected ({split_name} set)"
+                        title=f"Ground-truth value label differences, preferred - non-preferred by overall score ({split_name} set)"
                         + (" by value-system cluster" if pair_cluster_labels is not None else ""),
+                        value_outcome_agreements=value_outcome_agreements,
+                        value_outcome_agreements_per_cluster=value_outcome_agreements_per_cluster,
                     )
 
             output = trainer.evaluate_contexts(eval_dataset=dataset.eval_dataset,
@@ -693,7 +772,9 @@ def main() -> None:
                                                    "tsne_seed": script_args.tsne_seed},
                                                value_names=value_names,
                                                eval_response_lengths=eval_response_lengths,
-                                               test_response_lengths=test_response_lengths)
+                                               test_response_lengths=test_response_lengths,
+                                               do_llm_summarization=script_args.do_llm_summarization,
+                                               llm_provider=script_args.llm_provider)
             save_context_evaluation(output, output_dir=script_args.results_dir)
 
             

@@ -25,7 +25,25 @@ openai/gpt-oss-120b
 qwen/qwen3.8-27b
 qwen/qwen3.6-27b """
 
-LLM_MODEL_EVAL = "openai/gpt-oss-120b"
+LLM_MODEL_EVAL = "qwen/qwen3.8-27b"
+LLM_MODEL_EVAL_OPENROUTER = "google/gemma-4-26b-a4b-it:free"
+
+class LLMProvider(enum.Enum):
+    GROQ = "GROQ"
+    OPENROUTER = "OPENROUTER"
+
+
+LLM_PROVIDER_DEFAULT_MODEL = {
+    LLMProvider.GROQ: LLM_MODEL_EVAL,
+    LLMProvider.OPENROUTER: LLM_MODEL_EVAL_OPENROUTER,
+}
+LLM_PROVIDER_ENV_VAR = {
+    LLMProvider.GROQ: "GROQ_API_KEY",
+    LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
+}
+LLM_PROVIDER_BASE_URL = {
+    LLMProvider.OPENROUTER: "https://openrouter.ai/api/v1",
+}
 
 NO_RATING_MASK = float('-inf')
 
@@ -38,14 +56,10 @@ MODEL_DIR = str(PROJECT_ROOT / "models")
 RESULTS_DIR = str(PROJECT_ROOT / "results")
 
 ULTRAFEEDBACK_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "ultrafeedback")
-# response1/response2 are retained (rather than only the chat-templated option1/option2)
-# so eval-time analysis (e.g. response-length-vs-reward correlation) can tokenize the raw
-# response text without the prompt. Re-run preprocessing with --repostprocess to pick up
-# this column on datasets processed before this was added.
-ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels", "response1", "response2"]
+ULTRAFEEDBACK_EXTRA_KEYS = ["labelcontext1", "labelcontext2", "context1", "context2", "labels"]
 
 PKUALIGNMENT_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "pkuAlignment")
-PKUALIGNMENT_EXTRA_KEYS = ["labels", "response1", "response2"]
+PKUALIGNMENT_EXTRA_KEYS = ["labels"]
 
 PRISM_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "prism")
 
@@ -56,9 +70,9 @@ APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
 SYNTH_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "synth")
 
 PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
-OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank", "response1", "response2"]
-SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real", "response1", "response2"]
-APOLLO_EXTRA_KEYS = ["labels", "user_id", "context", "response1", "response2"]
+OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank"]
+SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real"]
+APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
 class SupportedDatasets(enum.Enum):
     ULTRAFEEDBACK = "ultra"
     PKUALIGNMENT = "pku"
@@ -168,8 +182,8 @@ VALUE_SYSTEM_OUTPUT = {
 CONTEXT_EMBEDDING_FEATURE_NAME = "context_embedding"
 CONTEXT_FEATURE_NAME = "context_features"
 
-MIN_EPSILON = 4.0e-2
-SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-MIN_EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
+DEFAULT_EPSILON = 4.0e-2
+SCORE_DIFF_EPSILON = 1.0/(1+np.exp(-DEFAULT_EPSILON)) -0.5 # The difference in score that corresponds to a difference in target probability of epsilon, according to the Bradley-Terry model.
 # 0.00999.
 
 VALUE_LAYER_ACTIVATIONS = {

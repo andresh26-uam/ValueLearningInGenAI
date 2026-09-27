@@ -365,7 +365,9 @@ def calculate_training_constants(args: TrainingArguments, total_dataset_size: in
         batches_per_epoch = (len_dataset + batch_size - 1) // batch_size
         return pbar,iterations_total,batch_size,batches_per_epoch
 
-def random_argmax(x: th.Tensor, dim: int = -1) -> th.Tensor:
+def random_argmax(x: th.Tensor, dim: int = -1, use_random: bool = True) -> th.Tensor:
+    if not use_random:
+        return th.argmax(x, dim=dim)
     #return th.argmax(x, dim) # TODO !!!!!!!
     max_val = x.amax(dim=dim, keepdim=True)
     mask = x == max_val
@@ -1366,7 +1368,7 @@ class CustomVAE(VAE):
             assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
             
             with th.no_grad():
-                ctx_assignments = random_argmax(context_logprobs, dim=1)
+                ctx_assignments = random_argmax(context_logprobs, dim=1, use_random=self.training)
                     
             if loss_clustering is None:
                 loss_clustering, repeat_inference = self.clustering_algorithm_loss_or_update(model_output, ctx_assignments, context_logprobs)

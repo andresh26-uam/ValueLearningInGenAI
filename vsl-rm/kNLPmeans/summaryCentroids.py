@@ -10,6 +10,11 @@ from sklearn.decomposition import TruncatedSVD
 
 import networkx as nx
 from tqdm import tqdm
+
+# Cache of already-instantiated embedding models, keyed by emb_type, so repeated
+# calls to get_embeddings() (e.g. once per k-means iteration, or once per cluster)
+# reuse the same loaded model instead of re-instantiating it every call.
+_EMBEDDING_MODEL_CACHE = {}
 """
 OPENAI_KEY = ""
 LLAMA_KEY = ""
@@ -156,29 +161,39 @@ def get_embeddings(texts, model = "text-embedding-3-small", emb_type = 'openai',
         return np.array(embeddings)
 
     elif emb_type == 'all-MiniLM-L6-v2':
-        model = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        if emb_type not in _EMBEDDING_MODEL_CACHE:
+            _EMBEDDING_MODEL_CACHE[emb_type] = SentenceTransformer('sentence-transformers/all-MiniLM-L6-v2')
+        model = _EMBEDDING_MODEL_CACHE[emb_type]
         embeddings = model.encode(texts)
         return np.array(embeddings)
     elif emb_type == 'distilbert':
-        model = SentenceTransformer('sentence-transformers/distilbert-base-nli-stsb-mean-tokens')
+        if emb_type not in _EMBEDDING_MODEL_CACHE:
+            _EMBEDDING_MODEL_CACHE[emb_type] = SentenceTransformer('sentence-transformers/distilbert-base-nli-stsb-mean-tokens')
+        model = _EMBEDDING_MODEL_CACHE[emb_type]
         embeddings = model.encode(texts)
         normalized_embeddings = embeddings / np.linalg.norm(embeddings, axis=1, keepdims=True)
         return np.array(normalized_embeddings)
 
     elif emb_type == 'e5-large':
         texts = ["query: " + text for text in texts]
-        model = SentenceTransformer("intfloat/e5-large")
+        if emb_type not in _EMBEDDING_MODEL_CACHE:
+            _EMBEDDING_MODEL_CACHE[emb_type] = SentenceTransformer("intfloat/e5-large")
+        model = _EMBEDDING_MODEL_CACHE[emb_type]
         embeddings = model.encode(texts, normalize_embeddings=True)
         return np.array(embeddings)
-    
+
     elif emb_type == 'sbert':
-        model = SentenceTransformer("all-mpnet-base-v2")
+        if emb_type not in _EMBEDDING_MODEL_CACHE:
+            _EMBEDDING_MODEL_CACHE[emb_type] = SentenceTransformer("all-mpnet-base-v2")
+        model = _EMBEDDING_MODEL_CACHE[emb_type]
         embeddings = model.encode(texts, normalize_embeddings=True)
         return np.array(embeddings)
-    
+
     elif emb_type == 'instructor':
         texts = [[instructor_prompt, text] for text in texts]
-        model = INSTRUCTOR("hkunlp/instructor-xl")
+        if emb_type not in _EMBEDDING_MODEL_CACHE:
+            _EMBEDDING_MODEL_CACHE[emb_type] = INSTRUCTOR("hkunlp/instructor-xl")
+        model = _EMBEDDING_MODEL_CACHE[emb_type]
         embeddings = model.encode(texts, normalize_embeddings=True)
         return np.array(embeddings)
     else:

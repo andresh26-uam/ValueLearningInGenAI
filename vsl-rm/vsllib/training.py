@@ -26,8 +26,15 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-from vsllib.utils import auto_tsne, flatten_metrics_for_csv, kmeans_clustering, plot_alternative_clusterings, to_float
-from vsllib.defines import LLM_MODEL_EVAL, ContextImplementations
+from vsllib.utils import auto_tsne, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_lrvs_agreement, compute_value_outcome_agreement, flatten_metrics_for_csv, format_value_outcome_agreements, kmeans_clustering, plot_alternative_clusterings, to_float
+from vsllib.defines import (
+    LLM_MODEL_EVAL,
+    LLM_PROVIDER_BASE_URL,
+    LLM_PROVIDER_DEFAULT_MODEL,
+    LLM_PROVIDER_ENV_VAR,
+    ContextImplementations,
+    LLMProvider,
+)
 
 
 from datasets import Dataset
@@ -147,6 +154,20 @@ def _pairwise_accuracy_metrics(logits_shortened, labels_shortened, labels_quanti
         assert chr.shape == (
             logits_shortened.shape[-1]-1,), f"Coherence shape: {coherences.shape}, Expected shape: {(logits_shortened.shape[-1]-1,)}"
 
+        # Grounding-to-outcome sign-agreement diagnostics, computed over this same
+        # subset of pairs (the whole split, or one cluster's pairs when called from
+        # `compute_metrics_per_cluster`): GTGR-To-GTVS is dataset-only/model-independent
+        # (see `compute_value_outcome_agreement`); LRGR-To-GTVS and LRGR-To-LRVS involve
+        # the model's own predictions (see `compute_lrgr_to_gtvs_agreement`/
+        # `compute_lrgr_to_lrvs_agreement`).
+        for key_prefix, agreement in (
+            ("gtgr_to_gtvs_agreement", compute_value_outcome_agreement(labels_shortened)),
+            ("lrgr_to_gtvs_agreement", compute_lrgr_to_gtvs_agreement(logits_shortened, labels_shortened)),
+            ("lrgr_to_lrvs_agreement", compute_lrgr_to_lrvs_agreement(logits_shortened)),
+        ):
+            for i, pct in enumerate(agreement):
+                result[f'{key_prefix}_{i}'] = float(pct)
+
         return result
 
 
@@ -154,7 +175,7 @@ def compute_metrics_per_cluster(logits_shortened, labels_shortened, labels_quant
     """Applies `_pairwise_accuracy_metrics` separately to each cluster's subset of pairs.
 
     `cluster_ids` must be a per-pair array (one label per row of `logits_shortened`/
-    `labels_shortened`), i.e. already deduplicated from the interleaved (chosen, rejected)
+    `labels_shortened`), i.e. already deduplicated from the interleaved (option1, option2)
     per-sample order the same way `CtxMORewardTrainer.remove_duplicates` does.
     """
     if isinstance(cluster_ids, th.Tensor):
@@ -194,9 +215,11 @@ def _safe_corr(x: np.ndarray, y: np.ndarray) -> tuple[float, float]:
 
 
 def _length_correlation_metrics(groundings: np.ndarray, value_system_reward: np.ndarray, response_lengths: np.ndarray) -> Dict[str, float]:
-    """Pearson/Spearman correlation between response length (in tokens) and (a) each
-    value's predicted grounding reward, (b) the model's predicted overall value-system
-    reward, over a set of individual responses (one row per response, not per pair --
+    """Pearson/Spearman correlation between response length (in tokens -- see
+    `compute_response_token_lengths`: this is the chat-templated prompt+response
+    `option1`/`option2` token count, not the response alone) and (a) each value's
+    predicted grounding reward, (b) the model's predicted overall value-system reward,
+    over a set of individual responses (one row per response, not per pair --
     `groundings`/`value_system_reward`/`response_lengths` must all be in the same
     per-sample order).
     """
@@ -243,6 +266,17 @@ def _coherence_and_representativeness_title_lines(cm: Dict[str, float]) -> list:
         lines.append("coherence: [" + ", ".join(f"{cm[k]:.3f}" for k in coherence_keys) + "]")
     if "representativeness" in cm:
         lines.append(f"representativeness: {cm['representativeness']:.3f}")
+
+    for label, key_prefix in (
+        ("GTGR-To-GTVS", "gtgr_to_gtvs_agreement"),
+        ("LRGR-To-GTVS", "lrgr_to_gtvs_agreement"),
+        ("LRGR-To-LRVS", "lrgr_to_lrvs_agreement"),
+    ):
+        outcome_agreement_keys = sorted(
+            (k for k in cm if re.fullmatch(rf"{key_prefix}_\d+", k)),
+            key=lambda k: int(k.rsplit("_", 1)[-1]))
+        if outcome_agreement_keys:
+            lines.append(f"{label}: [" + ", ".join(f"{cm[k]:.1f}%" for k in outcome_agreement_keys) + "]")
 
     pearson_keys = sorted(
         (k for k in cm if re.fullmatch(r"length_pearson_\d+", k)),
@@ -1316,6 +1350,7 @@ class CtxMORewardTrainer(MORewardTrainer):
 
         output.others["pairwise_predictions"] = output.predictions
         output.others["pairwise_labels"] = output.label_ids
+        assert np.allclose(output.label_ids, output.others["pairwise_labels"])
         output.metrics["others"] = output.others # Just changed this.  
 
         return output.metrics 
@@ -1333,7 +1368,7 @@ class CtxMORewardTrainer(MORewardTrainer):
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
 
     @staticmethod
-    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None, descriptions=None, cluster_metrics=None) -> None:
+    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None, descriptions=None, cluster_metrics=None, value_names=None, value_outcome_agreements=None, use_llm_categories: bool = False) -> None:
         texts = np.asarray(texts, dtype=object)
         if isinstance(labels, th.Tensor):
             labels = labels.detach().cpu().numpy()
@@ -1385,8 +1420,11 @@ class CtxMORewardTrainer(MORewardTrainer):
             ).generate(text)
             axis.imshow(word_cloud, interpolation="bilinear")
             axis.axis("off")
-            category = label_names.get(cluster_label, f"Cluster {cluster_label}") if label_names else f"Cluster {cluster_label}"
-            title = f"{clustering_name}, {category} (n={cluster_size})"
+            popular_words = list(word_cloud.words_)[:4]
+            title_words = ", ".join(popular_words) or f"Cluster {cluster_label}"
+            if use_llm_categories and label_names is not None:
+                title_words = label_names.get(cluster_label, title_words)
+            title = f"{clustering_name}, {title_words} (n={cluster_size})"
             if average_vs is not None:
                 average_vs_text = ", ".join(f"{weight:.3f}" for weight in np.ravel(average_vs))
                 title += f"\nmean predicted VS: [{average_vs_text}]"
@@ -1399,12 +1437,16 @@ class CtxMORewardTrainer(MORewardTrainer):
             axis.set_title(title)
         for axis in axes.flat[len(panels):]:
             axis.axis("off")
-        figure.tight_layout(pad=1)
+        suptitle = format_value_outcome_agreements(value_outcome_agreements)
+        figure.tight_layout(pad=2.5, h_pad=4.0, w_pad=3.0)
+        figure.subplots_adjust(hspace=0.65, wspace=0.35, top=0.86 if suptitle else None)
+        if suptitle is not None:
+            figure.suptitle(suptitle, fontsize=11, y=0.99)
         figure.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close(figure)
 
     @staticmethod
-    def plot_cluster_metrics_bars(cluster_metrics: Dict[Any, Dict[str, float]], value_names, output_path: str, clustering_name: str) -> None:
+    def plot_cluster_metrics_bars(cluster_metrics: Dict[Any, Dict[str, float]], value_names, output_path: str, clustering_name: str, value_outcome_agreements=None) -> None:
         """Bar-plot grid (one subplot per cluster) of per-value grounding accuracy
         (`coherence_{i}`) and value-system accuracy (`representativeness`) for a single
         clustering (as produced by `compute_metrics_per_cluster`).
@@ -1419,7 +1461,7 @@ class CtxMORewardTrainer(MORewardTrainer):
 
         columns = min(4, len(panels))
         rows = (len(panels) + columns - 1) // columns
-        figure, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 4 * rows), squeeze=False)
+        figure, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 5.5 * rows), squeeze=False)
         for axis, (cluster_label, metrics) in zip(axes.flat, panels):
             values = [metrics.get(f"coherence_{i}", np.nan) for i in range(len(value_names))] + [metrics.get("representativeness", np.nan)]
             bars = axis.bar(range(len(bar_labels)), values, color=colors)
@@ -1436,7 +1478,11 @@ class CtxMORewardTrainer(MORewardTrainer):
             axis.set_title(title)
         for axis in axes.flat[len(panels):]:
             axis.axis("off")
-        figure.tight_layout(pad=1)
+        suptitle = format_value_outcome_agreements(value_outcome_agreements)
+        figure.tight_layout(pad=2.5, h_pad=5.0, w_pad=3.0)
+        figure.subplots_adjust(hspace=1.0, wspace=0.4, top=0.86 if suptitle else None)
+        if suptitle is not None:
+            figure.suptitle(suptitle, fontsize=11, y=0.99)
         path = Path(output_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(path, dpi=150, bbox_inches="tight")
@@ -1461,18 +1507,30 @@ class CtxMORewardTrainer(MORewardTrainer):
         return descriptions
 
     @staticmethod
-    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: str = LLM_MODEL_EVAL, max_documents: int = 20, cluster_metrics: Optional[Dict[str, Dict[Any, Dict[str, float]]]] = None):
+    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: Optional[str] = None, provider: str = LLMProvider.GROQ.value, max_documents: int = 20, cluster_metrics: Optional[Dict[str, Dict[Any, Dict[str, float]]]] = None):
         """Generate category and description metadata for each text clustering."""
-        try:
-            ChatGroq = import_module("langchain_groq").ChatGroq
-        except ImportError as error:
-            raise ImportError("Install langchain-groq to generate cluster descriptions with Groq.") from error
+        provider = LLMProvider(provider)
+        model_name = model_name or LLM_PROVIDER_DEFAULT_MODEL[provider]
+        api_key = os.environ.get(LLM_PROVIDER_ENV_VAR[provider])
+        if not api_key:
+            raise RuntimeError(f"{LLM_PROVIDER_ENV_VAR[provider]} is not set; cannot generate cluster descriptions.")
+
+        if provider == LLMProvider.GROQ:
+            try:
+                ChatGroq = import_module("langchain_groq").ChatGroq
+            except ImportError as error:
+                raise ImportError("Install langchain-groq to generate cluster descriptions with Groq.") from error
+            llm = ChatGroq(model=model_name, temperature=0, api_key=api_key)
+        elif provider == LLMProvider.OPENROUTER:
+            try:
+                ChatOpenAI = import_module("langchain_openai").ChatOpenAI
+            except ImportError as error:
+                raise ImportError("Install langchain-openai to generate cluster descriptions with OpenRouter.") from error
+            llm = ChatOpenAI(model=model_name, temperature=0, api_key=api_key, base_url=LLM_PROVIDER_BASE_URL[provider])
+        else:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
 
         texts = np.asarray(texts, dtype=object)
-        groq_api_key = os.environ.get("GROQ_API_KEY")
-        if not groq_api_key:
-            raise RuntimeError("GROQ_API_KEY is not set; cannot generate cluster descriptions.")
-        llm = ChatGroq(model=model_name, temperature=0, api_key=groq_api_key)
         rows = []
         category_maps = []
         for labels, clustering_name in zip(label_sets, clustering_names):
@@ -1515,7 +1573,9 @@ class CtxMORewardTrainer(MORewardTrainer):
                 }
                 cm = (cluster_metrics or {}).get(clustering_name, {}).get(cluster_label, {})
                 for key, value in cm.items():
-                    if key == "representativeness" or re.fullmatch(r"coherence_\d+", key):
+                    if key == "representativeness" or re.fullmatch(
+                        r"coherence_\d+|gtgr_to_gtvs_agreement_\d+|lrgr_to_gtvs_agreement_\d+|lrgr_to_lrvs_agreement_\d+", key
+                    ):
                         row[key] = value
                 rows.append(row)
             category_maps.append(category_map)
@@ -1539,7 +1599,7 @@ class CtxMORewardTrainer(MORewardTrainer):
         summary = summarize_textrank(sentences, sentence_embeddings, top_k=top_k)
         return " ".join(sentence for sentence, _ in summary)
     
-    def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}, value_names=None, eval_response_lengths=None, test_response_lengths=None) -> None:
+    def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}, value_names=None, eval_response_lengths=None, test_response_lengths=None, do_llm_summarization: bool = True, llm_provider: str = LLMProvider.GROQ.value) -> None:
         
         train_set_contexts = np.array(train_dataset.select_columns([self.model.vs_features_name])[self.model.vs_features_name])
         train_set_contexts = self.remove_duplicates(train_set_contexts)
@@ -1599,6 +1659,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     category_maps.append({label: f"Cluster {label}" for label in np.unique(labels_3)})
 
                 clustering_names_used = ["kmeans", "value_system", "context"][:len(labels)]
+                description_text_maps = {name: {} for name in clustering_names_used}
 
                 # Per-cluster grounding/value-system accuracy: replicates the accuracy
                 # portion of compute_metrics_custom (representativeness*, coherence_{i}*,
@@ -1616,7 +1677,17 @@ class CtxMORewardTrainer(MORewardTrainer):
                     "per-cluster accuracy metrics cannot be computed."
                 )
 
-                # Per-sample (interleaved chosen/rejected) grounding rewards and the
+                # Grounding-to-outcome sign-agreement diagnostics (see
+                # `_pairwise_accuracy_metrics` for the per-cluster equivalents),
+                # computed once over the whole split and shown above every
+                # bar-plot/word-cloud figure below.
+                value_outcome_agreements = {
+                    "GTGR-To-GTVS": compute_value_outcome_agreement(pairwise_labels),
+                    "LRGR-To-GTVS": compute_lrgr_to_gtvs_agreement(pairwise_predictions, pairwise_labels),
+                    "LRGR-To-LRVS": compute_lrgr_to_lrvs_agreement(pairwise_predictions),
+                }
+
+                # Per-sample (interleaved option1/option2) grounding rewards and the
                 # model's predicted overall value-system reward for that same sample,
                 # used for the response-length-vs-reward correlation below. groundings is
                 # already per-sample; vs_predicted (the predicted value-system weights) is
@@ -1634,8 +1705,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     f"{otype}: response_lengths was not provided -- required for the "
                     "length-vs-reward correlation metrics. Pass eval_response_lengths/"
                     "test_response_lengths (computed via compute_response_token_lengths, "
-                    "which itself requires an nlp_based tokenizer and response1/response2 "
-                    "dataset columns -- re-run preprocessing with --repostprocess if missing)."
+                    "which requires the nlp_based input_ids_1/input_ids_2 dataset columns)."
                 )
                 assert len(response_lengths) == len(groundings_per_sample), (
                     f"response_lengths ({len(response_lengths)}) and groundings "
@@ -1644,6 +1714,7 @@ class CtxMORewardTrainer(MORewardTrainer):
 
                 cluster_metrics_by_clustering = {}
                 for label_array, clustering_name in zip(labels, clustering_names_used):
+                    print("HERE", label_array[0:5], pairwise_predictions[0:5])
                     assert len(label_array) == len(pairwise_predictions), (
                         f"{clustering_name} labels ({len(label_array)}) and pairwise predictions "
                         f"({len(pairwise_predictions)}) must be aligned one-per-pair."
@@ -1653,7 +1724,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                         label_array, self.model.config,
                     )
                     # label_array is per-pair; repeat each pair's label across its two
-                    # samples (chosen, rejected always share a cluster -- both derive
+                    # samples (option1, option2 always share a cluster -- both derive
                     # from the same prompt's context) to mask per-sample data.
                     sample_label_array = np.repeat(_to_numpy(label_array), 2)
                     length_metrics = compute_length_correlations_per_cluster(
@@ -1671,6 +1742,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                         value_names if value_names is not None else [],
                         os.path.join(output_dir, f"{otype}_{clustering_name}_cluster_metrics_bars.png"),
                         clustering_name,
+                        value_outcome_agreements=value_outcome_agreements,
                     )
 
                 # Same accuracy + length-correlation metrics, but over the whole split
@@ -1689,6 +1761,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     value_names if value_names is not None else [],
                     os.path.join(output_dir, f"{otype}_overall_cluster_metrics_bars.png"),
                     "overall",
+                    value_outcome_agreements=value_outcome_agreements,
                 )
 
                 self.save_cluster_metrics(
@@ -1696,54 +1769,65 @@ class CtxMORewardTrainer(MORewardTrainer):
                     os.path.join(output_dir, f"{otype}_cluster_metrics"),
                 )
 
-                if isinstance(original_context[0], str):
+                llm_categories_available = False
+                if do_llm_summarization and isinstance(original_context[0], str):
                     try:
                         descriptions, category_maps = self.describe_clusters_with_llm(
                             original_context,
                             labels,
                             clustering_names_used,
                             os.path.join(output_dir, f"{otype}_cluster_descriptions"),
+                            provider=llm_provider,
                             cluster_metrics=cluster_metrics_by_clustering,
                         )
                     except (ImportError, RuntimeError) as error:
                         print(f"Could not generate LLM cluster descriptions: {error}")
                         descriptions = None
-                    description_text_maps = {name: {} for name in clustering_names_used}
                     if descriptions is not None:
+                        llm_categories_available = True
                         for clustering_name in clustering_names_used:
                             subset = descriptions[descriptions["clustering"] == clustering_name]
                             description_text_maps[clustering_name] = dict(zip(subset["cluster"], subset["description"]))
+                self.plot_cluster_word_clouds(
+                    texts=original_context,
+                    labels=labels_1,
+                    output_path=os.path.join(output_dir, f"{otype}_kmeans_word_clouds.png"),
+                    clustering_name="kmeans",
+                    vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
+                    label_names=category_maps[0],
+                    descriptions=description_text_maps.get("kmeans"),
+                    cluster_metrics=cluster_metrics_by_clustering.get("kmeans"),
+                    value_names=value_names,
+                    value_outcome_agreements=value_outcome_agreements,
+                    use_llm_categories=llm_categories_available,
+                )
+                self.plot_cluster_word_clouds(
+                    texts=original_context,
+                    labels=labels_2,
+                    output_path=os.path.join(output_dir, f"{otype}_value_system_word_clouds.png"),
+                    clustering_name="value_system",
+                    vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
+                    label_names=category_maps[1],
+                    descriptions=description_text_maps.get("value_system"),
+                    cluster_metrics=cluster_metrics_by_clustering.get("value_system"),
+                    value_names=value_names,
+                    value_outcome_agreements=value_outcome_agreements,
+                    use_llm_categories=llm_categories_available,
+                )
+                if len(labels) == 3:
                     self.plot_cluster_word_clouds(
                         texts=original_context,
-                        labels=labels_1,
-                        output_path=os.path.join(output_dir, f"{otype}_kmeans_word_clouds.png"),
-                        clustering_name="kmeans",
+                        labels=labels_3,
+                        output_path=os.path.join(output_dir, f"{otype}_context_word_clouds.png"),
+                        clustering_name="context",
                         vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
-                        label_names=category_maps[0],
-                        descriptions=description_text_maps.get("kmeans"),
-                        cluster_metrics=cluster_metrics_by_clustering.get("kmeans"),
+                        label_names=category_maps[2],
+                        descriptions=description_text_maps.get("context"),
+                        cluster_metrics=cluster_metrics_by_clustering.get("context"),
+                        value_names=value_names,
+                        value_outcome_agreements=value_outcome_agreements,
+                        use_llm_categories=llm_categories_available,
                     )
-                    self.plot_cluster_word_clouds(
-                        texts=original_context,
-                        labels=labels_2,
-                        output_path=os.path.join(output_dir, f"{otype}_value_system_word_clouds.png"),
-                        clustering_name="value_system",
-                        vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
-                        label_names=category_maps[1],
-                        descriptions=description_text_maps.get("value_system"),
-                        cluster_metrics=cluster_metrics_by_clustering.get("value_system"),
-                    )
-                    if len(labels) == 3:
-                        self.plot_cluster_word_clouds(
-                            texts=original_context,
-                            labels=labels_3,
-                            output_path=os.path.join(output_dir, f"{otype}_context_word_clouds.png"),
-                            clustering_name="context",
-                            vs_predicted=self.remove_duplicates(ctxdata.vs_predicted),
-                            label_names=category_maps[2],
-                            descriptions=description_text_maps.get("context"),
-                            cluster_metrics=cluster_metrics_by_clustering.get("context"),
-                        )
                 if needs_reduction and reducer_pca is None:
                     reducer_pca: PCA = PCA(n_components=2, svd_solver= "full", whiten= True,)
                     reducer_pca.fit(X)

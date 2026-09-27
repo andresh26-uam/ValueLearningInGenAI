@@ -39,10 +39,11 @@ from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWith
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
 from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, mo_compute_loss_func
 from vsllib.model_utils import MORMForClassificationConfig
-from vsllib.defines import MIN_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, ContextImplementations, get_test_indices, get_validation_indices
+from vsllib.defines import DEFAULT_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, ContextImplementations, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 
 load_dotenv()
+os.environ["WANDB_CONSOLE"] = "off"
 
 def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> None:
     
@@ -115,9 +116,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             suggested_epsilon =dataset.calculate_suggested_epsilon()
         else:
             suggested_epsilon = script_args.discordance_epsilon
-        suggested_epsilon = max(suggested_epsilon, MIN_EPSILON)  # Avoid too small epsilon
         print("Suggested discordance_epsilon based on eval dataset: ", suggested_epsilon)
-        
+    
         print("Training set: ", len(dataset.train_dataset), " Eval set: ", len(
             dataset.eval_dataset), " Test set: ", len(dataset.test_dataset))
         num_values_to_use = len(dataset.value_keys)
@@ -371,6 +371,11 @@ if __name__ == "__main__":
 
     accelerate_state.on_main_process()
     seed_everything(int(script_args.seed))
+
+    # Write run name to file if specified (for parent script to read)
+    if script_args.run_name_file and is_main_accelerate_process:
+        with open(script_args.run_name_file, "w") as f:
+            f.write(script_args.run_name)
 
     dataset_path = PROCESSED_DATASET_PATHS[script_args.dataset]
     extra_keep_keys = EXTRA_KEYS[script_args.dataset]

@@ -24,7 +24,7 @@ for candidate in (
         break
 
 from vsllib.dataset_processing import PairwisePreferenceDataset
-from vsllib.defines import EXTRA_KEYS, MIN_EPSILON, NO_RATING_MASK, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
+from vsllib.defines import EXTRA_KEYS, DEFAULT_EPSILON, NO_RATING_MASK, PROCESSED_DATASET_PATHS, get_test_indices, get_validation_indices
 from vsllib.reward_models import accuracy_rewards_labels, reward_pairs_and_scores_to_logits_and_targets, value_system_loss_logits
 from vsllib.utils import ScriptArguments, argument_parser, obtain_tokenizer, seed_everything
 
@@ -92,7 +92,7 @@ def _forward_weighted_scores(test_dataset, weights: th.Tensor) -> tuple[th.Tenso
     )
 
 
-def compute_value_system_loss_for_weights(test_dataset, weights: th.Tensor, reward_diff_threshold: float = 50.0, assume_qualitative_labels: bool = True, discordance_epsilon: float = MIN_EPSILON) -> th.Tensor:
+def compute_value_system_loss_for_weights(test_dataset, weights: th.Tensor, reward_diff_threshold: float = 50.0, assume_qualitative_labels: bool = True, discordance_epsilon: float = DEFAULT_EPSILON) -> th.Tensor:
     """Compute the scalar value-system loss for a candidate weight vector.
 
     This function uses the repo helpers to convert reward pairs and scores into logits/targets

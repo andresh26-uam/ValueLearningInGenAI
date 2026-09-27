@@ -55,12 +55,12 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
         sample['context_attention_mask'] = tok_context["attention_mask"]
         keep_keys.extend(["context_input_ids", "context_attention_mask", "context"])
     
-    tokenized_pos = tokenizer(sample['option1'], truncation=True)
-    tokenized_neg = tokenizer(sample['option2'], truncation=True)
-    sample["input_ids_1"] = tokenized_pos["input_ids"]
-    sample["attention_mask_1"] = tokenized_pos["attention_mask"]
-    sample["input_ids_2"] = tokenized_neg["input_ids"]
-    sample["attention_mask_2"] = tokenized_neg["attention_mask"]
+    tokenized_1 = tokenizer(sample['option1'], truncation=True)
+    tokenized_2 = tokenizer(sample['option2'], truncation=True)
+    sample["input_ids_1"] = tokenized_1["input_ids"]
+    sample["attention_mask_1"] = tokenized_1["attention_mask"]
+    sample["input_ids_2"] = tokenized_2["input_ids"]
+    sample["attention_mask_2"] = tokenized_2["attention_mask"]
     value_ratings1 = []
     value_ratings2 = []
     for key in value_keys:
