@@ -35,6 +35,13 @@ def extract_rating(labels_a: dict, labels_b: dict, name="quality"):
         missing = 0
     return labels_a.get(name, {}).get("value", NO_RATING_MASK)*SIGN_MAP[name], labels_b.get(name, {}).get("value", NO_RATING_MASK)*SIGN_MAP[name], missing
 
+def extract_rating_single(labels: dict, name="quality"):
+    if name not in labels:
+        missing = 1
+    else:
+        missing = 0
+    return labels.get(name, {}).get("value", NO_RATING_MASK)*SIGN_MAP[name], 
+
 def download_ready_trees_file() -> Path:
     """Download the ready trees export from Hugging Face and cache it locally."""
     output_dir = Path(OASST_PROCESSED_PATH) / "raw"
@@ -178,6 +185,8 @@ def process_line_rec(base_line: dict, line: dict, level: int, rows: list[dict] =
         instance["response1"] = reply_a["text"]
         instance["response2"] = reply_b["text"]
 
+
+
         instance["level"] = level
         instance["review_count"] = line["review_count"]
         instance["lang"] = line["lang"]
@@ -198,6 +207,9 @@ def process_line_rec(base_line: dict, line: dict, level: int, rows: list[dict] =
             instance["score1"], instance["score2"] = better_reply, 1 - better_reply
         for value_name, value_orig in zip(VALUES_OASST, VALUES_OASST_ORIG):
             instance[f"value_{value_name}_1"], instance[f"value_{value_name}_2"], missing = extract_rating(labels_a, labels_b, name=value_orig)
+           
+            instance[f"prompt_val_{value_name}"], missing_2 = extract_rating_single(base_line["labels"], name=value_orig)
+
             missing_total+=missing
             total_scores+=1
         #assert -np.sign(reply_a["rank"] - reply_b["rank"]) == np.sign(instance["score1"] - instance["score2"]), f"Rank difference does not match score difference: rank {reply_a['rank']} vs {reply_b['rank']}, score {instance['score1']} vs {instance['score2']}"

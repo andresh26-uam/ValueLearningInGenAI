@@ -182,6 +182,8 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             detach_vs_selection_for_value_system_weight_training=script_args.detach_vs_selection_for_value_system_weight_training,
             detach_context_selection_for_value_system_selection=script_args.detach_context_selection_for_value_system_selection,
             ctx_coefficient=script_args.ctx_coefficient,
+            ctx_chr_coefficient=script_args.ctx_chr_coefficient,
+                        
             entropy_coefficient=script_args.entropy_coefficient,
             vs_weight_initialization=script_args.vs_weight_initialization,
             vs_selection_coefficient=script_args.vs_selection_coefficient,

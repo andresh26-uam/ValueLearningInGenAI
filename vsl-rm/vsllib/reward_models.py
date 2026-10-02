@@ -1084,10 +1084,13 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
                  device: th.device = None, dtype: th.dtype = None, 
                  weight_initialization: str = "dirichlet", 
                  direct_context_to_vs_relation: bool = False, 
+                 ctx_chr_coefficient: float = 0.0,
                  smooth_evaluation: bool=True, 
                  separate_context_from_value_system_selection: bool = False,
                  args_for_ctx_probabilities: dict = {},  **kwargs) -> None:
+        self.ctx_chr_coefficient = ctx_chr_coefficient
         self._last_vae_cluster_loss = 0.0
+        self._last_vae_ctx_chr_loss = 0.0
         self._last_vae_reconstruction_loss = 0.0
         self._last_vae_kl_loss = 0.0
         self.direct_context_to_vs_relation = direct_context_to_vs_relation
@@ -1127,7 +1130,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             centroid_distance = th.norm(self.context_logits.latent_centroids.unsqueeze(0) - self.context_logits.latent_centroids.unsqueeze(1), dim=2).mean().item()
             orthogonality = th.norm(th.mm(self.context_logits.latent_centroids, self.context_logits.latent_centroids.T) - th.eye(self.num_contexts, device=self.context_logits.latent_centroids.device, dtype=self.context_logits.latent_centroids.dtype), dim=(0,1)).item()
             reconstructed_distance = th.norm(reconst.unsqueeze(0) - reconst.unsqueeze(1), dim=2).mean().item()
-        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss, "vae_centroid_norm": th.norm(self.context_logits.latent_centroids, dim=1).mean().item()}
+        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss, "vae_centroid_norm": th.norm(self.context_logits.latent_centroids, dim=1).mean().item(), "vae_ctx_chr_loss": self._last_vae_ctx_chr_loss}
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
             ret = (self.vs_selection_to_logit_vsweights_matrix,)
@@ -1155,6 +1158,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
     def calculate_ctx_data(self, hidden_state: th.Tensor) -> Dict:
         self.context_logits: CustomVAE
         assert isinstance(self.context_logits, CustomVAE)
+        
         model_output = self.context_logits.forward(hidden_state)
         loss_clustering = model_output["loss_clustering"]
         context_logprobs_detached_centroid = model_output["context_logprobs_detached_centroid"]
@@ -1162,7 +1166,15 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         ctx_assignments = model_output["ctx_assignments"]
         loss_vae = model_output["loss"]
 
-        
+        chr_loss = 0.0
+        if self.ctx_chr_coefficient > 0.0:
+            with th.no_grad():
+                distances_among_hidden_states = th.cdist(hidden_state, hidden_state)
+                norm_distances_among_hidden_states = distances_among_hidden_states / (th.max(distances_among_hidden_states) + 1e-8)
+            distances_among_latent_hidden_states = th.cdist(model_output["z"], model_output["z"])
+            norm_distances_among_latent_hidden_states = distances_among_latent_hidden_states / (th.max(distances_among_latent_hidden_states) + 1e-8)
+            chr_loss = th.nn.functional.mse_loss(norm_distances_among_latent_hidden_states, norm_distances_among_hidden_states)
+
         assert context_logprobs.shape == (hidden_state.shape[0], self.num_contexts)
         assert hidden_state.shape[1] == np.prod(self.context_logits.input_dim)
         
@@ -1201,6 +1213,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
 
         self._last_vae_cluster_loss = loss_clustering.mean().item() if isinstance(loss_clustering, th.Tensor) else float(loss_clustering)
         self._last_vae_reconstruction_loss = model_output["recon_loss"].mean().item()
+        self._last_vae_ctx_chr_loss = chr_loss.mean().item() if isinstance(chr_loss, th.Tensor) else float(chr_loss)
         self._last_vae_kl_loss = model_output["reg_loss"].mean().item()
         return CtxData(
             context_features=hidden_state,
@@ -1210,7 +1223,7 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             vs_logprobs=vs_logprobs,
             log_vs_possibilities=self.vs_selection_to_logit_vsweights_matrix,
             ctx_possibilities=self.context_logits.latent_centroids,
-            extra_for_custom_loss=(loss_vae, self.context_logits.latent_centroids)
+            extra_for_custom_loss=(loss_vae+chr_loss, self.context_logits.latent_centroids)
         )
 
     
@@ -2065,9 +2078,6 @@ class MORMForClassification(PreTrainedModel):
         try:
             eval_ground_truth = th.tensor(eval_set.select_columns(["context"])["context"], requires_grad=False)
             if isinstance(eval_ground_truth[0], str):
-                print("Eval ground truth is string, converting to int")
-                print("Eval ground truth sample:", eval_ground_truth[0:10])
-                #exit(0)
                 eval_ground_truth = None
         except Exception as e:
             print("Could not get eval ground truth, setting to None. Error:", e)
@@ -2791,6 +2801,7 @@ class MORMForClassification(PreTrainedModel):
             return VaeAndKMeansCtxDependentAlignmentLayer(
                 smooth_evaluation=config.smooth_evaluation,
                 input_shape=config.input_size_vs,
+                ctx_chr_coefficient=config.ctx_chr_coefficient,
                 direct_context_to_vs_relation=config.direct_context_to_vs_relation,
                 detach_context_selection_for_value_system_selection=config.detach_context_selection_for_value_system_selection,
                 detach_vs_selection_for_value_system_weight_training=config.detach_vs_selection_for_value_system_weight_training,

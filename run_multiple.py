@@ -12,7 +12,7 @@ from pathlib import Path
 # PKU TRAIN EPOCHS = 100
 DATASET = "pku"
 BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 15 # 24 no.
+MAX_SIMULTANEOUS_RUNS = 4 # 24 no.
 MODEL_ALIAS = "smol"
 NUM_TRAIN_EPOCHS = [100]
 
@@ -24,18 +24,19 @@ else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001],
-    "C1_grounding_learning_rate": [0.0001],
-    "C1_context_learning_rate": [0.0001],
+    "C1_learning_rate": [0.0001, 0.0003],
+    "C1_grounding_learning_rate": [0.0001, 0.0003],
+    "C1_context_learning_rate": [0.0001, 0.0003],
     "weight_decay": [0.0,0.001],
-    "vae_type": ["vae", "ae"],
-    "vae_dropout": [0.0, 0.2],
-    "max_grad_norm": [10.0],
-    "ctx_coefficient": [1.0, 10.0, 0.1],
+    "vae_type": ["ae"],
+    "vae_dropout": [0.0],
+    "max_grad_norm": [10.0,],
+    "ctx_coefficient": [30.0, 50.0],
+    "ctx_chr_coefficient": [0.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "do_initialization": [True,False],
+    "do_initialization": [False, True],
     "vae_latent_dim": [16, 128],
 }
 
@@ -46,6 +47,8 @@ DISCORDANCE_EPSILON = ["use_default",]
 
 AVOID_COMBINATIONS = [
     {"loss_func_type": "DEFAULT", "vae_latent_dim": 2},
+    {"vae_latent_dim": 128, "ctx_coefficient": 50.0, "learning_rate": 0.0001, "do_initialization": True},
+    {"vae_latent_dim": 16, "ctx_coefficient": 50.0, "learning_rate": 0.0001, "do_initialization": True},
     {"final_layer_activation": "Tanh", "discordance_epsilon": "use_default"},
     {"vs_weight_initialization": "equal", "do_initialization": True, "vae_latent_dim": 16, "ctx_coefficient": 1.0},
     
@@ -138,6 +141,7 @@ def main():
                         *map(str, seeds),
                         "--run_index",
                         str(run_number),
+                        "--skip_compare_checkpoints",
                     ]
                     if epsilon != "use_default":
                         command.extend(["--discordance_epsilon", str(epsilon)])

@@ -4,15 +4,17 @@
 GPUS="L40S:1"
 CPU=True
 
-CONFIG="run_configs/smol_ctx_linear_ae_kmeans.json"
-DATASET="pku"
+CONFIG="run_configs/smol_ctx_linear_kmeans.json"
+DATASET="oasst"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(42)
 RUN_INDEX=""
 RUN_NAME_FILE=""
 MODEL_ALIAS="smol"
-
+SKIP_COMPARE_CHECKPOINTS=False
+KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
+DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
 
 DEBUG=()
 SAVE=(--do_save=True --do_checkpointing=False)
@@ -81,6 +83,9 @@ while [[ $# -gt 0 ]]; do
     --model=*)
       MODEL_ALIAS="${1#*=}"
       ;;
+    --skip_compare_checkpoints)
+      SKIP_COMPARE_CHECKPOINTS=True
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2
@@ -137,6 +142,10 @@ elif [[ "$DATASET" == "synth" ]]; then
   [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=-1
   training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=500
+elif [[ "$DATASET" == "oasst" ]]; then
+  DISCORDANCE_EPSILON=0.003
+  training_initialization_data_size=10000
+  NUM_TRAIN_EPOCHS=25
 else
   echo "Unknown dataset: $DATASET"
   exit 1
@@ -176,13 +185,13 @@ elif [[ "$CONFIG" == *"smol_linear.json"* ]]; then
 elif [[ "$CONFIG" == *"smol_ctx_linear.json"* ]]; then
   NAME=SmolCtxVSLRMv17_AEDET
 elif [[ "$CONFIG" == *"smol_ctx_linear_ae_kmeans.json"* ]]; then
-  NAME=SmolCtxVSLRMv17_AE
+  NAME=SmolCtxVSLRMv18_AE
 elif [[ "$CONFIG" == *"smol_ctx_linear_gmm_and_classifier.json"* ]]; then
   NAME=SmolCtxVSLRMv17_GMMC
 elif [[ "$CONFIG" == *"smol_ctx_linear_baseline.json"* ]]; then
   NAME=SmolCtxVSLRMv17_DIRECTVS
 elif [[ "$CONFIG" == *"smol_ctx_linear_baseline_smooth.json"* ]]; then
-  NAME=SmolCtxVSLRMv17_BS
+  NAME=SmolCtxVSLRMv18_BS
 else
   NAME=test
 fi
@@ -246,4 +255,6 @@ bash cpu_eval.sh \
     "--checkpoint_path=${CHECKPOINT_NAME}" \
     --do_llm_summarization=False \
     --tsne_perplexity=30 \
-    --tsne_seed=0
+    --tsne_seed=0 \
+    "--skip_compare_checkpoints=${SKIP_COMPARE_CHECKPOINTS}" \
+    --compare_checkpoint_paths "${KNLPMEANS_BASELINE}" "${DIRECT_VS_BASELINE}"

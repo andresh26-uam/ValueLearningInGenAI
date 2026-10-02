@@ -465,9 +465,13 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             if sentence_transformer is not None:
                 sentence_transformer = sentence_transformer.to(th.device("cuda"))
                 sentence_transformer.eval()
+                fe_kwargs["sentence_transformer"] = sentence_transformer
+            else:
+                fe_kwargs["sentence_transformer"] = None
+
             model_reference.eval()
             self.data = self.data.map(
-                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), sentence_transformer=sentence_transformer, **fe_kwargs),
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,
@@ -479,8 +483,11 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                 model_reference.eval()
                 if sentence_transformer is not None:
                     sentence_transformer.eval()
+                    fe_kwargs["sentence_transformer"] = sentence_transformer
+                else:
+                    fe_kwargs["sentence_transformer"] = None
                 self.data = self.data.map(
-                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cpu"), sentence_transformer=sentence_transformer, **fe_kwargs),
+                            lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
                             batched=True,
                             batch_size=batch_size,

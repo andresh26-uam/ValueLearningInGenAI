@@ -3,6 +3,7 @@
     "dataset": "pku",
     "context_implementation": "NO_CONTEXT",
     "do_initialization": false,
+    "use_sentence_transformer": true,
     "direct_context_to_vs_relation": false,
     "vs_weight_initialization": "equal",
     "detach_vs_selection_for_value_system_weight_training": false,
@@ -16,6 +17,7 @@
     "gather_train_metrics": true,
     
     "use_extracted_features": true,
+    "smooth_evaluation": false,
     "use_cpu": false,
     
     "deepspeed": null,
@@ -57,7 +59,7 @@
     "use_ideal_grounding_model": false,
     "loss_func_type": "DEFAULT",
     "loss_func_type_kwargs": null,
-    "weight_decay": 0.001,
+    "weight_decay": 0.0,
     "bf16": false,
     "num_train_epochs": 1000,
     "gradient_checkpointing": false,

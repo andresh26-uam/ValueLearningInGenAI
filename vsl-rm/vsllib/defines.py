@@ -25,7 +25,7 @@ openai/gpt-oss-120b
 qwen/qwen3.8-27b
 qwen/qwen3.6-27b """
 
-LLM_MODEL_EVAL = "qwen/qwen3.8-27b"
+LLM_MODEL_EVAL = "openai/gpt-oss-120b"
 LLM_MODEL_EVAL_OPENROUTER = "google/gemma-4-26b-a4b-it:free"
 
 class LLMProvider(enum.Enum):
@@ -70,7 +70,8 @@ APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
 SYNTH_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "synth")
 
 PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
-OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank"]
+OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank", "prompt_val_quality", "prompt_val_nontoxicity", "prompt_val_humor", "prompt_val_helpfulness", "prompt_val_creativity", "prompt_val_nonviolence", "prompt_val_not_appropriate"]
+# TODO: Analyze perhaps how different clusters adhere to prompt reported groundings in OPenassist/Oasst.
 SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real"]
 APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
 class SupportedDatasets(enum.Enum):

@@ -804,6 +804,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         vae_similarity: str = "cosine",
         entropy_coefficient: float = 0.0,
         ctx_coefficient: float = 0.0,
+        ctx_chr_coefficient: float = 0.0,
         vs_selection_coefficient: float = 0.0,
         training_initialization_data_size: int|str = "all",
         sharp_context_classification: bool = True,
@@ -920,6 +921,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.do_vs_initialization = do_vs_initialization
         self.vs_selection_coefficient = vs_selection_coefficient
         self.ctx_coefficient = ctx_coefficient
+        self.ctx_chr_coefficient = ctx_chr_coefficient
         self.entropy_coefficient = entropy_coefficient
         self.max_contexts = max_contexts
         self.detach_context_selection_for_value_system_selection = detach_context_selection_for_value_system_selection

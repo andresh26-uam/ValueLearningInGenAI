@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from enum import Enum
 import json
 import numpy as np
+import pandas as pd
 from sentence_transformers import SentenceTransformer
 import torch
 from transformers import (
@@ -56,7 +57,7 @@ from vsllib.reward_models import (
 from vsllib.model_utils import (
     MORMForClassificationConfig,
 )
-from vsllib.utils import  ScriptArguments, argument_parser, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_gtvs_agreement_per_cluster, compute_lrgr_to_lrvs_agreement, compute_lrgr_to_lrvs_agreement_per_cluster, compute_response_token_lengths, compute_value_outcome_agreement, compute_value_outcome_agreement_per_cluster, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_grounding_differences_violin_by_overall_score, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
+from vsllib.utils import  ScriptArguments, analyze_clustering, argument_parser, compare_clusterings, kmeans_clustering, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_gtvs_agreement_per_cluster, compute_lrgr_to_lrvs_agreement, compute_lrgr_to_lrvs_agreement_per_cluster, compute_response_token_lengths, compute_value_outcome_agreement, compute_value_outcome_agreement_per_cluster, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_grounding_differences_violin_by_overall_score, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
 
 
 @dataclass
@@ -69,6 +70,14 @@ class EvalArguments(ScriptArguments):
     checkpoint_path: Optional[str] = field(
         default=None,
         metadata={"help": "run name in the directory saved by no_context_vsl.py. If not supplied, will ask the user to select from the available runs in the output directory."},
+    )
+    compare_checkpoint_paths: List[str] = field(
+        default_factory=list,
+        metadata={"help": "Alternative checkpoints whose value-system clustering is compared against that of each evaluated checkpoint (on the evaluated checkpoint's data split). If not supplied, will ask the user to select them (OK to skip)."},
+    )
+    skip_compare_checkpoints: bool = field(
+        default=False,
+        metadata={"help": "If True, do not analyze alternative checkpoints: ignores compare_checkpoint_paths and never prompts for them."},
     )
     results_dir: Optional[str] = field(
         default=None,
@@ -236,6 +245,39 @@ def _prompt_for_checkpoint_path(output_path: Path, *, allow_finish: bool, datase
             return resolved_checkpoint_path
         print("trying... 2")
 
+def _resolve_compare_checkpoint_paths(script_args: EvalArguments, output_path: Path, main_checkpoint_paths: List[Path]) -> List[Path]:
+    """Alternative checkpoints for the clustering comparison; prompts (OK to finish) for
+    invalid supplied paths, or repeatedly when none were supplied."""
+    resolved: List[Path] = []
+    for raw_checkpoint_path in script_args.compare_checkpoint_paths:
+        candidate_path = _auto_solve_candidate_checkpoint_path(raw_checkpoint_path, str(output_path))
+        if _is_valid_checkpoint_dir(candidate_path):
+            resolved.append(candidate_path)
+            continue
+        print(f"Alternative checkpoint path does not exist: {candidate_path}")
+        prompted_path = _prompt_for_checkpoint_path(
+            output_path,
+            allow_finish=True,
+            dataset=script_args.dataset,
+            already_selected=main_checkpoint_paths + resolved,
+        )
+        if prompted_path is not None:
+            resolved.append(prompted_path)
+    if len(script_args.compare_checkpoint_paths) == 0:
+        print("Select alternative checkpoints to compare clusterings against (OK to skip/finish).")
+        while True:
+            prompted_path = _prompt_for_checkpoint_path(
+                output_path,
+                allow_finish=True,
+                dataset=script_args.dataset,
+                already_selected=main_checkpoint_paths + resolved,
+            )
+            if prompted_path is None:
+                break
+            resolved.append(prompted_path)
+    return resolved
+
+
 def _build_eval_arguments(script_args: EvalArguments, checkpoint_path: Path, results_dir: Path) -> EvalArguments:
     arg_values = vars(script_args).copy()
     arg_values["checkpoint_paths"] = [str(checkpoint_path)]
@@ -303,7 +345,13 @@ def parse_eval_args() -> tuple[List[EvalArguments], Dict[str, Any]]:
                 break
             else:
                 resolved_checkpoint_paths.append(prompted_path)
-        
+
+    if script_args.skip_compare_checkpoints:
+        script_args.compare_checkpoint_paths = []
+    elif not script_args.weights_only:
+        script_args.compare_checkpoint_paths = [
+            str(path) for path in _resolve_compare_checkpoint_paths(script_args, output_path, resolved_checkpoint_paths)
+        ]
     print("RESOLVED.")
     results_root = Path(script_args.results_dir) if script_args.results_dir is not None and os.path.exists(script_args.results_dir) else Path(RESULTS_DIR)
 
@@ -376,7 +424,296 @@ def extract_and_save_value_system_weights( model: MORMForClassification, results
     print(f"Value system weights saved to: {csv_path.resolve()}")
 
 
+def load_model(script_args: EvalArguments) -> MORMForClassification:
+    model_class = MORMForSequenceClassification if script_args.task_type == "nlp_based" else MORMForClassification
+    return model_class.from_pretrained(
+        str(script_args.checkpoint_path),
+    ).to(device="cpu" if script_args.use_cpu else "cuda:0")
 
+
+def build_dataset(script_args: EvalArguments, model: MORMForClassification, tokenizer) -> tuple[FeatureBasedPreferenceDataset | PairwisePreferenceDataset, MORewardDataCollator, Optional[torch.nn.Module]]:
+    """Load the processed dataset, split with script_args.data_seed, and its collator."""
+    torch_dtype = model.config.dtype
+    embed_model = None
+    train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
+    extra_keep_keys = EXTRA_KEYS[script_args.dataset]
+    test_proportion_or_indices = get_test_indices(script_args.dataset)
+    eval_proportion_or_indices = get_validation_indices(script_args.dataset)
+
+    if script_args.task_type == "nlp_based":
+        dc = MORewardDataCollatorWithPadding(
+            tokenizer=tokenizer,
+            max_length=int(script_args.max_length),
+            dtype=torch_dtype,
+            use_embeddings=bool(script_args.use_extracted_features),
+        )
+        embed_model = model.full_model if script_args.use_extracted_features else None
+        print("EMBED MODEL:", embed_model)
+        print("FEATURES:", script_args.use_extracted_features)
+
+        sentence_model = None
+        if model.config.use_sentence_transformer:
+            sentence_model = SentenceTransformer(f'sentence-transformers/{model.config.sentence_transformer_name}')
+
+        dataset = PairwisePreferenceDataset(
+                        train_path,
+                        tokenizer,
+                        from_disk=True,
+                        use_sentence_transformer=model.config.use_sentence_transformer,
+                        sentence_model=sentence_model,
+                        normalize_context=script_args.normalize_context_features,
+                        extra_keep_keys=extra_keep_keys,
+                        retokenize=False,
+                        recalculate_embeddings=False,
+                        use_embeddings=bool(script_args.use_extracted_features),
+                        model_reference=embed_model,
+                        collator=dc,
+                        split_seed=int(script_args.data_seed),
+                        eval_proportion_or_indices=eval_proportion_or_indices,
+                        test_proportion_or_indices=test_proportion_or_indices,
+                        cleanup_cache_files=False,
+                    )
+    else:
+        dc = MORewardDataCollator(dtype=torch_dtype)
+        dataset = FeatureBasedPreferenceDataset(train_path,
+                                                from_disk=True,
+                                                normalize_context=script_args.normalize_context_features,
+                                                extra_keep_keys=extra_keep_keys,
+                                                repostprocess=False,
+                                                recalculate_features=False,
+                                                use_extracted_features=script_args.use_extracted_features,
+                                                collator=dc,
+                                                split_seed=int(script_args.data_seed),
+                                                eval_proportion_or_indices=eval_proportion_or_indices,
+                                                test_proportion_or_indices=test_proportion_or_indices,
+                                                cleanup_cache_files=False,
+                                                )
+
+    if model.num_values != len(dataset.value_keys):
+        raise ValueError(
+            f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
+        )
+    return dataset, dc, embed_model
+
+
+def build_trainer(script_args: EvalArguments, model: MORMForClassification, dataset, dc) -> MORewardTrainer:
+    """Evaluation-only trainer using the exact same metric and loss functions as training."""
+    model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
+    reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
+    value_system_module_name = VALUE_SYSTEM_OUTPUT.get(model_name_for_maps, None)
+    reward_head_indices = REWARD_HEADS_INDICES.get(model_name_for_maps, {}).get(script_args.dataset, None)
+
+    if bool(script_args.use_frozen_base_model):
+        if reward_head_indices is not None:
+            if len(dataset.value_keys) != len(reward_head_indices):
+                raise ValueError(
+                    "Mismatch between dataset value key count and reward head indices: "
+                    f"{len(dataset.value_keys)} vs {len(reward_head_indices)}"
+                )
+
+    # Read-only eval args; MORewardTrainer still needs TrainingArguments.
+    per_device_train_batch_size, per_device_eval_batch_size = load_training_args_from_checkpoint(
+        str(script_args.checkpoint_path)
+    )
+    bf16 = bool(script_args.bf16) if script_args.task_type != "feature_based" else False
+    eval_args = TrainingArguments(
+        output_dir=str(script_args.results_dir),
+        seed=int(script_args.seed),
+        data_seed=int(script_args.data_seed),
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        per_device_train_batch_size=per_device_train_batch_size,
+        remove_unused_columns=False,
+        bf16=bf16,
+        logging_strategy="steps",
+        logging_steps=1,
+        report_to="none",
+        label_names=["labels"],
+        use_cpu=script_args.use_cpu,
+        do_train=False,
+        do_eval=True,
+        save_strategy="no",
+    )
+
+    # Keep these in sync with model config if base-model reward heads are active.
+    model.config.base_model_reward_heads_module_name = reward_heads_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_reward_heads_module_name
+    model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
+
+    if ContextImplementations(model.config.context_implementation) == ContextImplementations.NO_CONTEXT:
+        trainer_class = MORewardTrainer
+    else:
+        trainer_class = CtxMORewardTrainer
+    trainer_extra_kwargs = dict(
+        compute_loss_func=partial(
+            mo_compute_loss_func, config=model.config, training_variables=model.training_variables),
+    )
+
+    print("TR", trainer_extra_kwargs)
+    pprint(trainer_extra_kwargs)
+    pprint(eval_args.__dict__)
+    return trainer_class(
+        model=model,
+        args=eval_args,
+        eval_dataset=dataset.test_dataset,
+        compute_metrics=partial(trainer_class.compute_metrics_custom,
+                                config=model.config, training_variables=model.training_variables),
+        data_collator=dc,
+        **trainer_extra_kwargs
+    )
+
+
+# ---------------------------------------------------------------------------
+# Clustering analysis and cross-checkpoint clustering comparison
+# ---------------------------------------------------------------------------
+
+# (split name, trainer metric prefix); split names match the evaluate_contexts output files.
+CLUSTERING_SPLITS = (("validation", "eval"), ("test", "test"))
+# Clusterings compared across checkpoints. Every available clustering is analyzed per checkpoint.
+COMPARED_CLUSTERINGS = ("value_system",)
+
+
+@dataclass
+class ModelClusterings:
+    """Per-pair cluster labels of one checkpoint, {split: {clustering: (n_pairs,) labels}},
+    and the number of clusters each clustering was configured with."""
+    name: str
+    labels: Dict[str, Dict[str, np.ndarray]]
+    configured_k: Dict[str, int]
+
+
+def _configured_k(config: MORMForClassificationConfig) -> Dict[str, int]:
+    return {"value_system": int(config.max_value_systems), "context": int(config.max_contexts)}
+
+
+def _per_pair(x, name: str) -> np.ndarray:
+    """Collapse interleaved (option1, option2) rows to one row per pair. Both options
+    share the pair's prompt, hence its context features and cluster assignments."""
+    if isinstance(x, torch.Tensor):
+        x = x.detach().cpu()
+        x = (x.float() if x.is_floating_point() else x).numpy()
+    x = np.asarray(x)
+    if len(x) % 2 != 0:
+        raise ValueError(f"{name}: expected interleaved option1/option2 rows, got an odd number ({len(x)}).")
+    mismatched = ~np.isclose(x[0::2], x[1::2]).reshape(len(x) // 2, -1).all(axis=1)
+    if mismatched.any():
+        print(f"Warning: {name} differs between option1 and option2 in {mismatched.mean():.2%} of pairs; using option1's.")
+    return x[0::2]
+
+
+def extract_pair_clusterings(others: Dict[str, Any]) -> tuple[np.ndarray, Dict[str, np.ndarray]]:
+    """Per-pair context features and cluster labels from a CtxMORewardTrainer.evaluate() "others" output."""
+    ctx = others["ctx"]
+    features = _per_pair(ctx["context_features"], "context_features")
+    clusterings = {"value_system": _per_pair(ctx["vs_assignments"], "vs_assignments")}
+    if ctx.get("ctx_assignments") is not None:
+        clusterings["context"] = _per_pair(ctx["ctx_assignments"], "ctx_assignments")
+    return features, clusterings
+
+
+def collect_alternative_clusterings(checkpoint_path: str, main_args: EvalArguments, tokenizer, main_dataset) -> Optional[ModelClusterings]:
+    """Inference-only evaluation of an alternative checkpoint on the main checkpoint's
+    split (main_args.data_seed), returning its per-pair cluster labels."""
+    alt_args = _build_eval_arguments(main_args, Path(checkpoint_path), Path(main_args.results_dir))
+    print(f"CLUSTERING INFERENCE FOR ALTERNATIVE CHECKPOINT: {checkpoint_path}")
+    model = load_model(alt_args)
+    model.eval()
+    if ContextImplementations(model.config.context_implementation) == ContextImplementations.NO_CONTEXT:
+        print(f"Warning: {checkpoint_path} is a NO_CONTEXT model (no clustering); skipping it.")
+        del model
+        torch.cuda.empty_cache()
+        return None
+
+    dataset, dc, embed_model = build_dataset(alt_args, model, tokenizer)
+    trainer = build_trainer(alt_args, model, dataset, dc)
+    labels = {}
+    for (split_name, metric_prefix), split_dataset, main_split_dataset in zip(
+        CLUSTERING_SPLITS,
+        (dataset.eval_dataset, dataset.test_dataset),
+        (main_dataset.eval_dataset, main_dataset.test_dataset),
+    ):
+        split_contexts = np.array(split_dataset.select_columns(["context"])["context"])
+        main_contexts = np.array(main_split_dataset.select_columns(["context"])["context"])
+        if not np.array_equal(split_contexts, main_contexts):
+            print(f"Warning: the {split_name} split of {checkpoint_path} does not match the main checkpoint's; skipping it.")
+            labels = None
+            break
+        metrics = trainer.evaluate(eval_dataset=split_dataset, metric_key_prefix=metric_prefix)
+        _, labels[split_name] = extract_pair_clusterings(metrics.pop("others"))
+
+    configured_k = _configured_k(model.config)
+    model.to(device="cpu")
+    del trainer, dataset, model, dc, embed_model
+    torch.cuda.empty_cache()
+    if labels is None:
+        return None
+    return ModelClusterings(removed_model_path_segment(checkpoint_path), labels, configured_k)
+
+
+def _save_clustering_table(rows: List[Dict[str, Any]], output_dir: str, name: str) -> None:
+    table = pd.DataFrame(rows)
+    path = Path(output_dir) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    table.to_csv(path, index=False)
+    print(f"{name}:\n{table.to_string(index=False)}\nSaved to: {path.resolve()}")
+
+
+def evaluate_clusterings(script_args: EvalArguments, model: MORMForClassification, tokenizer, dataset,
+                         split_outputs: Dict[str, Dict[str, Any]],
+                         alternatives_cache: Dict[tuple, Optional[ModelClusterings]]) -> None:
+    """Writes, per split in `split_outputs` ({split: evaluate() "others"}):
+    - <split>_clustering_analysis.csv: internal quality (utils.CLUSTERING_QUALITY_METRICS)
+      and accuracy against KMeans (KMeans as ground truth) of every clustering of the
+      main checkpoint and of each alternative in script_args.compare_checkpoint_paths,
+      plus the KMeans reference itself.
+    - <split>_clustering_similarity.csv: similarity (utils.CLUSTERING_SIMILARITY_METRICS)
+      between the main checkpoint's and each alternative's COMPARED_CLUSTERINGS.
+    All clusterings are scored in the main checkpoint's context-feature space. KMeans is
+    fit on its train split with each clustering's configured number of clusters."""
+    features, main_labels = {}, {}
+    for split_name, others in split_outputs.items():
+        features[split_name], main_labels[split_name] = extract_pair_clusterings(others)
+    main = ModelClusterings(removed_model_path_segment(str(script_args.checkpoint_path)), main_labels, _configured_k(model.config))
+    train_features = np.asarray(
+        dataset.train_dataset.select_columns([model.vs_features_name])[model.vs_features_name], dtype=np.float32)
+
+    # Free the GPU for the alternative checkpoints; only numpy outputs are needed from here on.
+    model.to(device="cpu")
+    torch.cuda.empty_cache()
+    alternatives: List[ModelClusterings] = []
+    for checkpoint_path in script_args.compare_checkpoint_paths:
+        cache_key = (checkpoint_path, int(script_args.data_seed))
+        if cache_key not in alternatives_cache:
+            alternatives_cache[cache_key] = collect_alternative_clusterings(checkpoint_path, script_args, tokenizer, dataset)
+        if alternatives_cache[cache_key] is not None:
+            alternatives.append(alternatives_cache[cache_key])
+
+    all_ks = sorted({k for clusterings in (main, *alternatives) for k in clusterings.configured_k.values()})
+    kmeans_by_k = {k: kmeans_clustering(train_features, K=k) for k in all_ks}
+    for split_name in split_outputs:
+        split_features = features[split_name].astype(np.float32)
+        kmeans_labels = {k: kmeans.predict(split_features) for k, kmeans in kmeans_by_k.items()}
+
+        analysis_rows = [
+            {"model": f"KMeans(K={k})", "clustering": "kmeans", **analyze_clustering(split_features, labels)}
+            for k, labels in kmeans_labels.items()
+        ]
+        for clusterings in (main, *alternatives):
+            for clustering_name, labels in clusterings.labels[split_name].items():
+                reference = {"kmeans": kmeans_labels[clusterings.configured_k[clustering_name]]}
+                analysis_rows.append({"model": clusterings.name, "clustering": clustering_name,
+                                      **analyze_clustering(split_features, labels, reference_labels=reference)})
+        _save_clustering_table(analysis_rows, script_args.results_dir, f"{split_name}_clustering_analysis.csv")
+
+        similarity_rows = []
+        for alternative in alternatives:
+            for clustering_name in COMPARED_CLUSTERINGS:
+                if clustering_name in main.labels[split_name] and clustering_name in alternative.labels[split_name]:
+                    similarity_rows.append({
+                        "main": main.name, "other": alternative.name, "clustering": clustering_name,
+                        **compare_clusterings(main.labels[split_name][clustering_name],
+                                              alternative.labels[split_name][clustering_name], "main", "other"),
+                    })
+        if similarity_rows:
+            _save_clustering_table(similarity_rows, script_args.results_dir, f"{split_name}_clustering_similarity.csv")
 
 
 def main() -> None:
@@ -384,6 +721,8 @@ def main() -> None:
     script_args_all: List[EvalArguments]
     
     print("EVAL ARGUMENTS PARSED")
+    # Alternative checkpoints' clusterings, keyed (checkpoint_path, data_seed), reused across main checkpoints.
+    alternatives_cache: Dict[tuple, Optional[ModelClusterings]] = {}
     for script_args in script_args_all:
         if not os.path.exists(os.path.join(str(script_args.checkpoint_path), "seed_info.json")):
             print(f"Warning: seed_info.json not found in checkpoint path: {script_args.checkpoint_path}. Using default seeds.")
@@ -416,16 +755,7 @@ def main() -> None:
         checkpoint_size = du(script_args.checkpoint_path)
         print(f"Checkpoint size: {checkpoint_size}")
 
-        if script_args.task_type == "nlp_based":
-                    model = MORMForSequenceClassification.from_pretrained(
-                            str(script_args.checkpoint_path)
-                        ).to(device="cpu" if script_args.use_cpu else "cuda:0")
-
-        else:
-            model = MORMForClassification.from_pretrained(
-                    str(script_args.checkpoint_path),
-                ).to(device="cpu" if script_args.use_cpu else "cuda:0")
-        model: MORMForClassification
+        model = load_model(script_args)
 
         torch_dtype = model.config.dtype
         #print("VS", model.value_system_layer.get_value_system_info())
@@ -471,140 +801,8 @@ def main() -> None:
             torch.cuda.empty_cache()
             continue
 
-        
-
-        train_path = PROCESSED_DATASET_PATHS[script_args.dataset]
-        extra_keep_keys = EXTRA_KEYS[script_args.dataset]
-        test_proportion_or_indices = get_test_indices(script_args.dataset)
-        eval_proportion_or_indices = get_validation_indices(script_args.dataset)
-
-        
-        if script_args.task_type == "nlp_based":
-            dc = MORewardDataCollatorWithPadding(
-            tokenizer=tokenizer,
-            max_length=int(script_args.max_length),
-            dtype=torch_dtype,
-            use_embeddings=bool(script_args.use_extracted_features),
-        )
-            embed_model = model.full_model if script_args.use_extracted_features else None
-            print("EMBED MODEL:", embed_model)
-            print("FEATURES:", script_args.use_extracted_features)
-
-            sentence_model = None
-            if model.config.use_sentence_transformer:
-                sentence_model = SentenceTransformer(f'sentence-transformers/{model.config.sentence_transformer_name}')
-                
-            dataset = PairwisePreferenceDataset(
-                            train_path,
-                            tokenizer,
-                            from_disk=True,
-                            use_sentence_transformer=model.config.use_sentence_transformer,
-                            sentence_model=sentence_model,
-                            normalize_context=script_args.normalize_context_features,
-                            extra_keep_keys=extra_keep_keys,
-                            retokenize=False,
-                            recalculate_embeddings=False,
-                            use_embeddings=bool(script_args.use_extracted_features),
-                            model_reference=embed_model,
-                            collator=dc,
-                            split_seed=int(script_args.data_seed),
-                            eval_proportion_or_indices=eval_proportion_or_indices,
-                            test_proportion_or_indices=test_proportion_or_indices,
-                            cleanup_cache_files=False,
-                        )
-        else:
-            pad_token_id = None
-            dc = MORewardDataCollator(dtype=torch_dtype)
-            dataset = FeatureBasedPreferenceDataset(train_path, 
-                                                    from_disk=True,
-                                                normalize_context=script_args.normalize_context_features,
-                                                extra_keep_keys=extra_keep_keys,
-                                                repostprocess=False,
-                                                recalculate_features=False,
-                                                use_extracted_features=script_args.use_extracted_features,
-                                                
-                                                collator=dc,
-                                                split_seed=int(script_args.data_seed),
-                                                eval_proportion_or_indices=eval_proportion_or_indices,
-                                                test_proportion_or_indices=test_proportion_or_indices,
-                                                cleanup_cache_files=False,
-                                                )
-        
-        
-        if model.num_values != len(dataset.value_keys):
-            raise ValueError(
-                f"Model num_values ({model.num_values}) does not match dataset value key count ({len(dataset.value_keys)}). Perhaps you have loaded a model that is not compatible with the dataset? Check your checkpoint path and dataset choice."
-            )
-
-       
-
-        model_name_for_maps = getattr(model.config, "base_model_name_or_path", script_args.model_name)
-        reward_heads_module_name = REWARD_HEADS_OUTPUT.get(model_name_for_maps, None)
-        value_system_module_name = VALUE_SYSTEM_OUTPUT.get(model_name_for_maps, None)
-        reward_head_indices = REWARD_HEADS_INDICES.get(model_name_for_maps, {}).get(script_args.dataset, None)
-
-        if bool(script_args.use_frozen_base_model):
-            if reward_head_indices is not None:
-                if len(dataset.value_keys) != len(reward_head_indices):
-                    raise ValueError(
-                        "Mismatch between dataset value key count and reward head indices: "
-                        f"{len(dataset.value_keys)} vs {len(reward_head_indices)}"
-                    )
-
-        # Read-only eval args; MORewardTrainer still needs TrainingArguments.
-        per_device_train_batch_size, per_device_eval_batch_size = load_training_args_from_checkpoint(
-            str(script_args.checkpoint_path)
-        )
-        bf16 = bool(script_args.bf16) if script_args.task_type != "feature_based" else False
-        eval_args = TrainingArguments(
-            output_dir=str(script_args.results_dir),
-            seed=int(script_args.seed),
-            data_seed=int(script_args.data_seed),
-            per_device_eval_batch_size=per_device_eval_batch_size,
-            per_device_train_batch_size=per_device_train_batch_size,
-            remove_unused_columns=False,
-            bf16=bf16,
-            logging_strategy="steps",
-            logging_steps=1,
-            report_to="none",
-            label_names=["labels"],
-            use_cpu=script_args.use_cpu,
-            do_train=False,
-            do_eval=True,
-            save_strategy="no",
-        )
-
-        # Keep these in sync with model config if base-model reward heads are active.
-        model.config.base_model_reward_heads_module_name = reward_heads_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_reward_heads_module_name
-        model.config.base_model_value_system_module_name = value_system_module_name if bool(script_args.use_frozen_base_model) else model.config.base_model_value_system_module_name
-        
-        # Use the exact same metric and loss functions as training.
-        if ContextImplementations(model.config.context_implementation) == ContextImplementations.NO_CONTEXT:
-            trainer_class = MORewardTrainer 
-            trainer_extra_kwargs = dict(
-                compute_loss_func=partial(
-                    mo_compute_loss_func, config=model.config, training_variables=model.training_variables),
-            )
-        else:
-            trainer_class = CtxMORewardTrainer
-            trainer_extra_kwargs = dict(
-                compute_loss_func=partial(
-                    mo_compute_loss_func, config=model.config, training_variables=model.training_variables),
-            )
-        
-        print("TR", trainer_extra_kwargs)
-        pprint(trainer_extra_kwargs)
-        pprint(eval_args.__dict__)
-        trainer = trainer_class(
-            model=model,
-            args=eval_args,
-            eval_dataset=dataset.test_dataset,
-            compute_metrics=partial(trainer_class.compute_metrics_custom,
-                                    config=model.config, training_variables=model.training_variables),
-            
-            data_collator=dc,
-            **trainer_extra_kwargs
-        )
+        dataset, dc, embed_model = build_dataset(script_args, model, tokenizer)
+        trainer = build_trainer(script_args, model, dataset, dc)
 
         print(f"Starting test evaluation... {len(dataset.test_dataset)} examples")
         pprint(vars(dataset))
@@ -777,8 +975,11 @@ def main() -> None:
                                                llm_provider=script_args.llm_provider)
             save_context_evaluation(output, output_dir=script_args.results_dir)
 
-            
-                
+            evaluate_clusterings(script_args, model, tokenizer, dataset,
+                                 {"validation": others_eval, "test": others_test},
+                                 alternatives_cache)
+        elif script_args.compare_checkpoint_paths:
+            print(f"Warning: {script_args.checkpoint_path} is a NO_CONTEXT model (no clustering); skipping the clustering comparison.")
 
         model = model.to(device="cpu")
         embed_model = embed_model.to(device="cpu") if embed_model is not None else None

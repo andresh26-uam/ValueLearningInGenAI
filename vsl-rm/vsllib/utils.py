@@ -416,6 +416,7 @@ class ScriptArguments:
 
     do_train: Optional[bool] = field(default=True)
     ctx_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
+    ctx_chr_coefficient: Optional[float] = field(default=0.0, metadata={"help": "The coefficient for the context coherence loss. Unique in VAE_KMEANS."})
     entropy_coefficient: Optional[float] = field(default=0.0, metadata={"help": "The coefficient for the entropy/mutual information penalty on context-to-vs selection. This is only used if the context implementation is GMM."})
 
     vs_selection_coefficient: Optional[float] = field(default=1.0, metadata={"help": "The coefficient for the context loss term in the total loss function. This is only used if the context implementation is not NO_CONTEXT."})
@@ -695,7 +696,7 @@ class ScriptArguments:
         metadata={"help": "The lambda parameter for the clustering loss used for context selection in VAE KMEANS: https://arxiv.org/pdf/1806.10069."},
     )
     llm_provider: Optional[str] = field(
-        default=LLMProvider.OPENROUTER.value,
+        default=LLMProvider.GROQ.value,
         metadata={"help": "Choose between LLMProvider in defines.py: GROQ, OPENROUTER. Used for LLM-based context cluster summarization."},
     )
 
@@ -1469,3 +1470,198 @@ def write_metrics_csv(metrics: Dict[str, Any], output_path: str, name: str = "te
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerow(metrics)
+
+
+# ---------------------------------------------------------------------------
+# Clustering analysis
+# ---------------------------------------------------------------------------
+# Two registries, keyed by metric name; adding a metric only requires a new entry:
+#   * CLUSTERING_SIMILARITY_METRICS -- compare two labelings of the same points.
+#     `fn(ground_truth_labels, predicted_labels) -> float`. Asymmetric metrics are
+#     reported in both directions by `compare_clusterings`.
+#   * CLUSTERING_QUALITY_METRICS -- score a single labeling of a feature space.
+#     `fn(features, labels) -> float`.
+# `analyze_clustering` additionally scores a labeling against reference labelings
+# (e.g. KMeans taken as ground truth) with the similarity metrics named in
+# CLUSTERING_REFERENCE_METRICS.
+
+from typing import Callable, NamedTuple, Sequence
+from scipy.optimize import linear_sum_assignment
+from sklearn.metrics import (
+    adjusted_mutual_info_score,
+    adjusted_rand_score,
+    calinski_harabasz_score,
+    davies_bouldin_score,
+    fowlkes_mallows_score,
+    homogeneity_score,
+    mutual_info_score,
+    normalized_mutual_info_score,
+    rand_score,
+    silhouette_score,
+    v_measure_score,
+)
+from sklearn.metrics.cluster import contingency_matrix
+
+
+def _as_float32_array(x) -> np.ndarray:
+    # bfloat16/float16 tensors cannot be converted to numpy directly.
+    if isinstance(x, th.Tensor):
+        return x.detach().float().cpu().numpy()
+    return np.asarray(x, dtype=np.float32)
+
+
+def _has_multiple_clusters(labels: np.ndarray) -> bool:
+    return len(np.unique(labels)) >= 2
+
+
+def hungarian_accuracy(ground_truth: np.ndarray, predicted: np.ndarray) -> float:
+    """Clustering accuracy (ACC, as in DEC/VaDE): fraction of points correctly labeled
+    under the best one-to-one cluster matching (Hungarian algorithm). Symmetric; with
+    different cluster counts, the surplus clusters stay unmatched and count as errors."""
+    counts = contingency_matrix(ground_truth, predicted)
+    rows, cols = linear_sum_assignment(counts, maximize=True)
+    return float(counts[rows, cols].sum() / counts.sum())
+
+
+def majority_mapping_accuracy(ground_truth: np.ndarray, predicted: np.ndarray) -> float:
+    """Many-to-one accuracy (a.k.a. purity): every predicted cluster is mapped to its
+    most frequent ground-truth cluster. Asymmetric; favors over-segmented predictions."""
+    counts = contingency_matrix(ground_truth, predicted)
+    return float(counts.max(axis=0).sum() / counts.sum())
+
+
+def variation_of_information(ground_truth: np.ndarray, predicted: np.ndarray) -> float:
+    """Variation of Information (Meila, 2007): H(A) + H(B) - 2 I(A; B), in nats. A true
+    metric between partitions; 0 means identical partitions, lower is better."""
+    counts = contingency_matrix(ground_truth, predicted).astype(np.float64)
+    p_rows = counts.sum(axis=1) / counts.sum()
+    p_cols = counts.sum(axis=0) / counts.sum()
+    h_rows = -np.sum(p_rows * np.log(p_rows))
+    h_cols = -np.sum(p_cols * np.log(p_cols))
+    return float(h_rows + h_cols - 2.0 * mutual_info_score(None, None, contingency=counts))
+
+
+def within_cluster_sum_of_squares(features: np.ndarray, labels: np.ndarray) -> float:
+    """WCSS (a.k.a. inertia): sum of squared Euclidean distances of every point to its
+    cluster centroid. Lower is better; grows with the number of points and dimensions."""
+    total = 0.0
+    for cluster in np.unique(labels):
+        members = features[labels == cluster].astype(np.float64)
+        total += float(np.sum((members - members.mean(axis=0)) ** 2))
+    return total
+
+
+def ray_turi_index(features: np.ndarray, labels: np.ndarray) -> float:
+    """Ray-Turi index (Ray & Turi, 1999): mean squared distance of points to their
+    centroid (WCSS / N) divided by the minimum squared distance between two centroids.
+    Lower is better."""
+    if not _has_multiple_clusters(labels):
+        return float("nan")
+    centroids = np.stack([features[labels == c].astype(np.float64).mean(axis=0) for c in np.unique(labels)])
+    min_separation = pdist(centroids, "sqeuclidean").min()
+    if min_separation == 0:
+        return float("nan")
+    return within_cluster_sum_of_squares(features, labels) / len(labels) / float(min_separation)
+
+
+def dunn_index(features: np.ndarray, labels: np.ndarray, chunk_size: int = 2048) -> float:
+    """Dunn index (Dunn, 1974): minimum distance between points of different clusters
+    divided by the maximum intra-cluster diameter. Higher is better; sensitive to
+    outliers. Exact, computed on row chunks of the distance matrix (GPU if available)
+    after dropping exact-duplicate (point, label) rows, which change neither extreme."""
+    if not _has_multiple_clusters(labels):
+        return float("nan")
+    _, keep = np.unique(np.column_stack([features, labels.astype(np.float32)]), axis=0, return_index=True)
+    device = "cuda" if th.cuda.is_available() else "cpu"
+    points = th.as_tensor(features[keep], dtype=th.float32, device=device)
+    point_labels = th.as_tensor(labels[keep], device=device)
+    min_inter = float("inf")
+    max_intra = 0.0
+    for start in range(0, len(points), chunk_size):
+        distances = th.cdist(points[start:start + chunk_size], points)
+        same_cluster = point_labels[start:start + chunk_size, None] == point_labels[None, :]
+        max_intra = max(max_intra, distances.masked_fill(~same_cluster, 0.0).max().item())
+        min_inter = min(min_inter, distances.masked_fill(same_cluster, float("inf")).min().item())
+    if max_intra == 0:
+        return float("nan")
+    return min_inter / max_intra
+
+
+def silhouette_index(features: np.ndarray, labels: np.ndarray, max_samples: int = 5000, seed: int = 0) -> float:
+    """Mean silhouette coefficient (Rousseeuw, 1987) in [-1, 1], higher is better.
+    Estimated on a random subsample of at most `max_samples` points (O(N^2) otherwise)."""
+    if not _has_multiple_clusters(labels):
+        return float("nan")
+    return float(silhouette_score(features, labels, sample_size=min(len(labels), max_samples), random_state=seed))
+
+
+class SimilarityMetric(NamedTuple):
+    fn: Callable[[np.ndarray, np.ndarray], float]
+    symmetric: bool
+
+
+CLUSTERING_SIMILARITY_METRICS: Dict[str, SimilarityMetric] = {
+    "nmi": SimilarityMetric(normalized_mutual_info_score, symmetric=True),
+    "ami": SimilarityMetric(adjusted_mutual_info_score, symmetric=True),
+    "ari": SimilarityMetric(adjusted_rand_score, symmetric=True),
+    "rand_index": SimilarityMetric(rand_score, symmetric=True),
+    "fowlkes_mallows": SimilarityMetric(fowlkes_mallows_score, symmetric=True),
+    "v_measure": SimilarityMetric(v_measure_score, symmetric=True),
+    "variation_of_information": SimilarityMetric(variation_of_information, symmetric=True),
+    "hungarian_accuracy": SimilarityMetric(hungarian_accuracy, symmetric=True),
+    "majority_accuracy": SimilarityMetric(majority_mapping_accuracy, symmetric=False),
+    # homogeneity with the ground truth swapped is completeness.
+    "homogeneity": SimilarityMetric(homogeneity_score, symmetric=False),
+}
+
+CLUSTERING_QUALITY_METRICS: Dict[str, Callable[[np.ndarray, np.ndarray], float]] = {
+    "dunn_index": dunn_index,
+    "ray_turi_index": ray_turi_index,
+    "wcss": within_cluster_sum_of_squares,
+    "davies_bouldin_index": lambda x, y: float(davies_bouldin_score(x, y)) if _has_multiple_clusters(y) else float("nan"),
+    "calinski_harabasz_index": lambda x, y: float(calinski_harabasz_score(x, y)) if _has_multiple_clusters(y) else float("nan"),
+    "silhouette": silhouette_index,
+}
+
+CLUSTERING_REFERENCE_METRICS: Tuple[str, ...] = ("hungarian_accuracy", "majority_accuracy")
+
+
+def compare_clusterings(labels_a, labels_b, name_a: str = "a", name_b: str = "b",
+                        metrics: Optional[Dict[str, SimilarityMetric]] = None) -> Dict[str, float]:
+    """Similarity between two labelings of the same points. Symmetric metrics are keyed
+    by their name; asymmetric ones are computed twice, keyed `<name>_gt_<name_a>`
+    (labels_a taken as ground truth) and `<name>_gt_<name_b>`."""
+    labels_a = np.asarray(_to_numpy_array(labels_a)).ravel()
+    labels_b = np.asarray(_to_numpy_array(labels_b)).ravel()
+    if len(labels_a) != len(labels_b):
+        raise ValueError(f"Cannot compare clusterings of different sizes: {len(labels_a)} vs {len(labels_b)}")
+    results = {}
+    for name, metric in (metrics or CLUSTERING_SIMILARITY_METRICS).items():
+        if metric.symmetric:
+            results[name] = float(metric.fn(labels_a, labels_b))
+        else:
+            results[f"{name}_gt_{name_a}"] = float(metric.fn(labels_a, labels_b))
+            results[f"{name}_gt_{name_b}"] = float(metric.fn(labels_b, labels_a))
+    return results
+
+
+def analyze_clustering(features, labels, reference_labels: Optional[Dict[str, Any]] = None,
+                       quality_metrics: Optional[Dict[str, Callable[[np.ndarray, np.ndarray], float]]] = None,
+                       reference_metrics: Sequence[str] = CLUSTERING_REFERENCE_METRICS) -> Dict[str, float]:
+    """Internal quality of one labeling of `features` (n_points, dim), plus its agreement
+    with each reference labeling in `reference_labels` ({name: labels}, taken as ground
+    truth), keyed `<metric>_vs_<name>` (symmetric) or `<metric>_gt_<name>` (asymmetric)."""
+    features = _as_float32_array(features)
+    labels = np.asarray(_to_numpy_array(labels)).ravel()
+    if len(features) != len(labels):
+        raise ValueError(f"features ({len(features)}) and labels ({len(labels)}) must be aligned one-per-point.")
+    results = {"n_points": len(labels), "n_clusters": len(np.unique(labels))}
+    for name, fn in (quality_metrics or CLUSTERING_QUALITY_METRICS).items():
+        results[name] = float(fn(features, labels))
+    for reference_name, reference in (reference_labels or {}).items():
+        reference = np.asarray(_to_numpy_array(reference)).ravel()
+        for metric_name in reference_metrics:
+            metric = CLUSTERING_SIMILARITY_METRICS[metric_name]
+            key = f"{metric_name}_vs_{reference_name}" if metric.symmetric else f"{metric_name}_gt_{reference_name}"
+            results[key] = float(metric.fn(reference, labels))
+    return results

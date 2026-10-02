@@ -1870,6 +1870,8 @@ class CtxMORewardTrainer(MORewardTrainer):
         return output
 
     def remove_duplicates(self, train_set_contexts):
+        if lem(train_set_contexts) % 2 != 0:
+            return train_set_contexts
         if np.allclose(train_set_contexts[::2], train_set_contexts[1::2]) and len(train_set_contexts) % 2 == 0:
             bsz = train_set_contexts.size(0)                
             jidx = th.arange(0, bsz, 2, device=train_set_contexts.device)
