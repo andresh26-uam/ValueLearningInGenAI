@@ -1869,8 +1869,8 @@ class CtxMORewardTrainer(MORewardTrainer):
                     self.model.plot_matrices(t=0, filename=os.path.join(output_dir, f"{otype}_context_matrices"), low_res=False, ctx_data=ctxdata)
         return output
 
-    def remove_duplicates(self, train_set_contexts):
-        if lem(train_set_contexts) % 2 != 0:
+    def remove_duplicates(self, train_set_contexts: th.Tensor) -> th.Tensor:
+        if len(train_set_contexts) % 2 != 0:
             return train_set_contexts
         if np.allclose(train_set_contexts[::2], train_set_contexts[1::2]) and len(train_set_contexts) % 2 == 0:
             bsz = train_set_contexts.size(0)                
