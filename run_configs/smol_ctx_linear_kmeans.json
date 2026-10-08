@@ -63,6 +63,7 @@
     "vae_similarity": "euclidean",
     "vae_beta": 1.0,
     "vae_pretrain_epochs": 10,
+    "vae_orthogonality_coefficient": 0.0,
     
 
     "use_validation_for_tendencies": false,

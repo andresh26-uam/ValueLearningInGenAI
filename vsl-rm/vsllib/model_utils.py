@@ -36,7 +36,7 @@ import numpy as np
 from sklearn.metrics import pairwise_distances_argmin_min
                 
 from vsllib.defines import DEFAULT_EPSILON, NO_RATING_MASK, VALUE_LAYER_ACTIVATIONS, ContextImplementations, MOLossFunctions, MOLossManagement
-from vsllib.utils import kmeans_clustering
+from vsllib.utils import kmeans_clustering, orthogonality_loss
 
 THRESHOLD = 50.0
 ACTIVATE_THRESHOLD_VS =  False
@@ -802,6 +802,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         vae_final_encoder_layer_activation: str = "none",
         vae_resampling_iterations: int = 10,
         vae_similarity: str = "cosine",
+        vae_orthogonality_coefficient: float = 0.0,
         entropy_coefficient: float = 0.0,
         ctx_coefficient: float = 0.0,
         ctx_chr_coefficient: float = 0.0,
@@ -914,6 +915,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vae_resampling_iterations=vae_resampling_iterations
         self.vae_similarity=vae_similarity
         self.vae_final_encoder_layer_activation = vae_final_encoder_layer_activation
+        self.vae_orthogonality_coefficient=vae_orthogonality_coefficient
 
         self.context_implementation = context_implementation
         self.sharp_context_classification = sharp_context_classification
@@ -1025,6 +1027,7 @@ class CustomVAEConfig(VAEConfig):
                 vae_lambda_clustering: float,
                 vae_is_binary: bool = False,
                 vae_pretrain_epochs: int = 10,
+                vae_orthogonality_coefficient: float = 0.0,
                   **kwargs):
         super().__init__(input_dim=input_dim, latent_dim=vae_latent_dim, reconstruction_loss=vae_reconstruction_loss, **kwargs)
         self.n_hidden_layers = vae_n_hidden_layers
@@ -1033,6 +1036,7 @@ class CustomVAEConfig(VAEConfig):
         self.type = vae_type
         self.dropout = vae_dropout
         self.layer_activation = vae_layer_activation
+        self.orthogonality_coefficient = vae_orthogonality_coefficient
         self.resampling_iterations = vae_resampling_iterations if vae_type == "vae" else 1
         self.final_layer_activation = vae_final_encoder_layer_activation
         self.similarity = vae_similarity
@@ -1445,6 +1449,10 @@ class CustomVAE(VAE):
         #print("CONTEXT LOGPROBS OF MU", context_logprobs_of_mu[0:5])
         
         loss_clustering_unreduced = (th.sum(context_distance_of_mu*(context_probs_of_mu), dim=-1))
+        print(self.model_config.orthogonality_coefficient )
+        exit(0)
+        if self.model_config.orthogonality_coefficient != 0.0:
+            loss_clustering_unreduced += self.model_config.orthogonality_coefficient * orthogonality_loss(self.latent_centroids)
         assert loss_clustering_unreduced.shape == (model_output["mu"].shape[0],)
         return loss_clustering_unreduced, False
 

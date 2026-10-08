@@ -1,24 +1,59 @@
 from typing import Any, Dict, NamedTuple, Optional
 import json
-import re
+import os
 from importlib import import_module
 from pathlib import Path
+import functools
+import contextlib
+import time
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 from sklearn.decomposition import PCA
 from scipy import stats as scipy_stats
-from wordcloud import WordCloud
 import torch as th
 from torch.optim.optimizer import Optimizer as Optimizer
 
-from transformers.trainer import *
+from transformers.trainer import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, DataLoader, Trainer, DistributedType, IterableDatasetShard, OptimizerNames, skip_first_batches, clear_device_cache
+from transformers.debug_utils import DebugOption
+from transformers.utils import (
+    is_sagemaker_mp_enabled,
+    is_torch_xla_available,
+    logging
+)
+from transformers.trainer_utils import (
+    EvalPrediction,
+    TrainOutput,
+    _is_peft_model,
+    denumpify_detensorize,
+    has_length,
+    speed_metrics,
+)
+
+from transformers.trainer_pt_utils import (
+    EvalLoopContainer,
+    IterableDatasetShard,
+    find_batch_size,
+    nested_detach,
+)
+from transformers.integrations.deepspeed import (
+    deepspeed_init,
+    deepspeed_sp_compute_loss,
+    is_deepspeed_available,
+    propagate_args_to_deepspeed,
+)
+
+from transformers.integrations.tpu import tpu_spmd_dataloader
+
+
+if is_torch_xla_available():
+    import torch_xla.core.xla_model as xm
+    import torch_xla.debug.metrics as met
 
 from transformers.optimization import get_scheduler
-
 from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
-from transformers.trainer_utils import SchedulerType, TrainOutput, _is_peft_model
-from kNLPmeans.summaryCentroids import build_sentence_corpus, embed_sentences, summarize_textrank
+from vsllib.context_analysis_utils import describe_clusters_with_llm, plot_cluster_metrics_bars, plot_cluster_word_clouds, save_cluster_metrics
 from vsllib.reward_models import AbstractCtxDependentAlignmentLayer, CtxData, MORMForClassification, MORMForSequenceClassification, rewards_and_labels_to_logits_and_targets
 from vsllib.model_utils import CustomVAE, MORMForClassificationConfig, accuracy_logits, accuracy_logits_smooth
 from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, MORMTrainingVariables
@@ -26,20 +61,15 @@ from vsllib.training_utils import ConstrainedLRScheduler, ConstrainedOptimizer, 
 
 from accelerate.optimizer import AcceleratedOptimizer
 from accelerate import Accelerator
-from vsllib.utils import auto_tsne, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_lrvs_agreement, compute_value_outcome_agreement, flatten_metrics_for_csv, format_value_outcome_agreements, kmeans_clustering, plot_alternative_clusterings, to_float
+from vsllib.utils import auto_tsne, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_lrvs_agreement, compute_value_outcome_agreement, kmeans_clustering, plot_alternative_clusterings, to_float
 from vsllib.defines import (
-    LLM_MODEL_EVAL,
-    LLM_PROVIDER_BASE_URL,
-    LLM_PROVIDER_DEFAULT_MODEL,
-    LLM_PROVIDER_ENV_VAR,
     ContextImplementations,
     LLMProvider,
 )
 
-
 from datasets import Dataset
 
-
+logger = logging.get_logger(__name__)
 
 
 class EvalPredictionWithExtraLabels(EvalPrediction):
@@ -252,48 +282,6 @@ def compute_length_correlations_per_cluster(groundings: np.ndarray, value_system
     return results
 
 
-def _coherence_and_representativeness_title_lines(cm: Dict[str, float]) -> list:
-    """Coherence_{i}/representativeness lines for a wordcloud/bar-plot title, in value
-    order (no per-value labels -- just the values, in the same order as the value-system
-    weights), and the length-vs-reward Pearson/Spearman correlation lines that go with
-    them, if present.
-    """
-    lines = []
-    coherence_keys = sorted(
-        (k for k in cm if re.fullmatch(r"coherence_\d+", k)),
-        key=lambda k: int(k.split("_")[1]))
-    if coherence_keys:
-        lines.append("coherence: [" + ", ".join(f"{cm[k]:.3f}" for k in coherence_keys) + "]")
-    if "representativeness" in cm:
-        lines.append(f"representativeness: {cm['representativeness']:.3f}")
-
-    for label, key_prefix in (
-        ("GTGR-To-GTVS", "gtgr_to_gtvs_agreement"),
-        ("LRGR-To-GTVS", "lrgr_to_gtvs_agreement"),
-        ("LRGR-To-LRVS", "lrgr_to_lrvs_agreement"),
-    ):
-        outcome_agreement_keys = sorted(
-            (k for k in cm if re.fullmatch(rf"{key_prefix}_\d+", k)),
-            key=lambda k: int(k.rsplit("_", 1)[-1]))
-        if outcome_agreement_keys:
-            lines.append(f"{label}: [" + ", ".join(f"{cm[k]:.1f}%" for k in outcome_agreement_keys) + "]")
-
-    pearson_keys = sorted(
-        (k for k in cm if re.fullmatch(r"length_pearson_\d+", k)),
-        key=lambda k: int(k.rsplit("_", 1)[-1]))
-    spearman_keys = sorted(
-        (k for k in cm if re.fullmatch(r"length_spearman_\d+", k)),
-        key=lambda k: int(k.rsplit("_", 1)[-1]))
-    if pearson_keys:
-        lines.append("length-reward pearson: [" + ", ".join(f"{cm[k]:.3f}" for k in pearson_keys) + "]")
-    if spearman_keys:
-        lines.append("length-reward spearman: [" + ", ".join(f"{cm[k]:.3f}" for k in spearman_keys) + "]")
-    if "length_pearson_vs" in cm or "length_spearman_vs" in cm:
-        pr_vs = cm.get("length_pearson_vs", float("nan"))
-        sr_vs = cm.get("length_spearman_vs", float("nan"))
-        lines.append(f"length-VS reward pearson: {pr_vs:.3f}, spearman: {sr_vs:.3f}")
-    return lines
-
 
 class MORewardTrainer(Trainer):
     training_variables: MORMTrainingVariables
@@ -424,11 +412,11 @@ class MORewardTrainer(Trainer):
     # overriden
     def training_step(
         self,
-        model: nn.Module,
-        inputs: dict[str, torch.Tensor | Any],
-        num_items_in_batch: torch.Tensor | int | None = None,
+        model: th.nn.Module,
+        inputs: dict[str, th.Tensor | Any],
+        num_items_in_batch: th.Tensor | int | None = None,
         epoch=None,
-    ) -> torch.Tensor:
+    ) -> th.Tensor:
         """
         Taken from the library. It has changes to handle multiple losses.
         """
@@ -569,7 +557,7 @@ class MORewardTrainer(Trainer):
                 if (
                     self.args.logging_nan_inf_filter
                     and not is_torch_xla_available()
-                    and (torch.isnan(tr_loss_step) or torch.isinf(tr_loss_step))
+                    and (th.isnan(tr_loss_step) or th.isinf(tr_loss_step))
                 ):
                     # if loss is nan or inf simply add the average of previous logged losses
                     self._tr_loss += self._tr_loss / (1 + self.state.global_step - self._globalstep_last_logged)
@@ -599,7 +587,7 @@ class MORewardTrainer(Trainer):
 
                     if not self.accelerator.optimizer_step_was_skipped:
                         # Delay optimizer scheduling until metrics are generated
-                        if not isinstance(self.lr_scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                        if not isinstance(self.lr_scheduler, th.optim.lr_scheduler.ReduceLROnPlateau):
                             self.lr_scheduler.step()
 
                     model.zero_grad()
@@ -708,12 +696,12 @@ class MORewardTrainer(Trainer):
 
     def prediction_step(
         self,
-        model: nn.Module,
-        inputs: dict[str, torch.Tensor | Any],
+        model: th.nn.Module,
+        inputs: dict[str, th.Tensor | Any],
         prediction_loss_only: bool,
         ignore_keys: list[str] | None = None,
         epoch="EVAL",
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> tuple[th.Tensor | None, th.Tensor | None, th.Tensor | None]:
         """
         Taken from the library. It has changes to handle multiple losses. Some implementations may raise errors as they were not tested
         """
@@ -744,7 +732,7 @@ class MORewardTrainer(Trainer):
         else:
             labels = None
 
-        with torch.no_grad():
+        with th.no_grad():
             if is_sagemaker_mp_enabled():
                 raise NotImplementedError(
                     "Sagemaker is not currently supported for MORewardTrainer.")
@@ -812,23 +800,23 @@ class MORewardTrainer(Trainer):
 
     def compute_loss(
         self,
-        model: nn.Module,
-        inputs: dict[str, torch.Tensor | Any],
+        model: th.nn.Module,
+        inputs: dict[str, th.Tensor | Any],
         return_outputs: bool = False,
-        num_items_in_batch: torch.Tensor | int | None = None,
+        num_items_in_batch: th.Tensor | int | None = None,
         epoch=None,
-    ) -> torch.Tensor | tuple[torch.Tensor, Any]:
+    ) -> th.Tensor | tuple[th.Tensor, Any]:
         """
         How the loss is computed by Trainer. By default, all models return the loss in the first element.
 
         Args:
             model (`nn.Module`):
                 The model to compute the loss for.
-            inputs (`dict[str, torch.Tensor | Any]`):
+            inputs (`dict[str, th.Tensor | Any]`):
                 The input data for the model.
             return_outputs (`bool`, *optional*, defaults to `False`):
                 Whether to return the model outputs along with the loss.
-            num_items_in_batch (Optional[torch.Tensor], *optional*):
+            num_items_in_batch (Optional[th.Tensor], *optional*):
                 The number of items in the batch. If not passed, the loss is computed
                 using the default batch size reduction logic.
 
@@ -941,9 +929,9 @@ class MORewardTrainer(Trainer):
         # while ``train`` is running, cast it to the right dtype first and then put on device
         if not self.is_in_train:
             if args.fp16_full_eval:
-                model = model.to(dtype=torch.float16, device=args.device)
+                model = model.to(dtype=th.float16, device=args.device)
             elif args.bf16_full_eval:
-                model = model.to(dtype=torch.bfloat16, device=args.device)
+                model = model.to(dtype=th.bfloat16, device=args.device)
 
         batch_size = self.args.eval_batch_size
 
@@ -1098,7 +1086,7 @@ class MORewardTrainer(Trainer):
                     )
 
                 del losses, logits, labels, labels_ql, labels_qt, inputs
-                torch.cuda.empty_cache()
+                th.cuda.empty_cache()
 
             # Gather all tensors and put them back on the CPU if we have done enough accumulation steps.
             elif args.eval_accumulation_steps is not None and (step + 1) % args.eval_accumulation_steps == 0:
@@ -1113,7 +1101,7 @@ class MORewardTrainer(Trainer):
                 all_inputs.to_cpu_and_numpy()
 
                 del losses, logits, labels, others, inputs
-                torch.cuda.empty_cache()
+                th.cuda.empty_cache()
 
         # After all calls to `.gather_function`, reset to `gather_for_metrics`:
         self.gather_function = self.accelerator.gather_for_metrics
@@ -1367,237 +1355,7 @@ class CtxMORewardTrainer(MORewardTrainer):
             subset = self.train_dataset
         self.model.train_initialization(subset, eval_set=self.eval_dataset, args=self.args, total_dataset_size=len(self.train_dataset))
 
-    @staticmethod
-    def plot_cluster_word_clouds(texts, labels, output_path: str, clustering_name: str, vs_predicted=None, label_names=None, descriptions=None, cluster_metrics=None, value_names=None, value_outcome_agreements=None, use_llm_categories: bool = False) -> None:
-        texts = np.asarray(texts, dtype=object)
-        if isinstance(labels, th.Tensor):
-            labels = labels.detach().cpu().numpy()
-        labels = np.asarray(labels)
-        if len(texts) != len(labels):
-            raise ValueError(
-                f"texts and {clustering_name} labels must have the same length, "
-                f"got {len(texts)} and {len(labels)}"
-            )
-        if vs_predicted is not None:
-            if isinstance(vs_predicted, th.Tensor):
-                vs_predicted = vs_predicted.detach().cpu().numpy()
-            vs_predicted = np.asarray(vs_predicted)
-            if len(vs_predicted) != len(labels):
-                raise ValueError(
-                    f"vs_predicted and {clustering_name} labels must have the same length, "
-                    f"got {len(vs_predicted)} and {len(labels)}"
-                )
-
-        panels = []
-        for cluster_label in np.unique(labels):
-            cluster_mask = labels == cluster_label
-            cluster_texts = [str(text) for text in texts[cluster_mask] if str(text).strip()]
-            if cluster_texts:
-                average_vs = None
-                if vs_predicted is not None:
-                    average_vs = np.mean(vs_predicted[cluster_mask], axis=0)
-                panels.append((cluster_label, len(cluster_texts), " ".join(cluster_texts), average_vs))
-
-        panels.sort(key=lambda panel: -panel[1])
-
-        if not panels:
-            return
-
-        columns = min(4, len(panels))
-        rows = (len(panels) + columns - 1) // columns
-        figure, axes = plt.subplots(
-            rows,
-            columns,
-            figsize=(5 * columns, 4.5 * rows),
-            squeeze=False,
-        )
-        for axis, (cluster_label, cluster_size, text, average_vs) in zip(axes.flat, panels):
-            word_cloud = WordCloud(
-                width=800,
-                height=600,
-                background_color="white",
-                random_state=0,
-            ).generate(text)
-            axis.imshow(word_cloud, interpolation="bilinear")
-            axis.axis("off")
-            popular_words = list(word_cloud.words_)[:4]
-            title_words = ", ".join(popular_words) or f"Cluster {cluster_label}"
-            if use_llm_categories and label_names is not None:
-                title_words = label_names.get(cluster_label, title_words)
-            title = f"{clustering_name}, {title_words} (n={cluster_size})"
-            if average_vs is not None:
-                average_vs_text = ", ".join(f"{weight:.3f}" for weight in np.ravel(average_vs))
-                title += f"\nmean predicted VS: [{average_vs_text}]"
-            if cluster_metrics is not None and cluster_label in cluster_metrics:
-                for line in _coherence_and_representativeness_title_lines(cluster_metrics[cluster_label]):
-                    title += f"\n{line}"
-            """THIS IS TOO MUCH INFO... if descriptions is not None and cluster_label in descriptions:
-                title += f"\n{descriptions[cluster_label]}"
-            """
-            axis.set_title(title)
-        for axis in axes.flat[len(panels):]:
-            axis.axis("off")
-        suptitle = format_value_outcome_agreements(value_outcome_agreements)
-        figure.tight_layout(pad=2.5, h_pad=4.0, w_pad=3.0)
-        figure.subplots_adjust(hspace=0.65, wspace=0.35, top=0.86 if suptitle else None)
-        if suptitle is not None:
-            figure.suptitle(suptitle, fontsize=11, y=0.99)
-        figure.savefig(output_path, dpi=150, bbox_inches="tight")
-        plt.close(figure)
-
-    @staticmethod
-    def plot_cluster_metrics_bars(cluster_metrics: Dict[Any, Dict[str, float]], value_names, output_path: str, clustering_name: str, value_outcome_agreements=None) -> None:
-        """Bar-plot grid (one subplot per cluster) of per-value grounding accuracy
-        (`coherence_{i}`) and value-system accuracy (`representativeness`) for a single
-        clustering (as produced by `compute_metrics_per_cluster`).
-        """
-        value_names = list(value_names)
-        panels = sorted(cluster_metrics.items(), key=lambda kv: -kv[1].get("size", 0))
-        if not panels:
-            return
-
-        bar_labels = value_names + ["representativeness"]
-        colors = ["tab:blue"] * len(value_names) + ["tab:orange"]
-
-        columns = min(4, len(panels))
-        rows = (len(panels) + columns - 1) // columns
-        figure, axes = plt.subplots(rows, columns, figsize=(4.5 * columns, 5.5 * rows), squeeze=False)
-        for axis, (cluster_label, metrics) in zip(axes.flat, panels):
-            values = [metrics.get(f"coherence_{i}", np.nan) for i in range(len(value_names))] + [metrics.get("representativeness", np.nan)]
-            bars = axis.bar(range(len(bar_labels)), values, color=colors)
-            axis.bar_label(bars, labels=[f"{v:.3f}" for v in values], padding=2, fontsize=8)
-            axis.set_xticks(range(len(bar_labels)))
-            axis.set_xticklabels(bar_labels, rotation=45, ha="right")
-            axis.set_ylim(0, 1.08)
-            axis.set_ylabel("accuracy")
-            label_text = f"Cluster {cluster_label}" if isinstance(cluster_label, (int, np.integer)) else str(cluster_label)
-            title = f"{clustering_name}, {label_text} (n={metrics.get('size', 0)})"
-            for line in _coherence_and_representativeness_title_lines(metrics):
-                if not line.startswith("coherence:") and not line.startswith("representativeness:"):
-                    title += f"\n{line}"
-            axis.set_title(title)
-        for axis in axes.flat[len(panels):]:
-            axis.axis("off")
-        suptitle = format_value_outcome_agreements(value_outcome_agreements)
-        figure.tight_layout(pad=2.5, h_pad=5.0, w_pad=3.0)
-        figure.subplots_adjust(hspace=1.0, wspace=0.4, top=0.86 if suptitle else None)
-        if suptitle is not None:
-            figure.suptitle(suptitle, fontsize=11, y=0.99)
-        path = Path(output_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        figure.savefig(path, dpi=150, bbox_inches="tight")
-        plt.close(figure)
-
-    @staticmethod
-    def save_cluster_metrics(cluster_metrics_by_clustering: Dict[str, Dict[Any, Dict[str, float]]], output_dir: str) -> pd.DataFrame:
-        """Writes every accuracy metric from `compute_metrics_per_cluster`, for every
-        clustering, to `{output_dir}/cluster_metrics.csv` and `.json` -- one row per
-        (clustering, cluster) pair.
-        """
-        rows = []
-        for clustering_name, per_cluster in cluster_metrics_by_clustering.items():
-            for cluster_label, metrics in per_cluster.items():
-                row = {"clustering": clustering_name, "cluster": cluster_label}
-                row.update(flatten_metrics_for_csv(metrics))
-                rows.append(row)
-        descriptions = pd.DataFrame(rows)
-        os.makedirs(output_dir, exist_ok=True)
-        descriptions.to_csv(os.path.join(output_dir, "cluster_metrics.csv"), index=False)
-        descriptions.to_json(os.path.join(output_dir, "cluster_metrics.json"), orient="records", indent=2)
-        return descriptions
-
-    @staticmethod
-    def describe_clusters_with_llm(texts, label_sets, clustering_names, output_dir: str, model_name: Optional[str] = None, provider: str = LLMProvider.GROQ.value, max_documents: int = 20, cluster_metrics: Optional[Dict[str, Dict[Any, Dict[str, float]]]] = None):
-        """Generate category and description metadata for each text clustering."""
-        provider = LLMProvider(provider)
-        model_name = model_name or LLM_PROVIDER_DEFAULT_MODEL[provider]
-        api_key = os.environ.get(LLM_PROVIDER_ENV_VAR[provider])
-        if not api_key:
-            raise RuntimeError(f"{LLM_PROVIDER_ENV_VAR[provider]} is not set; cannot generate cluster descriptions.")
-
-        if provider == LLMProvider.GROQ:
-            try:
-                ChatGroq = import_module("langchain_groq").ChatGroq
-            except ImportError as error:
-                raise ImportError("Install langchain-groq to generate cluster descriptions with Groq.") from error
-            llm = ChatGroq(model=model_name, temperature=0, api_key=api_key)
-        elif provider == LLMProvider.OPENROUTER:
-            try:
-                ChatOpenAI = import_module("langchain_openai").ChatOpenAI
-            except ImportError as error:
-                raise ImportError("Install langchain-openai to generate cluster descriptions with OpenRouter.") from error
-            llm = ChatOpenAI(model=model_name, temperature=0, api_key=api_key, base_url=LLM_PROVIDER_BASE_URL[provider])
-        else:
-            raise ValueError(f"Unsupported LLM provider: {provider}")
-
-        texts = np.asarray(texts, dtype=object)
-        rows = []
-        category_maps = []
-        for labels, clustering_name in zip(label_sets, clustering_names):
-            labels = np.asarray(labels)
-            category_map = {}
-            for cluster_label in sorted(np.unique(labels), key=lambda label: (-np.sum(labels == label), str(label))):
-                cluster_texts = [str(text) for text in texts[labels == cluster_label] if str(text).strip()]
-                sample = cluster_texts[:max_documents]
-                if not sample:
-                    category = f"Cluster {cluster_label}"
-                    description = "No text was available for this cluster."
-                else:
-                    prompt = (
-                        "Analyze the following documents from one cluster.\n"
-                        "Return exactly two lines:\n"
-                        "CATEGORY: a concise descriptive label of at most six words\n"
-                        "DESCRIPTION: one concise sentence describing the common themes\n\n"
-                        + "\n---\n".join(sample)
-                    )
-                    response = llm.invoke(prompt)
-                    response_text = getattr(response, "content", str(response)).strip()
-                    parsed = {}
-                    for line in response_text.splitlines():
-                        key, separator, value = line.partition(":")
-                        if separator:
-                            parsed[key.strip().upper()] = value.strip()
-                    category = parsed.get("CATEGORY", response_text.splitlines()[0]).strip()
-                    description = parsed.get("DESCRIPTION", response_text).strip()
-
-                category_map[cluster_label] = category
-                textrank_summary = CtxMORewardTrainer.summarize_cluster_with_textrank(cluster_texts)
-
-                row = {
-                    "clustering": clustering_name,
-                    "cluster": cluster_label,
-                    "category": category,
-                    "description": description,
-                    "summary_textrank": textrank_summary,
-                    "size": len(cluster_texts),
-                }
-                cm = (cluster_metrics or {}).get(clustering_name, {}).get(cluster_label, {})
-                for key, value in cm.items():
-                    if key == "representativeness" or re.fullmatch(
-                        r"coherence_\d+|gtgr_to_gtvs_agreement_\d+|lrgr_to_gtvs_agreement_\d+|lrgr_to_lrvs_agreement_\d+", key
-                    ):
-                        row[key] = value
-                rows.append(row)
-            category_maps.append(category_map)
-
-        descriptions = pd.DataFrame(rows)
-        os.makedirs(output_dir, exist_ok=True)
-        descriptions.to_csv(os.path.join(output_dir, "cluster_descriptions.csv"), index=False)
-        descriptions.to_json(os.path.join(output_dir, "cluster_descriptions.json"), orient="records", indent=2)
-        return descriptions, category_maps
-
-    @staticmethod
-    def summarize_cluster_with_textrank(cluster_texts, top_k: int = 5, emb_type: str = "all-MiniLM-L6-v2") -> str:
-        if not cluster_texts:
-            return "No text was available for this cluster."
-
-        sentences, _ = build_sentence_corpus(cluster_texts)
-        if not sentences:
-            return "No sentence was available for this cluster."
-
-        sentence_embeddings, _ = embed_sentences(sentences, emb_type=emb_type)
-        summary = summarize_textrank(sentences, sentence_embeddings, top_k=top_k)
-        return " ".join(sentence for sentence, _ in summary)
+   
     
     def evaluate_contexts(self, eval_dataset, test_dataset, train_dataset, validation_output: Dict = None, test_output: Dict =None, output_dir: str = "", reducer_kwargs: dict = {}, value_names=None, eval_response_lengths=None, test_response_lengths=None, do_llm_summarization: bool = True, llm_provider: str = LLMProvider.GROQ.value) -> None:
         
@@ -1737,7 +1495,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                             "metrics were computed for this cluster."
                         )
                         metrics.update(length_metrics[cluster_label])
-                    self.plot_cluster_metrics_bars(
+                    plot_cluster_metrics_bars(
                         cluster_metrics_by_clustering[clustering_name],
                         value_names if value_names is not None else [],
                         os.path.join(output_dir, f"{otype}_{clustering_name}_cluster_metrics_bars.png"),
@@ -1756,7 +1514,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 overall_metrics.update(_length_correlation_metrics(
                     groundings_per_sample, value_system_reward_per_sample, response_lengths))
                 cluster_metrics_by_clustering["overall"] = {"all": overall_metrics}
-                self.plot_cluster_metrics_bars(
+                plot_cluster_metrics_bars(
                     cluster_metrics_by_clustering["overall"],
                     value_names if value_names is not None else [],
                     os.path.join(output_dir, f"{otype}_overall_cluster_metrics_bars.png"),
@@ -1764,7 +1522,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     value_outcome_agreements=value_outcome_agreements,
                 )
 
-                self.save_cluster_metrics(
+                save_cluster_metrics(
                     cluster_metrics_by_clustering,
                     os.path.join(output_dir, f"{otype}_cluster_metrics"),
                 )
@@ -1772,7 +1530,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                 llm_categories_available = False
                 if do_llm_summarization and isinstance(original_context[0], str):
                     try:
-                        descriptions, category_maps = self.describe_clusters_with_llm(
+                        descriptions, category_maps = describe_clusters_with_llm(
                             original_context,
                             labels,
                             clustering_names_used,
@@ -1788,7 +1546,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                         for clustering_name in clustering_names_used:
                             subset = descriptions[descriptions["clustering"] == clustering_name]
                             description_text_maps[clustering_name] = dict(zip(subset["cluster"], subset["description"]))
-                self.plot_cluster_word_clouds(
+                plot_cluster_word_clouds(
                     texts=original_context,
                     labels=labels_1,
                     output_path=os.path.join(output_dir, f"{otype}_kmeans_word_clouds.png"),
@@ -1801,7 +1559,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     value_outcome_agreements=value_outcome_agreements,
                     use_llm_categories=llm_categories_available,
                 )
-                self.plot_cluster_word_clouds(
+                plot_cluster_word_clouds(
                     texts=original_context,
                     labels=labels_2,
                     output_path=os.path.join(output_dir, f"{otype}_value_system_word_clouds.png"),
@@ -1815,7 +1573,7 @@ class CtxMORewardTrainer(MORewardTrainer):
                     use_llm_categories=llm_categories_available,
                 )
                 if len(labels) == 3:
-                    self.plot_cluster_word_clouds(
+                    plot_cluster_word_clouds(
                         texts=original_context,
                         labels=labels_3,
                         output_path=os.path.join(output_dir, f"{otype}_context_word_clouds.png"),

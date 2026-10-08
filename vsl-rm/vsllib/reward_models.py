@@ -43,7 +43,7 @@ from vsllib.defines import CONTEXT_EMBEDDING_FEATURE_NAME, CONTEXT_FEATURE_NAME,
 from vsllib.model_utils import ACTIVATE_THRESHOLD_GMM, ACTIVATE_THRESHOLD_VS, THRESHOLD, CustomDecoder, CustomEncoder, CustomVAENoLoss, CustomVaDE, FastGaussianMixture, MORMForClassificationConfig, VaDEDecoder, accuracy_logits, apply_discordance_epsilon_to_logits, calculate_training_constants, compute_mutual_information, compute_mutual_information_from_alternative_distributions, construct_layers, get_missing_rating_mask, logits_BT, random_argmax, scores_to_target_probs
 from vsllib.model_utils import CustomVAE, CustomVAEConfig
 
-from vsllib.utils import entropy, kmeans_clustering, sample_example_profiles_scipy, sample_example_value_systems_exact, transform_weights_to_tuple
+from vsllib.utils import entropy, kmeans_clustering, orthogonality_loss, sample_example_profiles_scipy, sample_example_value_systems_exact, transform_weights_to_tuple
 
 logger = logging.get_logger(__name__)
 
@@ -1128,9 +1128,10 @@ class VaeAndKMeansCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         with th.no_grad():
             reconst = self.context_logits.decoder(self.context_logits.latent_centroids)["reconstruction"]
             centroid_distance = th.norm(self.context_logits.latent_centroids.unsqueeze(0) - self.context_logits.latent_centroids.unsqueeze(1), dim=2).mean().item()
-            orthogonality = th.norm(th.mm(self.context_logits.latent_centroids, self.context_logits.latent_centroids.T) - th.eye(self.num_contexts, device=self.context_logits.latent_centroids.device, dtype=self.context_logits.latent_centroids.dtype), dim=(0,1)).item()
+            orthonormality = orthogonality_loss(self.context_logits.latent_centroids, orthonormal_target=True).item()
+            orthogonality = orthogonality_loss(self.context_logits.latent_centroids).item()
             reconstructed_distance = th.norm(reconst.unsqueeze(0) - reconst.unsqueeze(1), dim=2).mean().item()
-        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss, "vae_centroid_norm": th.norm(self.context_logits.latent_centroids, dim=1).mean().item(), "vae_ctx_chr_loss": self._last_vae_ctx_chr_loss}
+        return {"vae_centroid_distance": centroid_distance, "vae_orthogonality": orthonormality, "vae_othogonality_real": orthogonality, "vae_reconstructed_distance": reconstructed_distance, "vae_cluster_loss": self._last_vae_cluster_loss, "vae_reconstruction_loss": self._last_vae_reconstruction_loss, "vae_kl_loss": self._last_vae_kl_loss, "vae_centroid_norm": th.norm(self.context_logits.latent_centroids, dim=1).mean().item(), "vae_ctx_chr_loss": self._last_vae_ctx_chr_loss}
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         if self.direct_context_to_vs_relation:
             ret = (self.vs_selection_to_logit_vsweights_matrix,)

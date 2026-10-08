@@ -76,6 +76,7 @@ packaging==26.0
 pandas==2.3.3
 pillow==12.2.0
 wordcloud==1.9.4
+stopwordsiso==0.7.1
 langchain-openai==0.3.35
 langchain-groq==0.3.8
 platformdirs==4.9.4

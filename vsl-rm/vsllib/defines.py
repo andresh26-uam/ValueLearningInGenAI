@@ -10,23 +10,31 @@ from torch import nn
 from datasets import Dataset
 
 """
-AVAILABLE METHODS FREE GROQ: openai/gpt-oss-20b
-canopylabs/orpheus-arabic-saudi
-whisper-large-v3-turbo
-groq/compound
-canopylabs/orpheus-v1-english
-whisper-large-v3
-openai/gpt-oss-safeguard-20b
-groq/compound-mini
-meta-llama/llama-prompt-guard-2-22m
-allam-2-7b
-meta-llama/llama-prompt-guard-2-86m
+AVAILABLE METHODS FREE GROQ:
 openai/gpt-oss-120b
 qwen/qwen3.8-27b
 qwen/qwen3.6-27b """
 
-LLM_MODEL_EVAL = "openai/gpt-oss-120b"
+LLM_MODEL_EVAL = "qwen/qwen3.8-27b"
 LLM_MODEL_EVAL_OPENROUTER = "google/gemma-4-26b-a4b-it:free"
+
+# Free OpenRouter text->text chat LLMs from well-known companies (Google, Nvidia), verified against
+# https://openrouter.ai/api/v1/models on 2026-10-08. OpenRouter does not publish latency via its API
+# (latency_last_30m is null), so the order is a proxy for expected latency: smallest active params first.
+# Filter further as needed; the primary model LLM_MODEL_EVAL_OPENROUTER is tried before this list.
+GROQ_FREE_FALLBACK_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.8-27b",
+    "qwen/qwen3.6-27b",
+]
+OPENROUTER_FREE_FALLBACK_MODELS = [
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-26b-a4b-it:free",        # 4B active
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3-super-120b-a12b:free",  # 12B active
+    "nvidia/nemotron-3-ultra-550b-a55b:free",  # 55B active; low uptime when checked
+]
 
 class LLMProvider(enum.Enum):
     GROQ = "GROQ"

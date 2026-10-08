@@ -10,16 +10,18 @@ import tempfile
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
-DATASET = "pku"
+DATASET = "oasst"
 BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 4 # 24 no.
+MAX_SIMULTANEOUS_RUNS = 16 # 24 no.
 MODEL_ALIAS = "smol"
-NUM_TRAIN_EPOCHS = [100]
+NUM_TRAIN_EPOCHS = [75]
 
 if DATASET == "pku":
     NUM_VALUES = 5 
 elif DATASET == "ultra":
     NUM_VALUES = 4
+elif DATASET == "oasst":
+    NUM_VALUES = 7
 else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
@@ -31,27 +33,25 @@ ARGS_TO_CHANGE = {
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [30.0, 50.0],
+    "ctx_coefficient": [1.0,50.0],
     "ctx_chr_coefficient": [0.0],
-    "layer_normalization": ["BatchNorm"],
+    "vae_orthogonality_coefficient": [0.0, 1.0],
+    "layer_normalization": ["BatchNorm", "none"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
     "do_initialization": [False, True],
     "vae_latent_dim": [16, 128],
 }
-
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
-DISCORDANCE_EPSILON = ["use_default",]
+DISCORDANCE_EPSILON = [0.1, 0.003]
 
 AVOID_COMBINATIONS = [
     {"loss_func_type": "DEFAULT", "vae_latent_dim": 2},
-    {"vae_latent_dim": 128, "ctx_coefficient": 50.0, "learning_rate": 0.0001, "do_initialization": True},
-    {"vae_latent_dim": 16, "ctx_coefficient": 50.0, "learning_rate": 0.0001, "do_initialization": True},
+    {"ctx_coefficient": 50.0, "do_initialization": False},
+
     {"final_layer_activation": "Tanh", "discordance_epsilon": "use_default"},
-    {"vs_weight_initialization": "equal", "do_initialization": True, "vae_latent_dim": 16, "ctx_coefficient": 1.0},
-    
 ]
 def _split_coupled_arguments(arguments):
     groups = {}

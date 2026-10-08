@@ -643,6 +643,10 @@ class ScriptArguments:
         default=10,
         metadata={"help": "The number of epochs to pretrain the VAE used for context selection. If 0, no pretraining will be done."},
     )
+    vae_orthogonality_coefficient: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "The coefficient for the orthogonality loss used inspired from other works in VAE."},
+    )
     vae_latent_dim: Optional[int] = field(
         default=10,
         metadata={"help": "The latent dimension of the VAE used for context selection. If 0, no VAE will be used."},
@@ -1665,3 +1669,9 @@ def analyze_clustering(features, labels, reference_labels: Optional[Dict[str, An
             key = f"{metric_name}_vs_{reference_name}" if metric.symmetric else f"{metric_name}_gt_{reference_name}"
             results[key] = float(metric.fn(reference, labels))
     return results
+
+def orthogonality_loss(vector: th.Tensor, orthonormal_target: Optional[bool] = False) -> th.Tensor:
+    if orthonormal_target:
+        return th.norm(vector @ vector.T - th.eye(vector.size(0), device=vector.device))
+    else:
+        return th.norm(vector @ vector.T - th.diag_embed((vector * vector).sum(dim=-1)))

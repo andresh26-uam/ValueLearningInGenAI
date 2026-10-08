@@ -165,6 +165,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             vae_type=script_args.vae_type,
             vae_dropout=script_args.vae_dropout,
             vae_layer_activation=script_args.vae_layer_activation,
+            vae_orthogonality_coefficient=script_args.vae_orthogonality_coefficient,
             vae_reconstruction_loss=script_args.vae_reconstruction_loss,
             vae_n_hidden_layers=script_args.vae_n_hidden_layers,
             vae_hidden_dim=script_args.vae_hidden_dim_size,
