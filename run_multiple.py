@@ -7,6 +7,7 @@ import math
 import secrets
 import subprocess
 import tempfile
+import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
@@ -15,6 +16,7 @@ BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
 MAX_SIMULTANEOUS_RUNS = 16 # 24 no.
 MODEL_ALIAS = "smol"
 NUM_TRAIN_EPOCHS = [75]
+LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
 if DATASET == "pku":
     NUM_VALUES = 5 
@@ -45,7 +47,7 @@ ARGS_TO_CHANGE = {
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
-DISCORDANCE_EPSILON = [0.1, 0.003]
+DISCORDANCE_EPSILON = [0.1,0.003]
 
 AVOID_COMBINATIONS = [
     {"loss_func_type": "DEFAULT", "vae_latent_dim": 2},
@@ -177,10 +179,18 @@ def main():
             return_codes = [process.wait() for process in processes]
             failures = [return_code for return_code in return_codes if return_code != 0]
             if failures:
-                raise subprocess.CalledProcessError(failures[0], "run_seeds.sh")
+                try:
+                    raise subprocess.CalledProcessError(failures[0], "run_seeds.sh")
+                except subprocess.CalledProcessError:
+                    with LAST_TRACEBACK_PATH.open("w", encoding="utf-8") as traceback_file:
+                        traceback.print_exc(file=traceback_file)
+                print(
+                    f"{len(failures)} run(s) failed; traceback written to "
+                    f"{LAST_TRACEBACK_PATH}",
+                    flush=True,
+                )
 
 
 
 if __name__ == "__main__":
     main()
-

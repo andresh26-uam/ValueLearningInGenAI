@@ -4,7 +4,7 @@
 GPUS="L40S:1"
 CPU=True
 
-CONFIG="run_configs/smol_ctx_linear_kmeans.json"
+CONFIG="run_configs/smol_ctx_linear_baseline.json"
 DATASET="oasst"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
@@ -145,9 +145,9 @@ elif [[ "$DATASET" == "synth" ]]; then
   training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=500
 elif [[ "$DATASET" == "oasst" ]]; then
-  DISCORDANCE_EPSILON=0.003
+  [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.003
   training_initialization_data_size=10000
-  NUM_TRAIN_EPOCHS=25
+  NUM_TRAIN_EPOCHS=75
 else
   echo "Unknown dataset: $DATASET"
   exit 1
@@ -205,6 +205,7 @@ fi
 if [[ -n "$RUN_NAME_FILE" ]]; then
   printf '%s\n' "$NAME" > "$RUN_NAME_FILE"
 fi
+
 echo "GPUs: $GPUS"
 echo "Training with config $CONFIG"
 echo "On dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON"
