@@ -27,7 +27,7 @@ import os
 import numpy as np
 import torch as th
 import torch.nn as nn
-from transformers import AutoConfig, AutoModelForSequenceClassification, PreTrainedModel, TrainingArguments
+from transformers import AutoConfig, AutoModelForSequenceClassification, PretrainedConfig, PreTrainedModel, TrainingArguments
 from transformers.utils import logging
 from transformers.cache_utils import Cache
 from datasets import Dataset
@@ -3087,10 +3087,45 @@ class MORMForClassification(PreTrainedModel):
         return self.base_forward(*args,**kwargs)
 
 
+class MetadataOnlyBaseModel(nn.Module):
+    """
+    Stand-in for the pretrained base model (`full_model`) of a MORMForSequenceClassification that works on
+    precalculated features (config.use_extracted_features). The base model is then never run, so only its
+    metadata (its HF config) is kept: no weights are held in memory nor saved in checkpoints.
+    """
+
+    def __init__(self, config: PretrainedConfig) -> None:
+        super().__init__()
+        self.config = config
+        # DistributedDataParallel (always used by accelerate on MULTI_CPU) fails if no parameter requires grad, and the base
+        # model weights were the only ones in that situation when it wraps the model. Keep a dummy one, not part of the state dict.
+        self.ddp_placeholder = nn.Parameter(th.zeros(1, device="cpu"))
+
+    def _save_to_state_dict(self, destination, prefix, keep_vars) -> None:
+        pass
+
+    def _load_from_state_dict(self, *args, **kwargs) -> None:
+        pass
+
+    def get_input_embeddings(self) -> None:
+        return None
+
+    def forward(self, *args, **kwargs):
+        raise RuntimeError(
+            f"The weights of the base model '{self.config._name_or_path}' are not kept because the model works on precalculated features "
+            "(use_extracted_features=True), so it cannot compute features from text. Precalculate them first "
+            "(no_context_vsl.py --do_train=False --use_extracted_features --recalculate_features --repostprocess).")
+
+    def extra_repr(self) -> str:
+        return f"{self.config._name_or_path!r}, metadata only"
+
+
 class MORMForSequenceClassification(MORMForClassification):
     config_class = MORMForClassificationConfig
     base_model_prefix = "full_model"
     supports_gradient_checkpointing = True
+    # Checkpoints saved with the full base model can be loaded when it is metadata only (see MetadataOnlyBaseModel): its weights are not needed.
+    _keys_to_ignore_on_load_unexpected = [r"^full_model\."]
     config : MORMForClassificationConfig
 
     classifier_ouput_class = SequenceClassifierOutputWithPastAndOthers 
@@ -3108,16 +3143,23 @@ class MORMForSequenceClassification(MORMForClassification):
     """def train_initialization(self, train_subdataset: Dataset):
         pass"""
 
-    def _build_base_model_from_config(self, config: MORMForClassificationConfig) -> AutoModelForSequenceClassification:
-        """
-        Build the base model from the config, ensuring that it is a AutoModelForSequenceClassification and extracting necessary information for reward head construction.
-        """
+    def _load_base_model_config(self, config: MORMForClassificationConfig) -> PretrainedConfig:
         model_name_or_path = getattr(config, "base_model_name_or_path", None)
         if not model_name_or_path:
             raise ValueError(
                 "Config is missing base_model_name_or_path. "
                 "Set this field when constructing MORMForSequenceClassificationConfig."
             )
+        return AutoConfig.from_pretrained(
+            model_name_or_path,
+            trust_remote_code=bool(getattr(config, "base_model_trust_remote_code", True)),
+        )
+
+    def _build_base_model_from_config(self, config: MORMForClassificationConfig) -> AutoModelForSequenceClassification:
+        """
+        Build the base model from the config, ensuring that it is a AutoModelForSequenceClassification and extracting necessary information for reward head construction.
+        """
+        base_cfg = self._load_base_model_config(config)
 
         torch_dtype = self._resolve_torch_dtype(
             getattr(config, "dtype", th.float32))
@@ -3129,10 +3171,6 @@ class MORMForSequenceClassification(MORMForClassification):
             torch_dtype = th.float32
         trust_remote_code = bool(
             getattr(config, "base_model_trust_remote_code", True))
-        base_cfg = AutoConfig.from_pretrained(
-            model_name_or_path,
-            trust_remote_code=trust_remote_code,
-        )
         model_kwargs: dict[str, Any] = {
             "config": base_cfg,
             "trust_remote_code": trust_remote_code,
@@ -3225,6 +3263,9 @@ class MORMForSequenceClassification(MORMForClassification):
                 
             elif input_emb is not None and hasattr(input_emb, "weight"):
                 input_size = int(input_emb.weight.shape[-1])
+            elif isinstance(config.input_size, int):
+                # No weights to look at (MetadataOnlyBaseModel): use the size that was saved in the config.
+                input_size = config.input_size
             else:
                 raise ValueError(
                             "Could not infer hidden size for reward heads. Expected one of: "
@@ -3246,15 +3287,23 @@ class MORMForSequenceClassification(MORMForClassification):
 
     def init_networks(self, config: MORMForClassificationConfig, *args, **kwargs) -> None:
         base_model = kwargs.get('base_model', None)
+        # With precalculated features the base model is never run (unless its own heads are used), so only its metadata is kept.
+        metadata_only = config.use_extracted_features and not self.use_base_model_heads
         if base_model is None:
-            base_model = self._build_base_model_from_config(config)
-            
+            if metadata_only:
+                base_model = MetadataOnlyBaseModel(self._load_base_model_config(config))
+            else:
+                base_model = self._build_base_model_from_config(config)
+
+        input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model, config)
+        if metadata_only and not isinstance(base_model, MetadataOnlyBaseModel):
+            base_model = MetadataOnlyBaseModel(base_model.config)
         print(f"Base model loaded: {base_model.__class__.__name__}")
         self.full_model = base_model
         self.supports_gradient_checkpointing = hasattr(
             self.full_model, "gradient_checkpointing_enable")
-        model_device = self._module_device(self.full_model)
-        input_size, input_size_vs = MORMForSequenceClassification.infer_model_inputs_sizes(base_model, config)
+        # The metadata-only base model has no weights to tell the device: follow the default one (meta while loading with from_pretrained).
+        model_device = th.get_default_device() if metadata_only else self._module_device(self.full_model)
         print("input size", input_size, "input size vs", input_size_vs)
         config.input_size_vs = input_size_vs
         config.input_size = input_size
@@ -3293,6 +3342,11 @@ class MORMForSequenceClassification(MORMForClassification):
     @property
     def is_gradient_checkpointing(self) -> bool:
         return bool(getattr(self.full_model, "is_gradient_checkpointing", False))
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None) -> None:
+        if isinstance(self.full_model, MetadataOnlyBaseModel):
+            return  # The base model is never run, so there is nothing to checkpoint.
+        super().gradient_checkpointing_enable(gradient_checkpointing_kwargs)
 
     
     def grounding_parameters(self, recurse: bool = True) -> Iterator[nn.Parameter]:

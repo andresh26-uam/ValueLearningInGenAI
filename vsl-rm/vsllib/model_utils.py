@@ -850,6 +850,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         base_model_trust_remote_code: bool = True,
         base_model_num_labels: int = 1,
         use_base_model_heads: bool = False,
+        use_extracted_features: bool = False,
         base_model_reward_heads_module_name: str = None,
         base_model_value_system_module_name: str = None,
         base_model_reward_head_indices: list = None,
@@ -964,6 +965,9 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.base_model_trust_remote_code = bool(base_model_trust_remote_code)
         self.base_model_num_labels = int(base_model_num_labels)
         self.use_base_model_heads = use_base_model_heads
+        # The model consumes precalculated features, so (unless use_base_model_heads) the base model
+        # is only kept as metadata: its weights are neither held in memory nor saved.
+        self.use_extracted_features = use_extracted_features
         self.base_model_reward_heads_module_name = base_model_reward_heads_module_name
         self.base_model_value_system_module_name = base_model_value_system_module_name
         # Store loss_func_type as string value for JSON serialization compatibility
@@ -1449,8 +1453,7 @@ class CustomVAE(VAE):
         #print("CONTEXT LOGPROBS OF MU", context_logprobs_of_mu[0:5])
         
         loss_clustering_unreduced = (th.sum(context_distance_of_mu*(context_probs_of_mu), dim=-1))
-        print(self.model_config.orthogonality_coefficient )
-        exit(0)
+        
         if self.model_config.orthogonality_coefficient != 0.0:
             loss_clustering_unreduced += self.model_config.orthogonality_coefficient * orthogonality_loss(self.latent_centroids)
         assert loss_clustering_unreduced.shape == (model_output["mu"].shape[0],)

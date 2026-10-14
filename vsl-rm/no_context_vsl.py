@@ -3,6 +3,7 @@
 # SBATCH --chdir=/home/aholg/ValueLearningInGenAI
 from copy import deepcopy
 from functools import partial
+import gc
 import os
 from pathlib import Path
 import sys
@@ -37,7 +38,7 @@ from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_toke
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
 from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
-from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, mo_compute_loss_func
+from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, MetadataOnlyBaseModel, mo_compute_loss_func
 from vsllib.model_utils import MORMForClassificationConfig
 from vsllib.defines import DEFAULT_EPSILON, HAS_UNDEFINED_LABELS, RESULTS_DIR, REWARD_HEADS_INDICES, REWARD_HEADS_OUTPUT, VALUE_SYSTEM_OUTPUT, EXTRA_KEYS, PROCESSED_DATASET_PATHS, ContextImplementations, get_test_indices, get_validation_indices
 from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
@@ -230,6 +231,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             base_model_value_system_module_name=value_system_module_name if script_args.use_frozen_base_model else None,
             base_model_reward_head_indices=reward_head_indices if script_args.use_frozen_base_model else None,
             use_base_model_heads=script_args.use_frozen_base_model,
+            use_extracted_features=script_args.use_extracted_features,
             gather_train_metrics=script_args.gather_train_metrics,
             lr_value_system=script_args.learning_rate,
             lr_grounding=script_args.grounding_learning_rate,
@@ -243,6 +245,10 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         elif script_args.task_type == "nlp_based":
             mo_model = MORMForSequenceClassification(
                 config=mo_config, base_model=model)
+            if isinstance(mo_model.full_model, MetadataOnlyBaseModel):
+                # The features are precalculated and mo_model only kept the metadata of the base model: release the pretrained weights.
+                del model_full, base_model, model, mod
+                gc.collect()
         else:
             raise ValueError(f"Unrecognized task type {script_args.task_type}")
         
