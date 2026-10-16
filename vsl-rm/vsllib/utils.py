@@ -1221,12 +1221,14 @@ def plot_groundings_violin(
         positions, data = [], []
         for v in range(num_values):
             column = groundings[cluster_ids == c, v]
-            column = column[~np.isnan(column)]
+            column = column[np.isfinite(column)]
             if len(column) > 0:
                 positions.append(v + 1)
                 data.append(column)
         if data:
-            ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
+            # KDE exponentials can legitimately underflow for widely separated values.
+            with np.errstate(under="ignore"):
+                ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
         if reference_line is not None:
             ax.axhline(reference_line, color="gray", linestyle="--", linewidth=1)
         ax.set_xticks(range(1, num_values + 1))
@@ -1417,12 +1419,20 @@ def plot_label_differences_violin(
     label2 = value_labels[:, 1, :]
 
     option1_is_preferred = score1 >= score2
-    diffs = np.where(option1_is_preferred[:, None], label1 - label2, label2 - label1)
-    invalid = (
-        (score1 == missing_value)[:, None] | (score2 == missing_value)[:, None]
-        | (label1 == missing_value) | (label2 == missing_value)
+    valid = (
+        np.isfinite(score1)[:, None]
+        & np.isfinite(score2)[:, None]
+        & np.isfinite(label1)
+        & np.isfinite(label2)
+        & (score1 != missing_value)[:, None]
+        & (score2 != missing_value)[:, None]
+        & (label1 != missing_value)
+        & (label2 != missing_value)
     )
-    diffs = np.where(invalid, np.nan, diffs)
+    ordered_first = np.where(option1_is_preferred[:, None], label1, label2)
+    ordered_second = np.where(option1_is_preferred[:, None], label2, label1)
+    diffs = np.full(label1.shape, np.nan, dtype=np.result_type(label1, label2, np.float64))
+    np.subtract(ordered_first, ordered_second, out=diffs, where=valid)
 
     cluster_ids = np.zeros(len(diffs), dtype=int) if cluster_labels is None else np.asarray(cluster_labels)
     unique_clusters = [c for c in sorted(np.unique(cluster_ids).tolist()) if np.sum(cluster_ids == c) > 0]
@@ -1435,12 +1445,13 @@ def plot_label_differences_violin(
         positions, data = [], []
         for v in range(num_values):
             column = diffs[cluster_ids == c, v]
-            column = column[~np.isnan(column)]
+            column = column[np.isfinite(column)]
             if len(column) > 0:
                 positions.append(v + 1)
                 data.append(column)
         if data:
-            ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
+            with np.errstate(under="ignore"):
+                ax.violinplot(data, positions=positions, showmeans=True, showmedians=True)
         ax.axhline(0.0, color="gray", linestyle="--", linewidth=1)
         ax.set_xticks(range(1, num_values + 1))
         ax.set_xticklabels(value_names, rotation=45, ha="right")

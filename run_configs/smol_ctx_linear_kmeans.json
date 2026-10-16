@@ -51,7 +51,7 @@
     "vs_layer_dropout": 0.0,
     "vs_layer_activation": "LeakyReLU",
 
-    "vae_latent_dim": 2,
+    "vae_latent_dim": 128,
     "vae_type": "ae", 
     "vae_dropout": 0.0,
     "vae_layer_activation": "LeakyReLU",
@@ -71,9 +71,9 @@
 
     "rew_center_coefficient": 0.001,
     
-    "learning_rate": 0.0001,
-    "grounding_learning_rate": 0.0001,
-    "context_learning_rate": 0.0001,
+    "learning_rate": 0.0003,
+    "grounding_learning_rate": 0.0003,
+    "context_learning_rate": 0.0003,
     "lagrange_learning_rate": 0.05,
     "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 10.0,

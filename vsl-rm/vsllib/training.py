@@ -1364,8 +1364,10 @@ class CtxMORewardTrainer(MORewardTrainer):
 
         kmeans = kmeans_clustering(train_set_contexts, K= self.model.config.max_contexts)
         # --- Dimensionality reduction ---
-
+        
         assert CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features.shape[0] == len(eval_dataset)*2, f"Validation dataset size {len(eval_dataset)} does not match validation output size {CtxData.from_dict(validation_output['ctx'], to_tensor=True).context_features.shape[0]}"
+        wtf=CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features
+        assert th.isfinite(wtf).sum()==0, f"Validation output context features contain Inf values: {wtf[~th.isfinite(wtf)]}, {~th.isfinite(wtf).sum()} non-finite values in total. Example: {wtf[~th.isfinite(wtf)][0]}, c probs: {CtxData.from_dict(validation_output['ctx'], to_tensor=True).context_logprobs[0]}"
         validation_data = self.remove_duplicates(CtxData.from_dict(validation_output["ctx"], to_tensor=True).context_features)
         test_data = self.remove_duplicates(CtxData.from_dict(test_output["ctx"], to_tensor=True).context_features)
     

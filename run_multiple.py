@@ -11,26 +11,29 @@ import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
-DATASET = "oasst"
+DATASET = "pku"
 BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 16 # 24 no.
+MAX_SIMULTANEOUS_RUNS = 8 # 24 no.
 MODEL_ALIAS = "smol"
-NUM_TRAIN_EPOCHS = [75]
+
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
 if DATASET == "pku":
     NUM_VALUES = 5 
+    NUM_TRAIN_EPOCHS = [100]
 elif DATASET == "ultra":
     NUM_VALUES = 4
+    NUM_TRAIN_EPOCHS = [10]
 elif DATASET == "oasst":
     NUM_VALUES = 7
+    NUM_TRAIN_EPOCHS = [75]
 else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001, 0.0003],
-    "C1_grounding_learning_rate": [0.0001, 0.0003],
-    "C1_context_learning_rate": [0.0001, 0.0003],
+    "C1_learning_rate": [0.0001],
+    "C1_grounding_learning_rate": [0.0001],
+    "C1_context_learning_rate": [0.0001],
     "weight_decay": [0.0,0.001],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
@@ -38,7 +41,7 @@ ARGS_TO_CHANGE = {
     "ctx_coefficient": [1.0,50.0],
     "ctx_chr_coefficient": [0.0],
     "vae_orthogonality_coefficient": [0.0, 1.0],
-    "layer_normalization": ["BatchNorm", "none"],
+    "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
     "do_initialization": [False, True],
@@ -47,7 +50,8 @@ ARGS_TO_CHANGE = {
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
-DISCORDANCE_EPSILON = [0.1,0.003]
+#DISCORDANCE_EPSILON = [0.1,0.003]
+DISCORDANCE_EPSILON = ["use_default"]
 
 AVOID_COMBINATIONS = [
     {"loss_func_type": "DEFAULT", "vae_latent_dim": 2},

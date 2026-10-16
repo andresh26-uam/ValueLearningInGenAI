@@ -5,7 +5,7 @@ GPUS="H100:2"
 CPU=True
 DO_TRAIN=True
 
-CONFIG="run_configs/llama_ctx_linear.json"
+CONFIG="run_configs/smol_ctx_linear_kmeans.json"
 DATASET="pku"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
@@ -146,7 +146,7 @@ elif [[ "$DATASET" == "synth" ]]; then
   training_initialization_data_size=1000
   NUM_TRAIN_EPOCHS=500
 elif [[ "$DATASET" == "oasst" ]]; then
-  [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.003
+  [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.1
   training_initialization_data_size=10000
   NUM_TRAIN_EPOCHS=75
 else
@@ -224,8 +224,8 @@ for seed in "${SEEDS[@]}"; do
         "--run_name=${GPUS}${NAME}"
         "--seed=$seed"
         "--run_name_file=$RUN_NAME_TEMP_FILE"
-        "--recalculate_features"
-        "--repostprocess"
+        #"--recalculate_features"
+        #"--repostprocess"
         "--do_train=$DO_TRAIN"
         "--num_train_epochs=$NUM_TRAIN_EPOCHS"
         "--discordance_epsilon=$DISCORDANCE_EPSILON"

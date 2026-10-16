@@ -46,6 +46,9 @@ from vsllib.utils import flatten_metrics_for_csv, write_metrics_csv
 load_dotenv()
 os.environ["WANDB_CONSOLE"] = "off"
 
+import numpy as np
+
+
 def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> None:
     
     with accelerate_state.main_process_first():
