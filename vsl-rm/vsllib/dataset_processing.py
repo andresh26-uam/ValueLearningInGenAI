@@ -420,8 +420,10 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
         model_reference = model_reference.cpu()
 
         sentence_transformer = None
-        if "sentence_transformer" in fe_kwargs.keys() and fe_kwargs.get("sentence_transformer") is not None:
-            sentence_transformer = fe_kwargs.pop("sentence_transformer").cpu()
+        if "sentence_transformer" in fe_kwargs.keys():
+            candidate_transformer = fe_kwargs.pop("sentence_transformer")
+            if candidate_transformer is not None:
+                sentence_transformer = candidate_transformer.cpu()
         
         
         assert self.data[0].get("input_ids_1", None) is not None, "Input IDs missing after tokenization step."
@@ -429,6 +431,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
         def _embed_shard(dataset_shard, local_model, device, sentence_transformer=None):
             local_model.eval()
             if sentence_transformer is not None: sentence_transformer.eval() 
+            
             with th.no_grad():
                 return dataset_shard.map(
                             lambda x: self.feature_extractor_method(x, local_model, use_context=use_context, device=device, sentence_transformer=sentence_transformer, **fe_kwargs),
@@ -452,7 +455,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
 
             with ThreadPoolExecutor(max_workers=n_gpus) as executor:
                 futures = [
-                            executor.submit(_embed_shard, shard, model_copies[i],th.device(f"cuda:{i}"), sentence_transformer=sentence_transformer_copies[i] if sentence_transformer is not None else None)
+                            executor.submit(_embed_shard, shard, model_copies[i], th.device(f"cuda:{i}"), sentence_transformer=sentence_transformer_copies[i] if sentence_transformer is not None else None)
                             for i, shard in enumerate(shards)
                         ]
                 mapped_shards = [f.result() for f in futures]
