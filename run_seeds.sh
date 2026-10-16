@@ -1,17 +1,18 @@
 #!/bin/bash
 
 
-GPUS="L40S:1"
+GPUS="L40S:2"
 CPU=True
+DO_TRAIN=True
 
-CONFIG="run_configs/smol_ctx_linear_baseline.json"
-DATASET="oasst"
+CONFIG="run_configs/llama_ctx_linear.json"
+DATASET="pku"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(42)
 RUN_INDEX=""
 RUN_NAME_FILE=""
-MODEL_ALIAS="smol"
+MODEL_ALIAS="llama"
 SKIP_COMPARE_CHECKPOINTS=False
 KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
 DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
@@ -223,9 +224,9 @@ for seed in "${SEEDS[@]}"; do
         "--run_name=${GPUS}${NAME}"
         "--seed=$seed"
         "--run_name_file=$RUN_NAME_TEMP_FILE"
-        #"--recalculate_features"
-        #"--repostprocess"
-        #"--do_train=False"
+        "--recalculate_features"
+        "--repostprocess"
+        "--do_train=$DO_TRAIN"
         "--num_train_epochs=$NUM_TRAIN_EPOCHS"
         "--discordance_epsilon=$DISCORDANCE_EPSILON"
         "--training_initialization_data_size=$training_initialization_data_size"
@@ -251,8 +252,11 @@ for seed in "${SEEDS[@]}"; do
         exit 1
     fi
 done
+if [[ "$DO_TRAIN" == "True" ]]; then
+    echo "Training completed. Checkpoint name: $CHECKPOINT_NAME"
+    echo "EXECUTING EVAL" 
 
-bash cpu_eval.sh \
+    bash cpu_eval.sh \
     --model "$MODEL_ALIAS" \
     --dataset "$DATASET" \
     "--checkpoint_path=${CHECKPOINT_NAME}" \
@@ -261,3 +265,8 @@ bash cpu_eval.sh \
     --tsne_seed=0 \
     "--skip_compare_checkpoints=${SKIP_COMPARE_CHECKPOINTS}" \
     --compare_checkpoint_paths "${KNLPMEANS_BASELINE}" "${DIRECT_VS_BASELINE}"
+
+
+else
+    echo "Training was skipped. Using checkpoint name: $CHECKPOINT_NAME"
+fi
