@@ -6,7 +6,7 @@ CPU=True
 DO_TRAIN=True
 
 CONFIG="run_configs/smol_ctx_linear_kmeans.json"
-DATASET="pku"
+DATASET="oasst"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(42)
