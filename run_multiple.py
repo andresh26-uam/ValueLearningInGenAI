@@ -13,7 +13,7 @@ from pathlib import Path
 # PKU TRAIN EPOCHS = 100
 DATASET = "oasst"
 BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 1 # 24 no.
+MAX_SIMULTANEOUS_RUNS = 13 # 24 no.
 MODEL_ALIAS = "smol"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
