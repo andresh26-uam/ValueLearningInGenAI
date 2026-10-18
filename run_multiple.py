@@ -12,8 +12,8 @@ from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
 DATASET = "oasst"
-BASE_CONFIG = "run_configs/smol_ctx_linear_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 13 # 24 no.
+BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
+MAX_SIMULTANEOUS_RUNS = 1 # 24 no.
 MODEL_ALIAS = "smol"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
@@ -46,7 +46,8 @@ ARGS_TO_CHANGE = {
     "vs_weight_initialization": ["equal"],
     "do_initialization": [False, True],
     "vae_latent_dim": [16, 128],
-    "max_contexts": [3, 10, 20]
+    "C2_max_contexts": [3, 10, 20],
+    "C2_max_value_systems": [3, 10, 20]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.

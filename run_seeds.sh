@@ -5,7 +5,7 @@ GPUS="H100:2"
 CPU=True
 DO_TRAIN=True
 
-CONFIG="run_configs/smol_ctx_linear_kmeans.json"
+CONFIG="run_configs/smol_ctx_linear_ae_kmeans.json"
 DATASET="oasst"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
