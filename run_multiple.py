@@ -12,8 +12,8 @@ from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
 DATASET = "oasst"
-BASE_CONFIG = "run_configs/smol_ctx_linear_baseline_directvs.json"
-MAX_SIMULTANEOUS_RUNS = 8 # 24 no.
+BASE_CONFIG = "run_configs/smol_ctx_linear_kmeans.json"
+MAX_SIMULTANEOUS_RUNS = 13 # 24 no.
 MODEL_ALIAS = "smol"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
@@ -38,24 +38,26 @@ ARGS_TO_CHANGE = {
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [0.0],
+    "ctx_coefficient": [1.0, 10.0],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [0.0],
+    "vae_orthogonality_coefficient": [0.0,  1.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "do_initialization": [False],
-    "vae_latent_dim": [16],
+    "do_initialization": [False, True],
+    "vae_latent_dim": [16, 128],
+    "max_contexts": [3, 10, 20]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
-DISCORDANCE_EPSILON = [0.1,0.003]
+DISCORDANCE_EPSILON = [0.1]
+N_SEEDS_PER_RUN = 2
 
 AVOID_COMBINATIONS = [
-    {"loss_func_type": "DEFAULT", "vae_latent_dim": 2},
     {"ctx_coefficient": 50.0, "do_initialization": False},
+    {"ctx_coefficient": 1.0, "vae_orthogonality_coefficient": 1.0, "max_contexts": 10},
 
     {"final_layer_activation": "Tanh", "discordance_epsilon": "use_default"},
 ]
@@ -131,7 +133,7 @@ def main():
                     if _is_avoided(run_config):
                         continue
                     run_number = len(commands) + 1
-                    seeds = [secrets.randbelow(2000)]
+                    seeds = [secrets.randbelow(2000) for s in range(N_SEEDS_PER_RUN)]
                     command = [
                         "bash",
                         "run_seeds.sh",
@@ -153,18 +155,20 @@ def main():
                         command.extend(["--discordance_epsilon", str(epsilon)])
                     commands.append((index, epsilon, num_train_epochs, command))
 
-        total_runs = len(commands)
-        cycles = math.ceil(total_runs / MAX_SIMULTANEOUS_RUNS)
+        total_configurations = len(commands)
+        total_runs = total_configurations * N_SEEDS_PER_RUN
+        cycles = math.ceil(total_configurations / MAX_SIMULTANEOUS_RUNS)
         print(
-            f"This sweep will execute {total_runs} runs in {cycles} cycles "
-            f"of up to {MAX_SIMULTANEOUS_RUNS} simultaneous runs."
+            f"This sweep will execute {total_runs} runs "
+            f"({total_configurations} configurations x {N_SEEDS_PER_RUN} seeds) "
+            f"in {cycles} cycles of up to {MAX_SIMULTANEOUS_RUNS} simultaneous runs."
         )
         approval = input("Proceed with the sweep? [y/N]: ").strip().lower()
         if approval not in {"y", "yes"}:
             print("Sweep cancelled.")
             return
 
-        for cycle_start in range(0, total_runs, MAX_SIMULTANEOUS_RUNS):
+        for cycle_start in range(0, total_configurations, MAX_SIMULTANEOUS_RUNS):
             cycle = commands[cycle_start : cycle_start + MAX_SIMULTANEOUS_RUNS]
             print(
                 f"Starting cycle {cycle_start // MAX_SIMULTANEOUS_RUNS + 1}/{cycles} "

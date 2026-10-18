@@ -59,12 +59,12 @@ from vsllib.model_utils import (
 )
 from vsllib.utils import  ScriptArguments, analyze_clustering, argument_parser, compare_clusterings, kmeans_clustering, compute_lrgr_to_gtvs_agreement, compute_lrgr_to_gtvs_agreement_per_cluster, compute_lrgr_to_lrvs_agreement, compute_lrgr_to_lrvs_agreement_per_cluster, compute_response_token_lengths, compute_value_outcome_agreement, compute_value_outcome_agreement_per_cluster, flatten_metrics_for_csv, obtain_tokenizer, plot_grounding_differences_violin, plot_grounding_differences_violin_by_overall_score, plot_groundings_violin, plot_label_differences_violin, seed_everything, write_metrics_csv
 
-np.seterr(
+""" TODO: np.seterr(
     divide="raise",
     over="raise",
     invalid="raise",
     under="raise",
-)
+)"""
 
 @dataclass
 class EvalArguments(ScriptArguments):

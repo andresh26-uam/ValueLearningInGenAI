@@ -14,8 +14,6 @@ RUN_INDEX=""
 RUN_NAME_FILE=""
 MODEL_ALIAS="smol"
 SKIP_COMPARE_CHECKPOINTS=False
-KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
-DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
 #KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
 #DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"
 
@@ -131,7 +129,8 @@ if [[ "$DATASET" == "ultra" ]]; then
     fi
 elif [[ "$DATASET" == "pku" ]]; then
   [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.5
-
+  KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
+  DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
   training_initialization_data_size=10000
   NUM_TRAIN_EPOCHS=100
   if [[ "$CONFIG" == *"llama_linear_firstgr_thenvs.json"* ]]; then
@@ -148,6 +147,8 @@ elif [[ "$DATASET" == "synth" ]]; then
 elif [[ "$DATASET" == "oasst" ]]; then
   [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.1
   training_initialization_data_size=10000
+  KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_False_INITVSGR_True_VS_0.0_CTX_0.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_RUN_5_1017_162413_epo75_s1730"
+  DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_False_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_RUN_1_1016_162211_epo75_s102"
   NUM_TRAIN_EPOCHS=75
 else
   echo "Unknown dataset: $DATASET"
