@@ -432,9 +432,13 @@ def extract_and_save_value_system_weights( model: MORMForClassification, results
 
 def load_model(script_args: EvalArguments) -> MORMForClassification:
     model_class = MORMForSequenceClassification if script_args.task_type == "nlp_based" else MORMForClassification
+    device = torch.device(
+        "cpu" if script_args.use_cpu else
+        ("cuda" if torch.cuda.is_available() else "cpu")
+    )
     return model_class.from_pretrained(
         str(script_args.checkpoint_path),
-    ).to(device="cpu" if script_args.use_cpu else "cuda:0")
+    ).to(device=device)
 
 
 def build_dataset(script_args: EvalArguments, model: MORMForClassification, tokenizer) -> tuple[FeatureBasedPreferenceDataset | PairwisePreferenceDataset, MORewardDataCollator, Optional[torch.nn.Module]]:

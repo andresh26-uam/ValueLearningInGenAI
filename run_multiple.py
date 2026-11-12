@@ -11,10 +11,10 @@ import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
-DATASET = "oasst"
-BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
+DATASET = "pku"
+BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
 MAX_SIMULTANEOUS_RUNS = 13 # 24 no.
-MODEL_ALIAS = "smol"
+MODEL_ALIAS = "llama"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
@@ -31,29 +31,29 @@ else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001, 0.0003],
-    "C1_grounding_learning_rate": [0.0001, 0.0003],
-    "C1_context_learning_rate": [0.0001, 0.0003],
-    "weight_decay": [0.0, 0.001],
+    "C1_learning_rate": [0.0001],
+    "C1_grounding_learning_rate": [0.0001],
+    "C1_context_learning_rate": [0.0001],
+    "weight_decay": [0.0],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [1.0, 10.0],
+    "ctx_coefficient": [50.0],
     "ctx_chr_coefficient": [0.0],
     "vae_orthogonality_coefficient": [0.0,  1.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
     "do_initialization": [False, True],
-    "vae_latent_dim": [16, 128],
-    "C2_max_contexts": [3, 10, 20],
-    "C2_max_value_systems": [3, 10, 20]
+    "vae_latent_dim": [128],
+    "C2_max_contexts": [10],
+    "C2_max_value_systems": [10]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
-DISCORDANCE_EPSILON = [0.1]
+DISCORDANCE_EPSILON = ["use_default"]
 N_SEEDS_PER_RUN = 2
 
 AVOID_COMBINATIONS = [

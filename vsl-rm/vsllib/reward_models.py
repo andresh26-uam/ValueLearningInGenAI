@@ -587,7 +587,7 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
                     weights = th.ones((num_value_systems, num_values), device=device, dtype=dtype)/num_values
                 elif self.weight_initialization == "span":
                     weights = sample_example_profiles_scipy(profile_variety=num_value_systems, n_values=num_values)
-                    weights = th.tensor(np.asarray(weights), dtype=th.float32)
+                    weights = th.tensor(np.asarray(weights), dtype=th.float32, device=device)
                 #weights = sample_example_profiles_scipy(profile_variety=num_value_systems, n_values=num_values)
                 #weights = th.tensor(np.asarray(weights), dtype=th.float32)
                 
@@ -660,7 +660,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
                 weights = th.ones((num_value_systems, num_values), device=device, dtype=dtype)/num_values
             elif self.weight_initialization == "span":
                 weights = sample_example_profiles_scipy(profile_variety=num_value_systems, n_values=num_values)
-                weights = th.tensor(np.asarray(weights), dtype=th.float32)
+                weights = th.tensor(np.asarray(weights), dtype=th.float32, device=device)
             #weights = sample_example_profiles_scipy(profile_variety=num_value_systems, n_values=num_values)
             #weights = th.tensor(np.asarray(weights), dtype=th.float32)
             
@@ -781,7 +781,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
                     with th.no_grad():
                         assert vs_predicted.shape == (hidden_state.shape[0],self.num_values)
                         
-                        th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones((vs_predicted.shape[0],)))
+                        th.testing.assert_close(th.sum(vs_predicted, dim=1), th.ones((vs_predicted.shape[0],), device=vs_predicted.device, dtype=vs_predicted.dtype))
                 enriched_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted, ctx_predicted = context_data.ctx_assignments)
                 #print("H2????", enriched_data.vs_predicted.shape, enriched_data.context_features.shape)
                 return vs_predicted, enriched_data
@@ -2070,14 +2070,14 @@ class MORMForClassification(PreTrainedModel):
         #random_assignment = np.random.choice(self.value_system_layer.num_contexts, size=len(dataset_ctxs))
         #print(random_assignment[0:10], random_assignment.shape)
         #pred_one_hot = th.eye(self.value_system_layer.num_contexts, requires_grad=False)[pred]
-        dataset_ctxs_th = th.tensor(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
-        eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
+        dataset_ctxs_th = th.tensor(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False, device=self.device)
+        eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False, device=self.device)
         eval_pred = kmeans.predict(eval_dataset_ctxs)
         
         self.value_system_layer : BasicCtxDependentAlignmentLayer
 
         try:
-            eval_ground_truth = th.tensor(eval_set.select_columns(["context"])["context"], requires_grad=False)
+            eval_ground_truth = th.tensor(eval_set.select_columns(["context"])["context"], requires_grad=False, device=self.device)
             if isinstance(eval_ground_truth[0], str):
                 eval_ground_truth = None
         except Exception as e:
@@ -2090,18 +2090,18 @@ class MORMForClassification(PreTrainedModel):
         # "Pretrain" the network to assign to each cluster the best value system. (given current initialization)
         elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.VADE ]:
             assert isinstance(self.value_system_layer, VaeAndKMeansCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of VaeAndKMeansCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
-            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args, eval_data=eval_dataset_ctxs_th, eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth, original_texts=dataset_original_texts)
+            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32, device=self.device), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long, device=self.device), config=self.config, args=args, eval_data=eval_dataset_ctxs_th, eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth, original_texts=dataset_original_texts)
             if self.config.do_vs_initialization:
                 self.pre_train_grounding_and_vs_selection_matrix(kmeans, train_subdataset, pred, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         elif ContextImplementations(self.config.context_implementation) in [ContextImplementations.GMM, ContextImplementations.GMM_AND_CLASSIFIER ]:
             assert isinstance(self.value_system_layer, BasicGmmCtxDependentAlignmentLayer), f"Expected value_system_layer to be an instance of BasicGmmCtxDependentAlignmentLayer, but got {type(self.value_system_layer)}"
-            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long), config=self.config, args=args, eval_data=eval_dataset_ctxs_th,  eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth, original_texts=dataset_original_texts)
+            self.value_system_layer.initialize(th.tensor(centroids, dtype=th.float32, device=self.device), dataset_ctxs_th, th.tensor(pred, requires_grad=False, dtype=th.long, device=self.device), config=self.config, args=args, eval_data=eval_dataset_ctxs_th,  eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth, original_texts=dataset_original_texts)
             if self.config.do_vs_initialization:
                 self.pre_train_grounding_and_vs_selection_matrix(kmeans, train_subdataset, pred, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
         else:    
             # TODO: Missing mask needed.
-            self.value_system_layer.initialize(centroids=th.tensor(centroids, dtype=th.float32), 
-                                               data=dataset_ctxs_th, assignments=th.tensor(pred, requires_grad=False, dtype=th.long), 
+            self.value_system_layer.initialize(centroids=th.tensor(centroids, dtype=th.float32, device=self.device), 
+                                               data=dataset_ctxs_th, assignments=th.tensor(pred, requires_grad=False, dtype=th.long, device=self.device), 
                                                original_texts=dataset_original_texts,
                                                config=self.config, args=args, eval_data=eval_dataset_ctxs_th, eval_assignments=eval_pred, eval_ground_truth=eval_ground_truth, kmeans_object=kmeans)
             #self.train_context_log_probs_so_that_each_cluster_aligns_with_a_value_system(kmeans, train_subdataset, pred, dataset_ctxs_th, args=args, eval_set=eval_set, total_dataset_size=total_dataset_size)
@@ -2126,10 +2126,10 @@ class MORMForClassification(PreTrainedModel):
 
     def train_context_log_probs_so_that_each_cluster_aligns_with_a_value_system(self, kmeans: KMeans, train_subdataset: Dataset, pred: np.ndarray, dataset_ctxs_th: th.Tensor, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
         with th.no_grad():
-                dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
-                dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
-                dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., -1]
-                dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., 0:-1]
+                dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"], device=self.device)
+                dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"], device=self.device)
+                dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., -1]
+                dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., 0:-1]
                 
                 dataset_gr_scores = scores_to_target_probs(dataset_gr_scores[:,0, :], dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
                 
@@ -2232,10 +2232,10 @@ class MORMForClassification(PreTrainedModel):
 
     def pre_train_basic(self, train_subdataset, dataset_ctxs_th, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
         with th.no_grad():
-            dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
-            dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
-            dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., -1]
-            dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., 0:-1]
+            dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"], device=self.device)
+            dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"], device=self.device)
+            dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., -1]
+            dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., 0:-1]
             
             dataset_gr_scores = scores_to_target_probs(dataset_gr_scores[:,0, :], dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
             
@@ -2248,12 +2248,12 @@ class MORMForClassification(PreTrainedModel):
             
 
             if eval_set is not None:
-                eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
+                eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False, device=self.device)
                         
-                eval_dataset_grounding_features1 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
-                eval_dataset_grounding_features2 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
-                eval_dataset_score = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., -1]
-                eval_dataset_gr_scores = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., 0:-1]
+                eval_dataset_grounding_features1 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"], device=self.device)
+                eval_dataset_grounding_features2 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"], device=self.device)
+                eval_dataset_score = th.tensor(eval_set.select_columns(["labels"])["labels"], device=self.device)[..., -1]
+                eval_dataset_gr_scores = th.tensor(eval_set.select_columns(["labels"])["labels"], device=self.device)[..., 0:-1]
                 
                 eval_dataset_gr_scores = scores_to_target_probs(eval_dataset_gr_scores[:,0, :], eval_dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
                 
@@ -2295,10 +2295,10 @@ class MORMForClassification(PreTrainedModel):
                         
     def pre_train_grounding_and_vs_selection_matrix(self, kmeans: KMeans, train_subdataset: Dataset, pred: np.ndarray, dataset_ctxs_th: th.Tensor, args: TrainingArguments, eval_set: Dataset = None, total_dataset_size: int = None):
             with th.no_grad():
-                    dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
-                    dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
-                    dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., -1]
-                    dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"])[..., 0:-1]
+                    dataset_grounding_features1 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"], device=self.device)
+                    dataset_grounding_features2 = th.tensor(train_subdataset.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"], device=self.device)
+                    dataset_score = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., -1]
+                    dataset_gr_scores = th.tensor(train_subdataset.select_columns(["labels"])["labels"], device=self.device)[..., 0:-1]
                     
                     dataset_gr_scores = scores_to_target_probs(dataset_gr_scores[:,0, :], dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
                     
@@ -2311,12 +2311,12 @@ class MORMForClassification(PreTrainedModel):
                     
 
                     if eval_set is not None:
-                        eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False)
+                        eval_dataset_ctxs_th = th.tensor(eval_set.select_columns([self.vs_features_name])[self.vs_features_name], requires_grad=False, device=self.device)
                                 
-                        eval_dataset_grounding_features1 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"])
-                        eval_dataset_grounding_features2 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"])
-                        eval_dataset_score = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., -1]
-                        eval_dataset_gr_scores = th.tensor(eval_set.select_columns(["labels"])["labels"])[..., 0:-1]
+                        eval_dataset_grounding_features1 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_1"])[self.grounding_features_name + "_1"], device=self.device)
+                        eval_dataset_grounding_features2 = th.tensor(eval_set.select_columns([self.grounding_features_name + "_2"])[self.grounding_features_name + "_2"], device=self.device)
+                        eval_dataset_score = th.tensor(eval_set.select_columns(["labels"])["labels"], device=self.device)[..., -1]
+                        eval_dataset_gr_scores = th.tensor(eval_set.select_columns(["labels"])["labels"], device=self.device)[..., 0:-1]
                         
                         eval_dataset_gr_scores = scores_to_target_probs(eval_dataset_gr_scores[:,0, :], eval_dataset_gr_scores[:,1, :], assume_qualitative_labels=self.config.assume_qualitative_labels, check_undefined_label=self.config.check_undefined_label, missing_mask=None, assume_torch=True)
                         
@@ -3204,7 +3204,7 @@ class MORMForSequenceClassification(MORMForClassification):
         if len(indices) == 0:
             raise ValueError(
                 "base_model_reward_head_indices cannot be an empty list when using base model outputs.")
-        idx = th.tensor(indices, device=rewards.device, dtype=th.long)
+        idx = th.tensor(indices, dtype=th.long, device=rewards.device)
         if rewards.ndim == 1:
             return rewards[idx]
         return th.index_select(rewards, dim=-1, index=idx)

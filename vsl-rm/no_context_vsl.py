@@ -449,7 +449,10 @@ if __name__ == "__main__":
                     mo_model = MORMForClassification.from_pretrained(save_location)
                 print("TRAINED MODEL", mo_model)
                 print(mo_model.training_variables.lagrange_multipliers)
-                trainer.model = mo_model
+                # from_pretrained loads checkpoint parameters on CPU.  Evaluation
+                # inputs are prepared on the trainer device, so move the
+                # replacement model before assigning it to the trainer.
+                trainer.model = mo_model.to(device=trainer.args.device)
                 
                 print(trainer.evaluate(eval_dataset=dataset.test_dataset, metric_key_prefix="test"))
 

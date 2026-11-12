@@ -1,19 +1,19 @@
 #!/bin/bash
 
 
-GPUS="H100:2"
-CPU=True
+GPUS="H100:1"
+CPU=False
 DO_TRAIN=True
 
-CONFIG="run_configs/smol_ctx_linear_ae_kmeans.json"
-DATASET="oasst"
+CONFIG="run_configs/llama_ctx_linear_ae_kmeans.json"
+DATASET="pku"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
-SEEDS=(42)
+SEEDS=(44)
 RUN_INDEX=""
 RUN_NAME_FILE=""
-MODEL_ALIAS="smol"
-SKIP_COMPARE_CHECKPOINTS=False
+MODEL_ALIAS="llama"
+SKIP_COMPARE_CHECKPOINTS=True
 #KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
 #DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"
 
@@ -159,6 +159,8 @@ if [[ -n "$NUM_TRAIN_EPOCHS_OVERRIDE" ]]; then
   NUM_TRAIN_EPOCHS="$NUM_TRAIN_EPOCHS_OVERRIDE"
 fi
 
+NUM_TRAIN_EPOCHS=1
+
 if [[ "$CTX_IMPLEMENTATION" == "KMEANS_THEN_VS" ]]; then
         training_initialization_data_size="all"
 else
@@ -214,6 +216,7 @@ echo "On dataset: $DATASET with discordance_epsilon: $DISCORDANCE_EPSILON"
 echo "and num_train_epochs: $NUM_TRAIN_EPOCHS"
 echo "Run name: ${GPUS}${NAME}"
 
+CHECKPOINT_NAME=wait
 for seed in "${SEEDS[@]}"; do
     # Create a unique temp file for this run to write its wandb run name
     RUN_NAME_TEMP_FILE=$(mktemp)
@@ -254,10 +257,17 @@ for seed in "${SEEDS[@]}"; do
     fi
 done
 if [[ "$DO_TRAIN" == "True" ]]; then
+    if [[ -z "$CHECKPOINT_NAME" || "$CHECKPOINT_NAME" == "wait" ]]; then
+        echo "Error: Checkpoint name was not set by training script. Ommiting eval" >&2
+        exit 1
+    fi
     echo "Training completed. Checkpoint name: $CHECKPOINT_NAME"
+    
     echo "EXECUTING EVAL" 
 
-    bash cpu_eval.sh \
+    bash run_eval.sh \
+    --use_cpu="$CPU" \
+    --gpus="$GPUS" \
     --model "$MODEL_ALIAS" \
     --dataset "$DATASET" \
     "--checkpoint_path=${CHECKPOINT_NAME}" \

@@ -1,5 +1,6 @@
 from collections.abc import Iterator
 import math
+import os
 
 from pythae.data import BaseDataset
 from pythae.models.nn import BaseDecoder, BaseEncoder
@@ -1179,7 +1180,7 @@ class CustomVAE(VAE):
             if original_space_centroids is not None:
                 # Project original space centroids to latent space
                 original_space_centroids = original_space_centroids.to(sample_data.device, sample_data.dtype)
-                latent_original_centroids = self.encoder(original_space_centroids).embedding
+                latent_original_centroids = self.encoder(original_space_centroids).embedding.cpu()
                 
             std_m=None
             if self.model_config.type == "vae":
@@ -1213,7 +1214,7 @@ class CustomVAE(VAE):
                 sample_labels = closest_centroids 
             if original_space_centroids is not None:
                 # Project original space centroids to latent space and then to UMAP space
-                latent_original_centroids = self.encoder(original_space_centroids).embedding
+                latent_original_centroids = self.encoder(original_space_centroids).embedding.cpu()
                 if self.latent_dim > 2:
                     umap_original_centroids = umap.transform(latent_original_centroids)
                 else:
@@ -1227,8 +1228,10 @@ class CustomVAE(VAE):
                     sample_labels_expanded[i*sampling_reps:(i+1)*sampling_reps] = sample_labels[i]
                     
                 sample_labels = sample_labels_expanded
+            if isinstance(sample_labels, th.Tensor):
+                sample_labels = sample_labels.detach().cpu().numpy()
+            sample_labels_array = np.asarray(sample_labels)
             if sample_label_names:
-                sample_labels_array = np.asarray(sample_labels)
                 for label in np.unique(sample_labels_array):
                     mask = sample_labels_array == label
                     plt.scatter(
@@ -1239,7 +1242,7 @@ class CustomVAE(VAE):
                         label=sample_label_names.get(label, f"Cluster {label}"),
                     )
             else:
-                plt.scatter(z_umap[:, 0], z_umap[:, 1], c=sample_labels, cmap='viridis', s=5, alpha=0.8)
+                plt.scatter(z_umap[:, 0], z_umap[:, 1], c=sample_labels_array, cmap='viridis', s=5, alpha=0.8)
             # plot centroids the same color as the closest points in the latent space:
             plt.scatter(z_umap_centroids[:, 0], z_umap_centroids[:, 1], c='red', marker='X', s=100, label='Centroids')
             if original_space_centroids is not None:
@@ -1517,6 +1520,7 @@ class CustomVAE(VAE):
             if r % max(1, self.model_config.pretrain_epochs // 10) == 0:
                 self.eval()
                 output = self.forward(eval_data)
+                os.makedirs("pretrain_plots", exist_ok=True)
                 self.plot_embedding_space(eval_data, save_path=f"pretrain_plots/vae_{self.__class__.__name__}_{self.model_config.type}_before_epoch_{r}", output=output)
                 # Compute the eval centroids as the mean of the hidden states for each context assignment
                 

@@ -4,6 +4,7 @@ set -euo pipefail
 # DEFAULTS
 MODEL_ALIAS="smol"
 DATASET_ALIAS="pku"
+GPUS="L40S:1"
 #TASK_TYPE="nlp_based"
 TASK_TYPE="feature_based" # This one for apollo
 
@@ -13,7 +14,8 @@ SKIP_COMPARE_CHECKPOINTS=False
 KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
 DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"
 
-EXTRA_ARGS=("--use_cpu")
+USE_CPU="False"
+EXTRA_ARGS=()
 
 resolve_model_name() {
     case "$1" in
@@ -46,6 +48,20 @@ while [[ $# -gt 0 ]]; do
             ;;
         --dataset)
             DATASET_ALIAS="$2"
+            shift
+            ;;
+        --gpus=*)
+            GPUS="${1#*=}"
+            ;;
+        --gpus)
+            GPUS="$2"
+            shift
+            ;;
+        --use_cpu=*)
+            USE_CPU="${1#*=}"
+            ;;
+        --use_cpu)
+            USE_CPU="$2"
             shift
             ;;
         --help|-h)
@@ -89,9 +105,22 @@ fi
 MODEL_NAME="$(resolve_model_name "$MODEL_ALIAS")"
 
 echo "Evaluating model: $MODEL_NAME on dataset: $DATASET_ALIAS"
+echo "Using GPUs: $GPUS"
+echo "Using CPU: $USE_CPU"
 echo "with extra args: ${EXTRA_ARGS[*]}"
 
-bash sbatch_script.sh  vsl-rm/eval_no_context.py \
+if [[ "$USE_CPU" == "True" ]]; then
+    echo "Running on CPU"
+    bash sbatch_script.sh  vsl-rm/eval_no_context.py \
     --model_name="$MODEL_NAME" \
-    --dataset="$DATASET_ALIAS" --use_cpu "${EXTRA_ARGS[@]}" \
+    --dataset="$DATASET_ALIAS" \
+    "${EXTRA_ARGS[@]}" \
     --debug 
+else
+    echo "Running on GPU"
+    srun --pty --gpus="$GPUS" sbatch_script.sh  vsl-rm/eval_no_context.py \
+    --model_name="$MODEL_NAME" \
+    --dataset="$DATASET_ALIAS" \
+    "${EXTRA_ARGS[@]}" \
+    --debug 
+fi
