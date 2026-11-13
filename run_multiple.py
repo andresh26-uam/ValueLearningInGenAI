@@ -11,9 +11,11 @@ import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
+# SET GPU OR CPU IN RUN_SEEDS.SH!!!!
+
 DATASET = "pku"
-BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 13 # 24 no.
+BASE_CONFIG = "run_configs/llama_ctx_linear_baseline.json"
+MAX_SIMULTANEOUS_RUNS = 4 # 18 no.
 MODEL_ALIAS = "llama"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
@@ -34,17 +36,17 @@ ARGS_TO_CHANGE = {
     "C1_learning_rate": [0.0001],
     "C1_grounding_learning_rate": [0.0001],
     "C1_context_learning_rate": [0.0001],
-    "weight_decay": [0.0],
+    "weight_decay": [0.0, 0.001],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [50.0],
+    "ctx_coefficient": [1.0,],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [0.0,  1.0],
+    "vae_orthogonality_coefficient": [0.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "do_initialization": [False, True],
+    "do_initialization": [True],
     "vae_latent_dim": [128],
     "C2_max_contexts": [10],
     "C2_max_value_systems": [10]
@@ -54,7 +56,7 @@ ARGS_TO_CHANGE = {
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
 DISCORDANCE_EPSILON = ["use_default"]
-N_SEEDS_PER_RUN = 2
+N_SEEDS_PER_RUN = 1
 
 AVOID_COMBINATIONS = [
     {"ctx_coefficient": 50.0, "do_initialization": False},

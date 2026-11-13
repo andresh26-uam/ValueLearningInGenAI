@@ -39,4 +39,4 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-sbatch --gpus="$gpu_request" sbatch_script.sh $scriptvsl --config_file="$config_file" "${extra_args[@]}"
+sbatch --wait --gpus="$gpu_request" sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"

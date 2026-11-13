@@ -159,7 +159,6 @@ if [[ -n "$NUM_TRAIN_EPOCHS_OVERRIDE" ]]; then
   NUM_TRAIN_EPOCHS="$NUM_TRAIN_EPOCHS_OVERRIDE"
 fi
 
-NUM_TRAIN_EPOCHS=1
 
 if [[ "$CTX_IMPLEMENTATION" == "KMEANS_THEN_VS" ]]; then
         training_initialization_data_size="all"
@@ -258,8 +257,8 @@ for seed in "${SEEDS[@]}"; do
 done
 if [[ "$DO_TRAIN" == "True" ]]; then
     if [[ -z "$CHECKPOINT_NAME" || "$CHECKPOINT_NAME" == "wait" ]]; then
-        echo "Error: Checkpoint name was not set by training script. Ommiting eval" >&2
-        exit 1
+        echo "Error: Checkpoint name was not set by training script. Omitting eval" >&2
+        exit 0
     fi
     echo "Training completed. Checkpoint name: $CHECKPOINT_NAME"
     

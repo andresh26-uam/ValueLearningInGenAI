@@ -1176,6 +1176,11 @@ class CustomVAE(VAE):
                              sampling_reps = 5):
         
         with th.no_grad(): 
+            encoder_parameter = next(self.encoder.parameters())
+            sample_data = sample_data.to(
+                device=encoder_parameter.device,
+                dtype=encoder_parameter.dtype,
+            )
             encoder_output = self.encoder(sample_data)
             if original_space_centroids is not None:
                 # Project original space centroids to latent space

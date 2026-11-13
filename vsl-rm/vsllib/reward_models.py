@@ -2680,6 +2680,10 @@ class MORMForClassification(PreTrainedModel):
         vs_weights = th.softmax(
                         self.value_system_layer.vs_selection_to_logit_vsweights_matrix, dim=1
                     ).detach()
+        context_to_vs = context_to_vs.to(
+            device=vs_weights.device,
+            dtype=vs_weights.dtype,
+        )
         selected_vs = th.argmax(context_to_vs, dim=1)
         selected_vs_weights = vs_weights[selected_vs].cpu().numpy()
         averaged_vs_weights = (context_to_vs @ vs_weights).cpu().numpy()
