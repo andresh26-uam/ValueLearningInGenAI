@@ -1,14 +1,14 @@
 #!/bin/bash
 
 
-GPUS="H100:1"
+GPUS="L40S:1"
 CPU=False
-DO_TRAIN=True
+DO_TRAIN=False
 
 CONFIG="run_configs/llama_ctx_linear_ae_kmeans.json"
-DATASET="pku"
+DATASET="oasst"
 DISCORDANCE_EPSILON=""
-NUM_TRAIN_EPOCHS_OVERRIDE=""
+NUM_TRAIN_EPOCHS_OVERRIDE="1"
 SEEDS=(44)
 RUN_INDEX=""
 RUN_NAME_FILE=""

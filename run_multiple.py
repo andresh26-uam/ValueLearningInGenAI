@@ -14,7 +14,7 @@ from pathlib import Path
 # SET GPU OR CPU IN RUN_SEEDS.SH!!!!
 
 DATASET = "pku"
-BASE_CONFIG = "run_configs/llama_ctx_linear_baseline.json"
+BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
 MAX_SIMULTANEOUS_RUNS = 4 # 18 no.
 MODEL_ALIAS = "llama"
 
@@ -40,9 +40,9 @@ ARGS_TO_CHANGE = {
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [1.0,],
+    "ctx_coefficient": [1.0,50.0],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [0.0],
+    "vae_orthogonality_coefficient": [1.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
