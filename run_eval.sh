@@ -5,16 +5,17 @@ set -euo pipefail
 MODEL_ALIAS="smol"
 DATASET_ALIAS="pku"
 GPUS="L40S:1"
+USE_CPU="True"
 #TASK_TYPE="nlp_based"
 TASK_TYPE="feature_based" # This one for apollo
 
-SKIP_COMPARE_CHECKPOINTS=False
-#KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
-#DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
-KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
-DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"
+SKIP_COMPARE_CHECKPOINTS=True
+KNLPMEANS_BASELINE="pku_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_0917_155257_epo100_s42"
+DIRECT_VS_BASELINE="pku_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_0916_165014_epo100_s42"
+#KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
+#DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"
 
-USE_CPU="False"
+
 EXTRA_ARGS=()
 
 resolve_model_name() {
@@ -80,6 +81,10 @@ EOF
     esac
     shift
 done
+
+if [[ "$USE_CPU" == "True" ]]; then
+    GPUS=""
+fi
 if [[ $MODEL_ALIAS == "armo" ]]; then
     TASK_TYPE="nlp_based"
 fi
@@ -112,6 +117,7 @@ echo "with extra args: ${EXTRA_ARGS[*]}"
 if [[ "$USE_CPU" == "True" ]]; then
     echo "Running on CPU"
     bash sbatch_script.sh  vsl-rm/eval_no_context.py \
+    --use_cpu \
     --model_name="$MODEL_NAME" \
     --dataset="$DATASET_ALIAS" \
     "${EXTRA_ARGS[@]}" \
