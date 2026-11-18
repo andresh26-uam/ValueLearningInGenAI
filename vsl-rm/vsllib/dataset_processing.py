@@ -275,7 +275,7 @@ class BasePairwisePreferenceDataset():
         #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
         self.get_all_contexts_embeddings()
 
-    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=8, num_proc=4):
+    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=24, num_proc=4):
         
         self.data = self.data.map(
                             lambda x: self.feature_extractor_method(x, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
@@ -415,7 +415,7 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
 class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
     
 
-    def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=8, num_proc=4):
+    def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=24, num_proc=4):
         model_reference = fe_kwargs.pop("model_reference")
         model_reference = model_reference.cpu()
 

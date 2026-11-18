@@ -1522,7 +1522,7 @@ def context_loss_logits(config: MORMForClassificationConfig, logits_p: th.Tensor
             #input()
             #model_output["loss"],model_output["recon_x"], model_output["z"]
             ctx_prediction_loss = loss
-        elif ContextImplementations(config.context_implementation) in [ContextImplementations.KMEANS_THEN_VS]:
+        elif ContextImplementations(config.context_implementation) in [ContextImplementations.KMEANS_THEN_VS, ContextImplementations.DIRECT_VS]:
             ctx_prediction_loss = 0.0
         else: 
             print("WARNING: CTX LOSS NON-DEFINED FOR CONTEXT IMPLEMENTATION", config.context_implementation)
