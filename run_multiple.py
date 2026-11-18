@@ -170,7 +170,7 @@ def main():
         print(
             f"This sweep will execute {total_runs} runs "
             f"({total_configurations} configurations x {N_SEEDS_PER_RUN} seeds) "
-            f"in {cycles} cycles of up to {MAX_SIMULTANEOUS_RUNS} simultaneous runs."
+            f"in {cycles} cycles of up to {MAX_SIMULTANEOUS_RUNS} x {N_SEEDS_PER_RUN} simultaneous runs."
         )
         approval = input("Proceed with the sweep? [y/N]: ").strip().lower()
         if approval not in {"y", "yes"}:
