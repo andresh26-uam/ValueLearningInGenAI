@@ -3,12 +3,12 @@
 
 GPUS="L40S:1"
 CPU=False
-DO_TRAIN=False
+DO_TRAIN=True
 
-CONFIG="run_configs/llama_ctx_linear_ae_kmeans.json"
+CONFIG="run_configs/llama_ctx_linear_baseline.json"
 DATASET="oasst"
 DISCORDANCE_EPSILON=""
-NUM_TRAIN_EPOCHS_OVERRIDE="1"
+NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(44)
 RUN_INDEX=""
 RUN_NAME_FILE=""
@@ -36,6 +36,13 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dataset=*)
       DATASET="${1#*=}"
+      ;;
+    --gpus)
+      GPUS="$2"
+      shift
+      ;;
+    --gpus=*)
+      GPUS="${1#*=}"
       ;;
     --discordance_epsilon)
       DISCORDANCE_EPSILON="$2"

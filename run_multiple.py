@@ -12,14 +12,18 @@ from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
 # SET GPU OR CPU IN RUN_SEEDS.SH!!!!
-
+GPUS="L40S:1"
+assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
 DATASET = "pku"
-BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
+BASE_CONFIG = "run_configs/llama_ctx_linear_baseline_directvs.json"
 MAX_SIMULTANEOUS_RUNS = 4 # 18 no.
 MODEL_ALIAS = "llama"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
+print(f"Running sweep for dataset:\n {DATASET}\nbase config:\n {BASE_CONFIG}\nmodel alias: \n {MODEL_ALIAS}")
+assert MODEL_ALIAS in {"llama", "smol"}
+assert MODEL_ALIAS in BASE_CONFIG, f"Model alias {MODEL_ALIAS} not in base config name path {BASE_CONFIG}, which may indicate a mismatch between the base config and the model alias."
 if DATASET == "pku":
     NUM_VALUES = 5 
     NUM_TRAIN_EPOCHS = [100]
@@ -40,9 +44,9 @@ ARGS_TO_CHANGE = {
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [1.0,50.0],
+    "ctx_coefficient": [10.0],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [1.0],
+    "vae_orthogonality_coefficient": [0.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
@@ -56,7 +60,7 @@ ARGS_TO_CHANGE = {
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
 DISCORDANCE_EPSILON = ["use_default"]
-N_SEEDS_PER_RUN = 1
+N_SEEDS_PER_RUN = 4
 
 AVOID_COMBINATIONS = [
     {"ctx_coefficient": 50.0, "do_initialization": False},
@@ -144,6 +148,8 @@ def main():
                         str(config_path),
                         "--dataset",
                         DATASET,
+                        "--gpus",
+                        GPUS,
                         "--model",
                         MODEL_ALIAS,
                         "--num_train_epochs",
