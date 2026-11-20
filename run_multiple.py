@@ -11,13 +11,14 @@ import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
-# SET GPU OR CPU IN RUN_SEEDS.SH!!!!
+# SET CPU IN RUN_SEEDS.SH!!!!
 GPUS="L40S:1"
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
-DATASET = "pku"
-BASE_CONFIG = "run_configs/llama_ctx_linear_baseline_directvs.json"
+DATASET = "oasst"
+BASE_CONFIG = "run_configs/smol_ctx_linear_baseline_smooth.json"
 MAX_SIMULTANEOUS_RUNS = 4 # 18 no.
-MODEL_ALIAS = "llama"
+N_SEEDS_PER_RUN = 4
+MODEL_ALIAS = "smol"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
@@ -37,30 +38,30 @@ else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001],
-    "C1_grounding_learning_rate": [0.0001],
-    "C1_context_learning_rate": [0.0001],
+    "C1_learning_rate": [0.0001,0.0003],
+    "C1_grounding_learning_rate": [0.0001,0.0003],
+    "C1_context_learning_rate": [0.0001,0.0003],
     "weight_decay": [0.0, 0.001],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [10.0],
+    "ctx_coefficient": [0.0],
     "ctx_chr_coefficient": [0.0],
     "vae_orthogonality_coefficient": [0.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "do_initialization": [True],
+    "do_initialization": [False,True],
     "vae_latent_dim": [128],
-    "C2_max_contexts": [10],
-    "C2_max_value_systems": [10]
+    "C2_max_contexts": [20],
+    "C2_max_value_systems": [20]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
 DISCORDANCE_EPSILON = ["use_default"]
-N_SEEDS_PER_RUN = 4
+
 
 AVOID_COMBINATIONS = [
     {"ctx_coefficient": 50.0, "do_initialization": False},
