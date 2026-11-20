@@ -2,17 +2,17 @@
 
 
 GPUS="L40S:1"
-CPU=False
+CPU=True
 DO_TRAIN=True
 
-CONFIG="run_configs/llama_ctx_linear_baseline.json"
+CONFIG="run_configs/smol_ctx_linear_baseline_user_id.json"
 DATASET="oasst"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(44)
 RUN_INDEX=""
 RUN_NAME_FILE=""
-MODEL_ALIAS="llama"
+MODEL_ALIAS="smol"
 SKIP_COMPARE_CHECKPOINTS=True
 #KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_1.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_1002_170032_epo25_s42"
 #DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_True_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_1001_154922_epo10_s42"

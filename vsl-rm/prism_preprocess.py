@@ -38,10 +38,24 @@ def _extract_rating(completion: dict[str, Any], value_name: str) -> Any:
 
 
 def _build_context(completion: dict[str, Any], user: dict[str, Any]) -> str:
-    custom_system_prompt = user.get("system_string") or None
+    
     #self_description = user.get("self_description") or None #???
-
-    return custom_system_prompt
+    profile = {
+        "age": user.get("age") or None,
+        "gender": user.get("gender") or None,
+        "employment_status": user.get("employment_status") or None,
+        "education": user.get("education") or None,
+        "marital_status": user.get("marital_status") or None,
+        "study_locale": user.get("study_locale") or None,
+        "ethnicity": user["ethnicity"]["categorised"],
+        "religion": user["religion"]["categorised"],
+        "location": user["location"]["birth_country"],
+        "self_description": user.get("self_description") or None,
+        "system_string": user.get("system_string") 
+        #"lm_use_cases": user["lm_use_cases"], # 'lm_usecases': {'homework_assistance': 0.0, 'research': 1.0, 'source_suggestions': 0.0, 'professional_work': 0.0, 'creative_writing': 0.0, 'casual_conversation': 0.0, 'personal_recommendations': 0.0, 'daily_productivity': 0.0, 'technical_or_programming_help': 0.0, 'travel_guidance': 0.0, 'lifestyle_and_hobbies': 1.0, 'well-being_guidance': 1.0, 'medical_guidance': 0.0, 'financial_guidance': 0.0, 'games': 1.0, 'historical_or_news_insight': 0.0, 'relationship_advice': 0.0, 'language_learning': 0.0, 'other': 0.0, 'other_text': None}
+        #"order_lm_use_cases": user["order_lm_use_cases"], # 'order_lm_usecases': 'order_lm_usecases': {'homework_assistance': 11.0, 'research': 16.0, 'source_suggestions': 7.0, 'professional_work': 13.0, 'creative_writing': 14.0, 'casual_conversation': 17.0, 'personal_recommendations': 6.0, 'daily_productivity': 12.0, 'technical_or_programming_help': 2.0, 'travel_guidance': 10.0, 'lifestyle_and_hobbies': 9.0, 'well-being_guidance': 18.0, 'medical_guidance': 8.0, 'financial_guidance': 15.0, 'games': 3.0, 'historical_or_news_insight': 1.0, 'relationship_advice': 4.0, 'language_learning': 5.0, 'other': 19.0}
+    }
+    return str(profile)
 
 
 def _build_pair_row(completion_a: dict[str, Any], completion_b: dict[str, Any], user) -> dict[str, Any]:
@@ -49,10 +63,9 @@ def _build_pair_row(completion_a: dict[str, Any], completion_b: dict[str, Any], 
     return {
         "conversation_id1": completion_a.get("conversation_id"),
         "conversation_id2": completion_b.get("conversation_id"),
-        "prompt1": completion_a.get("opening_prompt"),
-        "prompt2": completion_b.get("opening_prompt"),
-        "context1": _build_context(completion_a, user),
-        "context2": _build_context(completion_b, user),
+        "prompt1": f"{completion_a.get("opening_prompt")}",
+        "prompt2": f"{completion_a.get("opening_prompt")}",
+        "context": _build_context(completion_b, user),
         "balanced1": completion_a.get("included_in_balanced_subset"),
         "balanced2": completion_b.get("included_in_balanced_subset"),
         "conv_type1": completion_a.get("conversation_type"),
@@ -109,6 +122,7 @@ def prism_processor() -> tuple[int, list[int]]:
     print(f"Filtered users with >=2 utterances: {len(valid_users)}")
     for u, convos in tqdm(convgrouped, total=len(convgrouped)):
         u = users_grouped.get_group(u).iloc[0].to_dict()
+        
         conv_binations = itertools.combinations(range(len(convos)), 2)
 
         for completion_a, completion_b in conv_binations:
@@ -153,59 +167,50 @@ def prism_processor() -> tuple[int, list[int]]:
     # 500 cases for preferences of known users in the train set and 500 cases for preferences of new users in the validation set.
     users = hf_dataset.unique("user_id")
     print(users)
+    # print the number of instances per user. Print the instances of the user with the most instances. 
+    
     random.seed(42)
     random.shuffle(users)
 
     user_ids_random = users
     assert len(user_ids_random) == 1371, f"Total user IDs should be 1371. {len(user_ids_random)}"
     user_ids_train = user_ids_random[0:1171]
-    user_ids_val = user_ids_random[1171:1272]
-    user_ids_test = user_ids_random[1272:1371]
+    train_user_ids = {str(user_id) for user_id in user_ids_train}
+    user_ids_val = user_ids_random[1171:1271]
+    val_user_ids = {str(user_id) for user_id in user_ids_val}
 
-    cases_new_users_val = hf_dataset.filter(lambda x: str(x.get("user_id")) in user_ids_val).list_indexes()
-    print(f"Cases new users val: {len(cases_new_users_val)}")
-    cases_new_users_test = hf_dataset.filter(lambda x: str(x.get("user_id")) in user_ids_test).list_indexes()
-    print(f"Cases new users test: {len(cases_new_users_test)}")
-    print(cases_new_users_test[0:100])
-    #TODO
-    exit(0)
-    n_cases_new_users_val = len(cases_new_users_val)
-    n_cases_new_users_test = len(cases_new_users_test)
+    user_ids_test = user_ids_random[1271:1371]
+    test_user_ids = {str(user_id) for user_id in user_ids_test}
 
-    dataset_not_new_users = hf_dataset.filter(lambda x: str(x.get("user_id")) in user_ids_train)
+    indexes_train = [
+        i
+        for i, user_id in enumerate(hf_dataset["user_id"])
+        if str(user_id) in train_user_ids
+    ]
+    indexes_val = [
+        i
+        for i, user_id in enumerate(hf_dataset["user_id"])
+        if str(user_id) in val_user_ids
+    ]
+    indexes_test = [
+            i
+            for i, user_id in enumerate(hf_dataset["user_id"])
+            if str(user_id) in test_user_ids
+        ]
 
-    cases_train_users_val = dataset_not_new_users[0:len(cases_new_users_val)].get("conversation_id1")
-    cases_train_users_test = dataset_not_new_users[len(cases_new_users_val):len(cases_new_users_val)+len(cases_new_users_test)]
+    cases_new_users_val = indexes_val
+    cases_new_users_test = indexes_test
+    cases_train_users_val = indexes_train[0:len(indexes_val)]
+    cases_train_users_test = indexes_train[len(indexes_val):len(indexes_val)+len(indexes_test)]
+
+    validation_indices = cases_new_users_val + cases_train_users_val
+    test_indices = cases_new_users_test + cases_train_users_test
 
     
-
-    for user_id, group in per_user:
-        if len(group) != 1:
-            print(f"User {user_id} has {len(group)} samples, expected 1.")
-            exit(0)
-
-
-    validation_indices = list(range(len(train_dataset), len(ds)))
-    
-    assert len(validation_indices) == len(val_dataset), "Validation indices length should match the validation dataset length."    
-
-    rows = []
-    skipped_amount = 0
-    for i, completion_pair in enumerate(ds):
-        row_or_skipped = _build_pair_row(i, completion_pair, validation_indices, None)
-        if row_or_skipped is not None:
-            
-            rows.append(row_or_skipped)
-        else:
-            skipped_amount += 1
-    print(f"Skipped {skipped_amount} pairs due to identical responses.")
-    ds_new = Dataset.from_dict( {k: [row[k] for row in rows] for k in rows[0].keys()})
-    print(f"Total pairs after processing: {len(ds_new)}")
-    test_indices = list(range(len(ds_new)))[0:len(validation_indices)]  # Assuming test set is the same as validation set for now
     
     # Save to PRISM_PROCESSED_PATH folder
-    save_processeddataset(PRISM_PROCESSED_PATH, ds_new, validation_indices, test_indices)
-
+    save_processeddataset(PRISM_PROCESSED_PATH, hf_dataset, validation_indices, test_indices)
+    return len(hf_dataset), validation_indices, test_indices
 
 if __name__ == "__main__":
     total_rows, validation_indices, test_indices = prism_processor()

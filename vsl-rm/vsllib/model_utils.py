@@ -7,7 +7,7 @@ from pythae.models.nn import BaseDecoder, BaseEncoder
 import tqdm
 
 from transformers.configuration_utils import PretrainedConfig
-from typing import List, Literal, Optional, Tuple
+from typing import Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import torch as th
@@ -780,6 +780,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self,
         # This will be set properly in the model init based on the tokenizer
         context_implementation: str = ContextImplementations.NO_CONTEXT.value,
+        user_id_to_index: Dict[str, int] = None,
         vs_weight_initialization: Literal['dirichlet',
                                      'span', 'equal'] = "dirichlet",
         do_initialization: bool = True,
@@ -920,6 +921,7 @@ class MORMForClassificationConfig(PretrainedConfig):
         self.vae_orthogonality_coefficient=vae_orthogonality_coefficient
 
         self.context_implementation = context_implementation
+        self.user_id_to_index = user_id_to_index or {}
         self.sharp_context_classification = sharp_context_classification
         self.do_initialization = do_initialization
         self.do_vs_initialization = do_vs_initialization

@@ -36,7 +36,7 @@ for candidate in (
 
 from vsllib.utils import ScriptArguments, argument_parser, maybe_assign_pad_token, obtain_tokenizer, seed_everything
 from vsllib.dataset_processing import FeatureBasedPreferenceDataset, PairwisePreferenceDataset
-from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding
+from vsllib.training_utils import MORewardDataCollator, MORewardDataCollatorWithPadding, build_user_id_mapping
 from vsllib.training import ConstrainedOptimizer, CtxMORewardTrainer, MORewardTrainer
 from vsllib.reward_models import MORMForClassification, MORMForSequenceClassification, MetadataOnlyBaseModel, mo_compute_loss_func
 from vsllib.model_utils import MORMForClassificationConfig
@@ -81,6 +81,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             dc = MORewardDataCollatorWithPadding(
                 tokenizer=tokenizer, max_length=script_args.max_length, dtype=torch_dtype, use_embeddings=script_args.use_extracted_features) 
 
+            
             dataset = PairwisePreferenceDataset(dataset_path, tokenizer,
                                                 use_sentence_transformer=script_args.use_sentence_transformer,
                                                 normalize_context=script_args.normalize_context_features,
@@ -142,6 +143,12 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 assert num_values_to_use == len(
                     reward_head_indices), f"Number of values to use ({num_values_to_use}) does not match the length of reward head indices ({len(reward_head_indices)})"
 
+        if ContextImplementations(script_args.context_implementation) == ContextImplementations.USER_ID:
+            user_id_to_index = build_user_id_mapping(dataset.train_dataset)
+            dc.user_id_to_index = user_id_to_index
+        else:
+            user_id_to_index = None
+
         if script_args.task_type == "feature_based":
             input_size = np.array(dataset.train_dataset["grounding_features_1"][0]).shape[0]
             input_size_vs = np.array(dataset.train_dataset["context_features"][0]).shape[0]
@@ -199,6 +206,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
             vs_layer_dropout=script_args.vs_layer_dropout,
             vs_layer_intermediate_activation=script_args.vs_layer_activation,
             context_implementation=script_args.context_implementation,
+            user_id_to_index=user_id_to_index,
             
             input_size=input_size,
             input_size_vs=input_size_vs,
@@ -279,7 +287,7 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
                 compute_loss_func=partial(
                     mo_compute_loss_func, config=mo_config, training_variables=mo_model.training_variables),
             )
-        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.BASIC,ContextImplementations.KMEANS_THEN_VS, ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC, ContextImplementations.BASIC_HARSH]:
+        elif ContextImplementations(mo_config.context_implementation) in [ContextImplementations.USER_ID, ContextImplementations.BASIC,ContextImplementations.KMEANS_THEN_VS, ContextImplementations.GMM,ContextImplementations.GMM_AND_CLASSIFIER, ContextImplementations.VADE, ContextImplementations.VAE_AND_KMEANS, ContextImplementations.VAE_KMEANS_NOLOSS, ContextImplementations.BASIC, ContextImplementations.BASIC_HARSH]:
             trainer_class = CtxMORewardTrainer
             trainer_extra_kwargs = dict(
                 compute_loss_func=partial(

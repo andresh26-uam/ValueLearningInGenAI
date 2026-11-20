@@ -182,7 +182,7 @@ class BasePairwisePreferenceDataset():
         os.makedirs(postprocessed_dataset_output_path, exist_ok=True)
         """if recalculate_embeddings :
             shutil.rmtree(embedded_or_tokenized_dataset_output_path, ignore_errors=True)"""
-
+        loaded_postproc = False
         if from_disk:
 
             if postprocessed_dataset_output_path is None:
@@ -192,6 +192,7 @@ class BasePairwisePreferenceDataset():
                 print(postprocessed_dataset_output_path)
                 try:
                     self.data = load_from_disk(postprocessed_dataset_output_path)
+                    loaded_postproc = True
                     print(f"Loaded embedded/tokenized dataset from {postprocessed_dataset_output_path}")
                 except FileNotFoundError:
                     print(f"Embedded/Tonkenized dataset not found at {postprocessed_dataset_output_path}. Loading (tentatively tokenized) dataset from {path}.")
@@ -202,8 +203,9 @@ class BasePairwisePreferenceDataset():
                     print(f"Saved embedded dataset to {output_path}")
         else:
             self.data = load_dataset(path)
+            loaded_postproc = True
             check_format(self.data) # This might be tricky. Might need code to join the splits, then get the indices.
-        
+
         
         if ((self.data[0].get("embedding_1", None) is None) or repostprocess) and use_extracted_features:
             print("KEYS?", self.data[0].keys())
@@ -236,6 +238,25 @@ class BasePairwisePreferenceDataset():
                 self.data = self.calculate_features(recalculate_features, use_context, fe_kwargs)
                 self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
+        data_pre = load_from_disk(preprocessed_dataset_path)
+        for c in self.data.column_names:
+            if c in data_pre.column_names:
+                assert str(self.data.select([0,-1]).get(c)) == str(data_pre.select([0,-1]).get(c)), f"Column '{c}' in postprocessed dataset does not match preprocessed dataset: {self.data.select([0,-1]).get(c)} vs {data_pre.select([0,-1]).get(c)}"
+            else:
+                print(f"WARNING: Column '{c}' in postprocessed dataset not found in preprocessed dataset. This may be expected if the column was added during postprocessing.")
+
+    
+        for col in extra_keep_keys:
+            if (col not in self.data.column_names) and col in data_pre.column_names:
+                print(f"ADDING {col} to dataset from preprocessed dataset")
+                self.data = self.data.add_column(col, data_pre[col])
+                print("DATO NUEVO??", self.data[col][0])
+                print("COLUMNAS", self.data.column_names)
+                
+                assert col in data_pre.column_names, f"Extra keep key '{col}' not found in preprocessed dataset columns: {data_pre.column_names}"
+        self.data = save_dataset(self.data, postprocessed_dataset_output_path)
+
+        assert "user_id" in self.data.column_names
         
         self.postprocessor_method_after_save()
         
@@ -270,10 +291,15 @@ class BasePairwisePreferenceDataset():
             print(f"Train dataset size: {len(self.train_dataset)}")
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
+
+        print("DATO NUEVO?? 2", self.train_dataset["user_id"][0])
+        print("COLUMNAS", self.train_dataset.column_names)
+        
         #self.train_dataset = self.train_dataset.select(range(min(len(self.train_dataset), 200)))
         #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
         #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
         self.get_all_contexts_embeddings()
+        
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=24, num_proc=4):
         

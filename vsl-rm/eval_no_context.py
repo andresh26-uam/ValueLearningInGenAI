@@ -32,6 +32,7 @@ for candidate in (
 from vsllib.training_utils import (
     MORewardDataCollator,
     MORewardDataCollatorWithPadding,
+    build_user_id_mapping,
 )
 from vsllib.training import CtxMORewardTrainer, MORewardTrainer
 
@@ -498,6 +499,10 @@ def build_dataset(script_args: EvalArguments, model: MORMForClassification, toke
                                                 test_proportion_or_indices=test_proportion_or_indices,
                                                 cleanup_cache_files=False,
                                                 )
+    if ContextImplementations(model.config.context_implementation) == ContextImplementations.USER_ID:
+        existing_mapping = getattr(model.config, "user_id_to_index", None)
+        user_id_to_index = build_user_id_mapping(dataset.train_dataset, existing_mapping=existing_mapping)
+        dc.user_id_to_index = user_id_to_index
 
     if model.num_values != len(dataset.value_keys):
         raise ValueError(

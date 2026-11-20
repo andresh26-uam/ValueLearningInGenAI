@@ -617,6 +617,78 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
     def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
         return self.value_system_from_context_train(hidden_state, context_data)
         
+class UserIdCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
+    """Predict value-system weights directly from a learned per-user embedding table."""
+
+    def __init__(self, *args: Any, num_users: int, num_values: int, device=None, dtype=None, **kwargs: Any) -> None:
+        AbstractCtxDependentAlignmentLayer.__init__(
+            self, *args, input_shape=1, num_contexts=num_users + 1,
+            num_value_systems=num_users + 1, num_values=num_values, **kwargs
+        )
+        self.user_id_to_vs_weights = nn.Parameter(
+            th.zeros((num_users + 1, num_values), device=device, dtype=dtype)
+        )
+        if self.user_id_to_vs_weights.is_meta:
+            nn.init.normal_(self.user_id_to_vs_weights, mean=0.0, std=0.01)
+        else:
+            nn.init.normal_(self.user_id_to_vs_weights, mean=0.0, std=0.01)
+        with th.no_grad():
+            self.user_id_to_vs_weights[0].fill_(0.0)
+
+    def value_system_parameters(self) -> Iterable[nn.Parameter]:
+        return (self.user_id_to_vs_weights,)
+
+    def context_parameters(self) -> Iterable[nn.Parameter]:
+        return ()
+
+    def get_value_systems(self) -> Tuple[Iterable[Any], Iterable[th.Tensor]]:
+        return list(range(self.num_value_systems)), th.softmax(self.user_id_to_vs_weights, dim=1)
+
+    def get_context_ids_mapped_to_value_system(self, index_context: int) -> Iterable[Any]:
+        return [index_context]
+
+    def calculate_ctx_data(self, hidden_state: th.Tensor) -> CtxData:
+        raise NotImplementedError
+
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+        raise NotImplementedError
+
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+        raise NotImplementedError
+
+    def forward(self, grounding: th.Tensor, hidden_state: th.Tensor = None,
+                user_ids: th.Tensor = None, *args, **kwargs) -> Tuple[th.Tensor, Dict]:
+        batch_size = grounding.shape[0]
+        if user_ids is None:
+            user_ids = th.zeros((batch_size,), dtype=th.long, device=grounding.device)
+        else:
+            user_ids = user_ids.to(device=grounding.device, dtype=th.long).view(-1)
+            if user_ids.numel() != batch_size:
+                raise ValueError(
+                    f"USER_ID batch size mismatch: expected {batch_size}, got {user_ids.numel()}."
+                )
+        user_ids = th.clamp(user_ids, min=0, max=self.num_contexts - 1)
+        log_probs = th.log_softmax(self.user_id_to_vs_weights, dim=1)
+        vs_logprobs = log_probs[user_ids]
+        vs_predicted = th.softmax(self.user_id_to_vs_weights[user_ids], dim=1)
+        assignments = user_ids
+        context_features = hidden_state if hidden_state is not None else th.zeros(
+            (batch_size, 1), dtype=grounding.dtype, device=grounding.device
+        )
+        ctx_data = CtxData(
+            context_features=context_features,
+            context_logprobs=vs_logprobs,
+            vs_logprobs=vs_logprobs,
+            vs_assignments=assignments,
+            ctx_assignments=assignments,
+            vs_predicted=vs_predicted,
+            ctx_predicted=assignments,
+            log_vs_possibilities=log_probs,
+            ctx_possibilities=log_probs,
+        )
+        return vs_predicted, {"ctx": ctx_data.to_dict()}
+
+
 class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
 
     def get_statistics(self):
@@ -2049,6 +2121,10 @@ class MORMForClassification(PreTrainedModel):
         
         prev_config_loss_func_type = self.config.loss_func_type
         self.config.loss_func_type = MOLossFunctions.DEFAULT.value
+        if ContextImplementations(self.config.context_implementation) == ContextImplementations.USER_ID:
+            self.config.loss_func_type = prev_config_loss_func_type
+            print("USER_ID context: skipping prompt-context KMeans initialization; using learned per-user value-system rows.")
+            return
         dataset_ctxs = np.array(train_subdataset.select_columns([self.vs_features_name])[self.vs_features_name])
         dataset_original_texts= None
         try:
@@ -2754,6 +2830,14 @@ class MORMForClassification(PreTrainedModel):
         if ContextImplementations(config.context_implementation) == ContextImplementations.NO_CONTEXT:
             return ConvexAlignmentLayer(
                 config.num_values, 1, device=device, dtype=dtype)
+        elif ContextImplementations(config.context_implementation) == ContextImplementations.USER_ID:
+            num_users = len(config.user_id_to_index) - 1 if config.user_id_to_index else 0
+            return UserIdCtxDependentAlignmentLayer(
+                num_users=num_users,
+                num_values=config.num_values,
+                device=device,
+                dtype=dtype,
+            )
         elif ContextImplementations(config.context_implementation) == ContextImplementations.BASIC:
             return BasicCtxDependentAlignmentLayer(
                 smooth_evaluation=config.smooth_evaluation,
@@ -3013,7 +3097,7 @@ class MORMForClassification(PreTrainedModel):
                     self.value_system_layer.value_system_parameters())
         return iter(params)
     
-    def score(self, grounding_features, score_mode='normal', vs_features=None) -> th.Tensor:
+    def score(self, grounding_features, score_mode='normal', vs_features=None, user_ids=None) -> th.Tensor:
         if score_mode == 'ideal' and self.use_ideal_grounding_model:
             reward_heads = self.reward_heads_ideal
             raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
@@ -3030,12 +3114,12 @@ class MORMForClassification(PreTrainedModel):
 
         if self.value_system_layer is not None:
             if self.config.loss_management.should_apply_grad_on_value_system_weights():
-                vs_reward, other = self.value_system_layer.forward(rewards, hidden_state=vs_features)
+                vs_reward, other = self.value_system_layer.forward(rewards, hidden_state=vs_features, user_ids=user_ids)
                 assert vs_reward.shape[0] == len(rewards)
             else:
                 #raise ValueError(f"Unexpected loss function type {self.config.loss_func_type} that does not fit into any grounding loss category, cannot determine whether to apply grad on grounding parameters or not.")
                 with th.no_grad():
-                    vs_reward, other = self.value_system_layer.forward(rewards, hidden_state=vs_features)
+                    vs_reward, other = self.value_system_layer.forward(rewards, hidden_state=vs_features, user_ids=user_ids)
                 
             all_rewards = th.cat([rewards, vs_reward], dim=-1)
         else:
@@ -3067,8 +3151,9 @@ class MORMForClassification(PreTrainedModel):
         grounding_features = kwargs.pop(self.grounding_features_name)
         
         vs_features = kwargs.pop(self.vs_features_name, None)
+        user_ids = kwargs.pop("user_id", None)
        
-        all_rewards, other = self.score(grounding_features, vs_features=vs_features)
+        all_rewards, other = self.score(grounding_features, vs_features=vs_features, user_ids=user_ids)
         assert all_rewards.shape[-1] == self.num_values + 1, f"Shape: {all_rewards.shape}"
         if self.forward_ideal_grounding:
             grounding_ideal = self.reward_heads_ideal(grounding_features)
@@ -3424,6 +3509,7 @@ class MORMForSequenceClassification(MORMForClassification):
         past_key_values: Cache | None = None,
         inputs_embeds: th.FloatTensor | None = None,
         labels: th.LongTensor | None = None,
+        user_id: th.LongTensor | None = None,
         use_cache: bool | None = None,
         score_mode = "normal",
         **kwargs: Dict[str, Any],
@@ -3438,7 +3524,7 @@ class MORMForSequenceClassification(MORMForClassification):
             **kwargs,
         )
         hidden_states = transformer_outputs.last_hidden_state
-        logits, other = self.score(hidden_states, score_mode=score_mode) # Change here.
+        logits, other = self.score(hidden_states, score_mode=score_mode, user_ids=user_id) # Change here.
 
         if input_ids is not None:
             batch_size = input_ids.shape[0]

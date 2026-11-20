@@ -37,6 +37,27 @@ from vsllib.defines import MOLossFunctions, MOLossFunctionsCategories
 from vsllib.utils import to_float
 
 
+def build_user_id_mapping(dataset, existing_mapping: Optional[Dict[str, int]] = None) -> Dict[str, int]:
+    """Create a stable raw-ID-to-index mapping for USER_ID models."""
+    mapping = {"__UNKNOWN_USER__": 0}
+    if existing_mapping:
+        mapping.update({str(k): int(v) for k, v in existing_mapping.items()})
+        return mapping
+    print("COLUMN NAMES", dataset.column_names)
+    
+    if "user_id" not in dataset.column_names:
+        raise ValueError(
+            "USER_ID context implementation requires a 'user_id' column in the processed dataset."
+        )
+    next_index = 1
+    for user_id in dataset["user_id"]:
+        key = str(user_id)
+        if key not in mapping:
+            mapping[key] = next_index
+            next_index += 1
+    return mapping
+
+
 def normalizing_params(used_mults, vs_coeff, dtype=th.float32) -> Tuple[th.Tensor, th.Tensor]:
         if vs_coeff is not None and used_mults is not None:
             mults_softmax = th.nn.functional.softmax(th.cat([used_mults, vs_coeff], dim=0), dim=0, dtype=dtype)
@@ -83,6 +104,12 @@ def norm_penalty( lags, vs_coeff, penalty_coeff) -> th.Tensor:
 class MORewardDataCollator:
     return_tensors: str = "pt"
     dtype: Optional[th.dtype] = None
+    user_id_to_index: Optional[Dict[str, int]] = None
+
+    def _map_user_id(self, user_id: Any) -> int:
+        if user_id is None or not self.user_id_to_index:
+            return 0
+        return int(self.user_id_to_index.get(str(user_id), 0))
 
     
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -97,10 +124,14 @@ class MORewardDataCollator:
         for feature in features:
             pair_labels = feature["labels"]
             c = feature.pop("context_features", [])
+            user_id = feature.pop("user_id", None)
+            user_id_index = self._map_user_id(user_id)
             dic1 = {"labels": pair_labels[0],
                 }
             dic2 = {"labels": pair_labels[1],
                 }
+            dic1["user_id"] = user_id_index
+            dic2["user_id"] = user_id_index
             dic1["grounding_features"] = feature.pop("grounding_features_1", [])
             dic1["context_features"] = c
             dic2["grounding_features"] = feature.pop("grounding_features_2", [])
@@ -116,6 +147,7 @@ class MORewardDataCollator:
             key: th.stack([th.tensor(feature[key],dtype=self.dtype) for feature in merged_features])
             for key in merged_features[0]
         }
+        batch["user_id"] = batch["user_id"].to(dtype=th.long)
         
         
         batch["return_loss"] = True
@@ -133,6 +165,12 @@ class MORewardDataCollatorWithPadding:
     pad_to_multiple_of: Optional[int] = 16
     return_tensors: str = "pt"
     dtype: Optional[th.dtype] = None
+    user_id_to_index: Optional[Dict[str, int]] = None
+
+    def _map_user_id(self, user_id: Any) -> int:
+        if user_id is None or not self.user_id_to_index:
+            return 0
+        return int(self.user_id_to_index.get(str(user_id), 0))
 
     
     def __call__(self, features: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -146,16 +184,19 @@ class MORewardDataCollatorWithPadding:
         for feature in features:
             pair_labels = feature["labels"]
             c = feature.get("context_embedding", None) if self.use_embeddings else None
+            user_id_index = self._map_user_id(feature.get("user_id", None))
             dic1 = {
                     "input_ids": feature["input_ids_1"],
                     "attention_mask": feature["attention_mask_1"],
                     "labels": pair_labels[0],
+                    "user_id": user_id_index,
                 }
             
             dic2 = {
                     "input_ids": feature["input_ids_2"],
                     "attention_mask": feature["attention_mask_2"],
                     "labels": pair_labels[1],
+                    "user_id": user_id_index,
                 }
             if self.use_embeddings:
                 dic1["embedding"] = feature.get("embedding_1", None)
@@ -176,6 +217,10 @@ class MORewardDataCollatorWithPadding:
             pad_to_multiple_of=self.pad_to_multiple_of,
             return_tensors=self.return_tensors,
             
+        )
+        batch["user_id"] = th.tensor(
+            [feature["user_id"] for feature in merged_features],
+            dtype=th.long,
         )
         batch["return_loss"] = True
         batch["embedding"] = batch["embedding"].to(dtype=self.dtype) if "embedding" in batch.keys() else None

@@ -77,8 +77,8 @@ OASSTFL_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "oasstfl")
 APOLLO_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "apollo")
 SYNTH_PROCESSED_PATH = str(Path(LOCAL_DATASET_PATH) / "synth")
 
-PRISM_EXTRA_KEYS = ["labels", "context1", "context2", "prompt1", "prompt2", "response1", "response2", "user_id"]
-OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rev_count", "rank", "prompt_val_quality", "prompt_val_nontoxicity", "prompt_val_humor", "prompt_val_helpfulness", "prompt_val_creativity", "prompt_val_nonviolence", "prompt_val_not_appropriate"]
+PRISM_EXTRA_KEYS = ["labels", "context", "prompt1", "prompt2", "response1", "response2", "user_id"]
+OASST_EXTRA_KEYS = ["labels", "context", "user_id", "lang", "rank" ]#"rev_count", "prompt_val_quality", "prompt_val_nontoxicity", "prompt_val_humor", "prompt_val_helpfulness", "prompt_val_creativity", "prompt_val_nonviolence", "prompt_val_not_appropriate"]
 # TODO: Analyze perhaps how different clusters adhere to prompt reported groundings in OPenassist/Oasst.
 SYNTH_EXTRA_KEYS = ["labels", "context", "user_id", "vs_id", "ctx_id", "vs_real"]
 APOLLO_EXTRA_KEYS = ["labels", "user_id", "context"]
@@ -280,6 +280,7 @@ class MOLossFunctions(enum.Enum):
 
 class ContextImplementations(enum.Enum):
     NO_CONTEXT = "NO_CONTEXT"
+    USER_ID = "USER_ID"
     DIRECT_VS = "DIRECT_VS"
     KMEANS_THEN_VS = "KMEANS_THEN_VS"
     BASIC = "BASIC"

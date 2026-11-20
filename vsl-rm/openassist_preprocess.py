@@ -40,7 +40,7 @@ def extract_rating_single(labels: dict, name="quality"):
         missing = 1
     else:
         missing = 0
-    return labels.get(name, {}).get("value", NO_RATING_MASK)*SIGN_MAP[name], 
+    return labels.get(name, {}).get("value", NO_RATING_MASK)*SIGN_MAP[name], missing
 
 def download_ready_trees_file() -> Path:
     """Download the ready trees export from Hugging Face and cache it locally."""
@@ -180,14 +180,14 @@ def process_line_rec(base_line: dict, line: dict, level: int, rows: list[dict] =
         labels_b = reply_b["labels"]
         assert reply_a["role"] == "assistant" and reply_b["role"] == "assistant", f"Replies must be from the assistant role, got {reply_a['role']} and {reply_b['role']}"
         instance["prompt"] = line["text"]
+        instance["user_id"] = str(line["user_id"])
         instance["context1"] = base_line["text"] # TODO maybe use the full conversation??
         instance["context2"] = base_line["text"] # TODO maybe use the full conversation??
         instance["response1"] = reply_a["text"]
         instance["response2"] = reply_b["text"]
 
-
-
         instance["level"] = level
+        instance["rev_count"] = line["review_count"]
         instance["review_count"] = line["review_count"]
         instance["lang"] = line["lang"]
         instance["user_prompt_id"] = line["user_id"]
