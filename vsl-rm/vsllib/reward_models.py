@@ -260,11 +260,11 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
     def initialize(self, **kwargs) -> None:
         pass
     @abstractmethod
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         return None
     
     @abstractmethod
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         return None
 
     def calculate_statistics(self, context_data: CtxData, statistics_before: CtxStatistics= None, update_factor=0.9) -> CtxStatistics:
@@ -308,7 +308,7 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
                 )
     
     @abstractmethod
-    def calculate_ctx_data(self, hidden_state: th.Tensor) -> CtxData:
+    def calculate_ctx_data(self, hidden_state: th.Tensor, **kwargs) -> CtxData:
         pass
 
     
@@ -319,33 +319,37 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
     def get_value_systems(self) -> Tuple[Iterable[Any], Iterable[th.Tensor], Iterable[int]]:
         pass
     
-    def value_system_from_context(self, hidden_state) -> Tuple[th.Tensor, CtxData]:
-        assert hidden_state.shape[1] == self.input_shape
+    def value_system_from_context(self, hidden_state, **kwargs) -> Tuple[th.Tensor, CtxData]:
+        #assert hidden_state.shape[1] == self.input_shape
         
         #print("TRAINING??", self.training)
         if self.training:
             _context_stats_before = self.running_context_training_data
-            context_data = self.calculate_ctx_data(hidden_state)
+            context_data = self.calculate_ctx_data(hidden_state, **kwargs)
         else:
             _context_stats_before = self.running_context_validation_data
             with th.no_grad():
-                context_data = self.calculate_ctx_data(hidden_state)
+                context_data = self.calculate_ctx_data(hidden_state, **kwargs)
             
         context_stats = self.calculate_statistics(context_data, _context_stats_before)
         if self.training:
             with th.no_grad(): 
                 self.running_context_training_data.update_running_average(context_stats)
             
-            return self.value_system_from_context_train(hidden_state, context_data)
+            return self.value_system_from_context_train(hidden_state, context_data, **kwargs)
         else:
             with th.no_grad(): 
                 self.running_context_validation_data.update_running_average(context_stats)
             
-            return self.value_system_from_context_eval(hidden_state, context_data)
+            return self.value_system_from_context_eval(hidden_state, context_data, **kwargs)
         
 
+    def vs_extra_kwargs(self, forward_kwargs: Dict) -> Dict:
+        return {}
+    
     def forward(self, grounding: th.Tensor, hidden_state: th.Tensor, *args, **kwargs) -> Tuple[th.Tensor, Dict]:
-        vs_weights, ctx_data = self.value_system_from_context(hidden_state)
+        print("FORWARDING WITH GROUNDING SHAPE" , kwargs)
+        vs_weights, ctx_data = self.value_system_from_context(hidden_state, **self.vs_extra_kwargs(kwargs))
         if __debug__:
             if ctx_data.vs_assignments is not None:
                 assignments = ctx_data.vs_assignments.detach().flatten()
@@ -605,7 +609,7 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
                 th.rand(self.num_contexts, self.num_value_systems, device=device, dtype=dtype),
                 requires_grad=True,
             )"""
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         vs_weights = th.nn.functional.softmax(self.vs_selection_to_logit_vsweights_matrix, dim=1)
         vs_predicted = vs_weights[context_data.vs_assignments]
         assert th.allclose(vs_predicted[1], vs_weights[context_data.vs_assignments[1]])
@@ -614,12 +618,14 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
         enriched_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted, 
                                                       ctx_predicted = context_data.ctx_assignments)
         return vs_predicted, enriched_data
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        return self.value_system_from_context_train(hidden_state, context_data)
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
+        return self.value_system_from_context_train(hidden_state, context_data, **kwargs)
         
 class UserIdCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
     """Predict value-system weights directly from a learned per-user embedding table."""
-
+    def vs_extra_kwargs(self, forward_kwargs: Dict) -> Dict:
+        return {"user_ids": forward_kwargs.get("user_ids", None)}
+    
     def __init__(self, *args: Any, num_users: int, num_values: int, device=None, dtype=None, **kwargs: Any) -> None:
         AbstractCtxDependentAlignmentLayer.__init__(
             self, *args, input_shape=1, num_contexts=num_users + 1,
@@ -647,33 +653,23 @@ class UserIdCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
     def get_context_ids_mapped_to_value_system(self, index_context: int) -> Iterable[Any]:
         return [index_context]
 
-    def calculate_ctx_data(self, hidden_state: th.Tensor) -> CtxData:
-        raise NotImplementedError
-
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        raise NotImplementedError
-
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        raise NotImplementedError
-
-    def forward(self, grounding: th.Tensor, hidden_state: th.Tensor = None,
-                user_ids: th.Tensor = None, *args, **kwargs) -> Tuple[th.Tensor, Dict]:
-        batch_size = grounding.shape[0]
+    def calculate_ctx_data(self, hidden_state: th.Tensor, user_ids: th.Tensor=None) -> CtxData:
+        batch_size = hidden_state.shape[0]
         if user_ids is None:
-            user_ids = th.zeros((batch_size,), dtype=th.long, device=grounding.device)
+            user_ids = th.zeros((batch_size,), dtype=th.long, device=hidden_state.device)
         else:
-            user_ids = user_ids.to(device=grounding.device, dtype=th.long).view(-1)
+            user_ids = user_ids.to(device=hidden_state.device, dtype=th.long).view(-1)
             if user_ids.numel() != batch_size:
                 raise ValueError(
                     f"USER_ID batch size mismatch: expected {batch_size}, got {user_ids.numel()}."
                 )
-        user_ids = th.clamp(user_ids, min=0, max=self.num_contexts - 1)
+        assert user_ids.shape == (batch_size,), f"Expected user_ids shape {(batch_size,)}, got {user_ids.shape}."
         log_probs = th.log_softmax(self.user_id_to_vs_weights, dim=1)
         vs_logprobs = log_probs[user_ids]
-        vs_predicted = th.softmax(self.user_id_to_vs_weights[user_ids], dim=1)
+        
         assignments = user_ids
         context_features = hidden_state if hidden_state is not None else th.zeros(
-            (batch_size, 1), dtype=grounding.dtype, device=grounding.device
+            (batch_size, 1), dtype=hidden_state.dtype, device=hidden_state.device
         )
         ctx_data = CtxData(
             context_features=context_features,
@@ -681,12 +677,27 @@ class UserIdCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
             vs_logprobs=vs_logprobs,
             vs_assignments=assignments,
             ctx_assignments=assignments,
-            vs_predicted=vs_predicted,
             ctx_predicted=assignments,
             log_vs_possibilities=log_probs,
             ctx_possibilities=log_probs,
         )
-        return vs_predicted, {"ctx": ctx_data.to_dict()}
+        return ctx_data
+
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, user_ids: th.Tensor=None, **kwargs) -> Tuple[th.Tensor, CtxData]:
+        print("USER ID SHAPE", user_ids.shape, "HIDDEN SHAPE", hidden_state.shape)
+        print(self.user_id_to_vs_weights.shape)
+        
+        vs_predicted = th.softmax(self.user_id_to_vs_weights[user_ids], dim=-1)
+        assert vs_predicted.shape == (len(hidden_state), self.num_values), f"WHAT THE: {vs_predicted.shape} vs {len(hidden_state)} x {self.num_values}"
+
+        context_data = CtxData.from_previous(context_data, vs_predicted=vs_predicted)
+        
+        return vs_predicted, context_data
+
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData, user_ids: th.Tensor = None, **kwargs) -> Tuple[th.Tensor, CtxData]:
+        return self.value_system_from_context_train(hidden_state, context_data, user_ids=user_ids, **kwargs)
+
+    
 
 
 class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
@@ -795,7 +806,7 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         
 
     
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         
         if self.detach_vs_selection_for_value_system_weight_training:
             vs_logprobs = context_data.vs_logprobs.detach()
@@ -840,11 +851,11 @@ class BasicCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
                                               ctx_predicted = context_data.ctx_assignments)
         return vs_predicted, enriched_data
     
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         
         with th.no_grad():
             if self.smooth_evaluation:
-                return self.value_system_from_context_train(hidden_state, context_data)
+                return self.value_system_from_context_train(hidden_state, context_data, **kwargs)
             else:
                 vs_assignments = context_data.vs_assignments
                 vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
@@ -864,7 +875,7 @@ class BasicHarshCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
         super().__init__(*args, input_shape=input_shape, num_contexts=num_contexts, num_value_systems=num_value_systems, num_values=num_values, ctx_hidden_sizes=ctx_hidden_sizes, ctx_intermediate_activation=ctx_intermediate_activation, detach_vs_selection_for_value_system_weight_training=detach_vs_selection_for_value_system_weight_training, dropout=dropout, device=device, dtype=dtype, weight_initialization=weight_initialization, args_for_ctx_probabilities=args_for_ctx_probabilities, smooth_evaluation=False, **kwargs)
     def context_parameters(self) -> Iterable[nn.Parameter]:
         return [ ]#.extend([*super().context_parameters()])
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         context_logprobs = self.context_logits(hidden_state)
         vs_assignments = random_argmax(context_logprobs, dim=1)
         vs_predicted = th.softmax(self.vs_selection_to_logit_vsweights_matrix[vs_assignments], dim=1)
@@ -897,10 +908,10 @@ class DirectVSCtxDependentAlignmentLayer(BasicCtxDependentAlignmentLayer):
             th.as_tensor(fixed_value_systems, dtype=dtype or th.float32, device=device),
         )
 
-    def value_system_from_context_train(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
+    def value_system_from_context_train(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
         return context_data.vs_predicted, context_data
-    def value_system_from_context_eval(self, hidden_state, context_data: CtxData) -> Tuple[th.Tensor, CtxData]:
-        return self.value_system_from_context_train(hidden_state, context_data)
+    def value_system_from_context_eval(self, hidden_state, context_data: CtxData, **kwargs) -> Tuple[th.Tensor, CtxData]:
+        return self.value_system_from_context_train(hidden_state, context_data, **kwargs)
     def value_system_parameters(self) -> Iterable[nn.Parameter]:
         return self.log_vs_prediction.parameters()
     def context_parameters(self) -> Iterable[nn.Parameter]:
@@ -1477,6 +1488,7 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
         with th.no_grad():
             
             discordance = th.full_like(logits, fill_value=0.0)
+            print("SHAPES??", logits.shape, target_probs.shape, discordance.shape)
             discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
             discordance = discordance.masked_fill(target_probs > 0.5, discordance_epsilon)
             if missing_mask is not None:
@@ -2832,6 +2844,7 @@ class MORMForClassification(PreTrainedModel):
                 config.num_values, 1, device=device, dtype=dtype)
         elif ContextImplementations(config.context_implementation) == ContextImplementations.USER_ID:
             num_users = len(config.user_id_to_index) - 1 if config.user_id_to_index else 0
+            
             return UserIdCtxDependentAlignmentLayer(
                 num_users=num_users,
                 num_values=config.num_values,
@@ -3124,6 +3137,9 @@ class MORMForClassification(PreTrainedModel):
             all_rewards = th.cat([rewards, vs_reward], dim=-1)
         else:
             all_rewards = rewards
+        
+        assert all_rewards.shape[-1] == self.num_values + 1, f"Shape: {all_rewards.shape}"
+        print("ALL REWARDS SHAPE", all_rewards.shape, self.num_values)
         return all_rewards, other
     
     def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:

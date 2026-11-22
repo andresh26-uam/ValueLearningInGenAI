@@ -60,11 +60,12 @@ def _build_context(completion: dict[str, Any], user: dict[str, Any]) -> str:
 
 def _build_pair_row(completion_a: dict[str, Any], completion_b: dict[str, Any], user) -> dict[str, Any]:
     assert completion_a.get("user_id") == completion_b.get("user_id"), "User IDs do not match"
+    
     return {
         "conversation_id1": completion_a.get("conversation_id"),
         "conversation_id2": completion_b.get("conversation_id"),
         "prompt1": f"{completion_a.get("opening_prompt")}",
-        "prompt2": f"{completion_a.get("opening_prompt")}",
+        "prompt2": f"{completion_b.get("opening_prompt")}",
         "context": _build_context(completion_b, user),
         "balanced1": completion_a.get("included_in_balanced_subset"),
         "balanced2": completion_b.get("included_in_balanced_subset"),
@@ -79,8 +80,8 @@ def _build_pair_row(completion_a: dict[str, Any], completion_b: dict[str, Any], 
         "provider2": completion_b.get("model_provider"),
         "score1": completion_a.get("score"),
         "score2": completion_b.get("score"),
-        "value_values_1": _extract_rating(completion_a, "values"),
-        "value_values_2": _extract_rating(completion_b, "values"),
+        "value_alignment_1": _extract_rating(completion_a, "values"),
+        "value_alignment_2": _extract_rating(completion_b, "values"),
         "value_fluency_1": _extract_rating(completion_a, "fluency"),
         "value_fluency_2": _extract_rating(completion_b, "fluency"),
         "value_factuality_1": _extract_rating(completion_a, "factuality"),

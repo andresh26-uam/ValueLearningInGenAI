@@ -37,10 +37,17 @@ def tokenize_sample(sample: dict, tokenizer: Any, value_keys: list, delete_other
     keep_keys = ["option1", "option2", "input_ids_1", "attention_mask_1", "input_ids_2", "attention_mask_2", "labels"]
     if extra_keep_keys:
         keep_keys.extend(extra_keep_keys)
-    sample['option1'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
-    sample['option2'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
-        [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
+    if "prompt" not in sample.keys() and "prompt1" in sample.keys():
+        sample['option1'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+                    [{'role': 'user', 'content': sample['prompt1']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
+        sample['option2'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+            [{'role': 'user', 'content': sample['prompt2']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
+    
+    else:
+        sample['option1'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+            [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response1']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
+        sample['option2'] = maybe_strip_bos_token(tokenizer.apply_chat_template(
+            [{'role': 'user', 'content': sample['prompt']}, {'role': 'assistant', 'content': sample['response2']}], tokenize=False, add_generation_prompt=False), tokenizer.bos_token)
     if use_context:
         if sample.get("context", None) is not None:
             ctx = sample['context']
@@ -123,8 +130,10 @@ def embed_sample(sample: dict, model: AutoModelForCausalLM, tokenizer: AutoToken
         return sample
 
 def check_format(dataset: DatasetDict) -> None:
-    required_keys = {"prompt", "response1", "response2", "score1", "score2"}
+    required_keys = {"response1", "response2", "score1", "score2"}
     for split_name, split_dataset in dataset.items():
+        if "prompt" not in split_dataset.column_names and not ("prompt1" in split_dataset.column_names and "prompt2" in split_dataset.column_names):
+            raise ValueError(f"Dataset split '{split_name}' is missing required key 'prompt' or 'prompt1'/'prompt2'. Found keys: {split_dataset.column_names}")
         for key in required_keys:
             if key not in split_dataset.column_names:
                 raise ValueError(f"Dataset split '{split_name}' is missing required key '{key}'. Found keys: {split_dataset.column_names}")
@@ -221,7 +230,8 @@ class BasePairwisePreferenceDataset():
         
         if self.data[0].get("labels") is None:
             print("Adding labels and tokens to dataset")
-            print(pp_kwargs)
+            print( "PP KWARGS", pp_kwargs)
+            print("COLS", self.data.column_names)
             self.data: DatasetDict = self.data.map(lambda x: self.postprocessor_method(x, value_keys=self.value_keys, delete_other_keys=True, extra_keep_keys=extra_keep_keys, use_context=use_context, **pp_kwargs), 
                                                    num_proc=16, 
                                                    load_from_cache_file=not repostprocess)
@@ -239,12 +249,7 @@ class BasePairwisePreferenceDataset():
                 self.data = save_dataset(self.data, postprocessed_dataset_output_path)
             
         data_pre = load_from_disk(preprocessed_dataset_path)
-        for c in self.data.column_names:
-            if c in data_pre.column_names:
-                assert str(self.data.select([0,-1]).get(c)) == str(data_pre.select([0,-1]).get(c)), f"Column '{c}' in postprocessed dataset does not match preprocessed dataset: {self.data.select([0,-1]).get(c)} vs {data_pre.select([0,-1]).get(c)}"
-            else:
-                print(f"WARNING: Column '{c}' in postprocessed dataset not found in preprocessed dataset. This may be expected if the column was added during postprocessing.")
-
+        
     
         for col in extra_keep_keys:
             if (col not in self.data.column_names) and col in data_pre.column_names:
@@ -254,8 +259,9 @@ class BasePairwisePreferenceDataset():
                 print("COLUMNAS", self.data.column_names)
                 
                 assert col in data_pre.column_names, f"Extra keep key '{col}' not found in preprocessed dataset columns: {data_pre.column_names}"
+        
         self.data = save_dataset(self.data, postprocessed_dataset_output_path)
-
+        
         assert "user_id" in self.data.column_names
         
         self.postprocessor_method_after_save()
@@ -292,8 +298,8 @@ class BasePairwisePreferenceDataset():
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
 
-        print("DATO NUEVO?? 2", self.train_dataset["user_id"][0])
-        print("COLUMNAS", self.train_dataset.column_names)
+        #print("NEW DATA", self.train_dataset["user_id"][0])
+        #print("COLUMNS", self.train_dataset.column_names)
         
         #self.train_dataset = self.train_dataset.select(range(min(len(self.train_dataset), 200)))
         #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
@@ -302,7 +308,9 @@ class BasePairwisePreferenceDataset():
         
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=24, num_proc=4):
-        
+
+        test = self.feature_extractor_method(self.data.select(list(range(batch_size)), use_context=use_context, device=th.device("cpu"), **fe_kwargs))
+        print("TESTING FEATURE EXTRACTION ON FIRST BATCH", test[0].keys())
         self.data = self.data.map(
                             lambda x: self.feature_extractor_method(x, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
