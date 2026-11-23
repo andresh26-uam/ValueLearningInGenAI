@@ -1,8 +1,8 @@
 #!/bin/bash
 
 
-GPUS="L40S:1"
-CPU=True
+GPUS="H100:1"
+CPU=False
 DO_TRAIN=True
 
 CONFIG="run_configs/smol_ctx_linear_baseline_user_id.json"
@@ -117,12 +117,12 @@ DOINIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("d
 CTX_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("ctx_coefficient", 0.0))' "$CONFIG")
 VS_COEFF=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_selection_coefficient", 0.0))' "$CONFIG")
 DIRCVS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("direct_context_to_vs_relation", False))' "$CONFIG")
-LAMBDA=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vae_lambda_clustering", 0.0))' "$CONFIG")
-TEMP=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vae_initial_temperature", 0.0))' "$CONFIG")
-SENTENCE_TRANS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("use_sentence_transformer", False))' "$CONFIG")
+LAMBDA=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vae_lambda_clustering", 1.0))' "$CONFIG")
+TEMP=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vae_initial_temperature", 1.0))' "$CONFIG")
+SENTENCE_TRANS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("use_sentence_transformer", True))' "$CONFIG")
 DOINIT_VS=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("do_vs_initialization", False))' "$CONFIG")
 NORM=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("layer_normalization", "none"))' "$CONFIG")
-VS_WEIGHT_INIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_weight_initialization", "dirichlet"))' "$CONFIG")
+VS_WEIGHT_INIT=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get("vs_weight_initialization", "equal"))' "$CONFIG")
 
 SCRIPT_PYTHON="vsl-rm/no_context_vsl.py"
 
@@ -204,14 +204,31 @@ elif [[ "$CONFIG" == *"smol_ctx_linear.json"* ]]; then
   NAME=SmolCtxVSLRMv17_AEDET
 elif [[ "$CONFIG" == *"smol_ctx_linear_ae_kmeans.json"* ]]; then
   NAME=SmolCtxVSLRMv18_AE
+elif [[ "$CONFIG" == *"llama_ctx_linear_ae_kmeans.json"* ]]; then
+  NAME=LlamaCtxV18_AE
 elif [[ "$CONFIG" == *"smol_ctx_linear_gmm_and_classifier.json"* ]]; then
   NAME=SmolCtxVSLRMv17_GMMC
+elif [[ "$CONFIG" == *"llama_ctx_linear_gmm_and_classifier.json"* ]]; then
+  NAME=LlamaCtxV18_GMMC
+elif [[ "$CONFIG" == *"smol_ctx_linear_baseline_directvs.json"* ]]; then
+  NAME=SmolCtxVSLRMv18_DIRECTVS
+elif [[ "$CONFIG" == *"llama_ctx_linear_baseline_directvs.json"* ]]; then
+  NAME=LlamaCtxV18_DIRECTVS
 elif [[ "$CONFIG" == *"smol_ctx_linear_baseline.json"* ]]; then
-  NAME=SmolCtxVSLRMv17_DIRECTVS
+  NAME=SmolCtxVSLRMv18_NC
+elif [[ "$CONFIG" == *"llama_ctx_linear_baseline.json"* ]]; then
+  NAME=LlamaCtxV18_NC
 elif [[ "$CONFIG" == *"smol_ctx_linear_baseline_smooth.json"* ]]; then
   NAME=SmolCtxVSLRMv18_BS
+elif [[ "$CONFIG" == *"llama_ctx_linear_baseline_smooth.json"* ]]; then
+  NAME=LlamaCtxV18_BS
+elif [[ "$CONFIG" == *"smol_ctx_linear_baseline_user_id.json"* ]]; then
+  NAME=Smol_USERID
+elif [[ "$CONFIG" == *"llama_ctx_linear_baseline_user_id.json"* ]]; then
+  NAME=Llama_USERID
 else
-  NAME=test
+  echo "Unknown config file: $CONFIG"
+  exit 1
 fi
 
 NAME="${NAME}_ST_${SENTENCE_TRANS}_${CTX_IMPLEMENTATION}_INITVS_${VS_WEIGHT_INIT}_INITCTX_${DOINIT}_INITVSGR_${DOINIT_VS}_VS_${VS_COEFF}_CTX_${CTX_COEFF}_TM_${TEMP}_LC_${LAMBDA}_NORM_${NORM}_DIRCVS_${DIRCVS}"

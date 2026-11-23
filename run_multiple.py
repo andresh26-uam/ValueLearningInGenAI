@@ -12,13 +12,13 @@ from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
 # SET CPU IN RUN_SEEDS.SH!!!!
-GPUS="L40S:1"
+GPUS="H100:1"
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
 DATASET = "oasst"
-BASE_CONFIG = "run_configs/smol_ctx_linear_baseline_smooth.json"
-MAX_SIMULTANEOUS_RUNS = 4 # 18 no.
-N_SEEDS_PER_RUN = 4
-MODEL_ALIAS = "smol"
+BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
+MAX_SIMULTANEOUS_RUNS = 2 # 18 no.
+N_SEEDS_PER_RUN = 1
+MODEL_ALIAS = "llama"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
@@ -34,20 +34,23 @@ elif DATASET == "ultra":
 elif DATASET == "oasst":
     NUM_VALUES = 7
     NUM_TRAIN_EPOCHS = [75]
+elif DATASET == "prism":
+    NUM_VALUES = 7
+    NUM_TRAIN_EPOCHS = [50]
 else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001,0.0003],
-    "C1_grounding_learning_rate": [0.0001,0.0003],
-    "C1_context_learning_rate": [0.0001,0.0003],
+    "C1_learning_rate": [0.0001, 0.0003],
+    "C1_grounding_learning_rate": [0.0001, 0.0003],
+    "C1_context_learning_rate": [0.0001, 0.0003],
     "weight_decay": [0.0, 0.001],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [0.0],
+    "ctx_coefficient": [1.0],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [0.0],
+    "vae_orthogonality_coefficient": [0.0, 1.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],

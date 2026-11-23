@@ -348,7 +348,7 @@ class AbstractCtxDependentAlignmentLayer(AlignmentLayer):
         return {}
     
     def forward(self, grounding: th.Tensor, hidden_state: th.Tensor, *args, **kwargs) -> Tuple[th.Tensor, Dict]:
-        print("FORWARDING WITH GROUNDING SHAPE" , kwargs)
+        #print("FORWARDING WITH GROUNDING SHAPE" , kwargs)
         vs_weights, ctx_data = self.value_system_from_context(hidden_state, **self.vs_extra_kwargs(kwargs))
         if __debug__:
             if ctx_data.vs_assignments is not None:
@@ -1488,7 +1488,7 @@ def grounding_loss_logits(logits_p: th.Tensor, target_probs_p: th.Tensor, rew_su
         with th.no_grad():
             
             discordance = th.full_like(logits, fill_value=0.0)
-            print("SHAPES??", logits.shape, target_probs.shape, discordance.shape)
+            #print("SHAPES??", logits.shape, target_probs.shape, discordance.shape)
             discordance = discordance.masked_fill(target_probs < 0.5, -discordance_epsilon)
             discordance = discordance.masked_fill(target_probs > 0.5, discordance_epsilon)
             if missing_mask is not None:
@@ -3139,7 +3139,7 @@ class MORMForClassification(PreTrainedModel):
             all_rewards = rewards
         
         assert all_rewards.shape[-1] == self.num_values + 1, f"Shape: {all_rewards.shape}"
-        print("ALL REWARDS SHAPE", all_rewards.shape, self.num_values)
+        #print("ALL REWARDS SHAPE", all_rewards.shape, self.num_values)
         return all_rewards, other
     
     def parameters(self, recurse: bool = True) -> Iterator[th.nn.Parameter]:

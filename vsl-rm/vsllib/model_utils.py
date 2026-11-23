@@ -1352,16 +1352,21 @@ class CustomVAE(VAE):
                 hidden_state = hidden_state["data"]
             else:
                 to_basic = {"data": hidden_state}
+
+            print("HIDDEN STATE?", hidden_state.shape, th.norm(hidden_state))
+            assert hidden_state.isnan().sum() == 0, "Hidden state contains NaN values"
             model_output = self.forward_basic(to_basic)
             z = model_output["z"]
             mu = model_output["mu"]
             log_var = model_output["log_var"]
+            assert z.isnan().sum() == 0, "Latent representation z contains NaN values"
                     #prob_z = gaussian_prob(z, mu, log_var).detach()
                     #assert prob_z.shape==(z.shape[0],)
     
             assert z.shape[1] == self.latent_centroids.shape[1]
                                     
             ucentroids = self.latent_centroids.unsqueeze(0)
+            assert ucentroids.isnan().sum() == 0, "Latent centroids contain NaN values"
             zrepresentation = z.unsqueeze(1)
                     
             #context_logit_detached_repr = self.similarity(zrepresentation.detach(), ucentroids, dim=2)
@@ -1373,7 +1378,7 @@ class CustomVAE(VAE):
             #print(self.similarity(z[0], self.latent_centroids[1], dim=0), context_logit[0][1])
             #print("CONTEXT LOGIT", context_logit[0:5], context_logit[0][0])
             #print("Similarity check", self.similarity(z[0], self.latent_centroids[0], dim=0), context_logit[0][0])
-            assert th.allclose(context_logit[1][4], self.similarity(z[1], self.latent_centroids[4], dim=0))
+            assert th.allclose(context_logit[1][-1], self.similarity(z[1], self.latent_centroids[-1], dim=0))
             assert context_logit.shape == (hidden_state.shape[0], self.num_contexts)
                     #per_component_logprob = per_component_logprob/th.max(th.abs(per_component_logprob))
                     #SOFT: context_logprobs = th.log_softmax(per_component_logprob, dim=1) + component_logprobs
@@ -1615,6 +1620,7 @@ class CustomVAE(VAE):
                 recon_x = self.decoder(z)["reconstruction"]
         
                 loss, recon_loss, kld, loss_unreduced = self.loss_function_unreduced(recon_x, x, mu, log_var, z)
+                assert loss.isnan().sum() == 0, "Loss contains NaN values"
                 loss_total = loss + loss_total
                 recon_loss_total = recon_loss + recon_loss_total
                 kld_total = kld + kld_total

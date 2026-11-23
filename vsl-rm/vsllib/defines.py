@@ -161,6 +161,7 @@ VALUES_OASST = ["quality", "nontoxicity", "humor", "helpfulness", "creativity", 
 VALUES_OASST_ORIG = ["quality", "toxicity", "humor", "helpfulness", "creativity", "violence", "not_appropriate"]
 
 VALUES_APOLLO = ["Cost_Efficiency", "Time_Efficienccy", "Comfort"]
+VALUES_PRISM = ["Alignment", "Fluency", "Factuality", "Safety", "Diversity", "Creativity", "Helpfulness"]
 
 ATTRIBUTES_ARMO_RM_INDEX_ULTRA = [9,8,7,6]
 #ATTRIBUTES_ARMO_RM_INDEX_HELPSTEER = [0,1,2,3,4]

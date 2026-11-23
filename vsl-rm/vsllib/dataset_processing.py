@@ -262,7 +262,7 @@ class BasePairwisePreferenceDataset():
         
         self.data = save_dataset(self.data, postprocessed_dataset_output_path)
         
-        assert "user_id" in self.data.column_names
+        #assert "user_id" in self.data.column_names
         
         self.postprocessor_method_after_save()
         
@@ -307,10 +307,10 @@ class BasePairwisePreferenceDataset():
         self.get_all_contexts_embeddings()
         
 
-    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=24, num_proc=4):
+    def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=12, num_proc=4):
 
-        test = self.feature_extractor_method(self.data.select(list(range(batch_size)), use_context=use_context, device=th.device("cpu"), **fe_kwargs))
-        print("TESTING FEATURE EXTRACTION ON FIRST BATCH", test[0].keys())
+        #test = self.feature_extractor_method(np.array([self.data.select([0,1])[0], self.data.select([0,1])[1]]), use_context=use_context, device=th.device("cpu"), **fe_kwargs)
+        #print("TESTING FEATURE EXTRACTION ON FIRST BATCH", test[0].keys())
         self.data = self.data.map(
                             lambda x: self.feature_extractor_method(x, use_context=use_context, device=th.device("cpu"), **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
@@ -449,7 +449,7 @@ class FeatureBasedPreferenceDataset(BasePairwisePreferenceDataset):
 class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
     
 
-    def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=24, num_proc=4):
+    def calculate_features(self, recalculate_features: bool, use_context: bool, fe_kwargs: dict, batch_size=12, num_proc=2):
         model_reference = fe_kwargs.pop("model_reference")
         model_reference = model_reference.cpu()
 
@@ -498,7 +498,7 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
             self.data = concatenate_datasets(mapped_shards)
         elif th.cuda.is_available():
             print("Embedding dataset on single GPU")
-            model_reference = model_reference.to(th.device("cuda"))
+            model_reference = model_reference.to(device=th.device("cuda"))
             if sentence_transformer is not None:
                 sentence_transformer = sentence_transformer.to(th.device("cuda"))
                 sentence_transformer.eval()
@@ -507,6 +507,10 @@ class PairwisePreferenceDataset(BasePairwisePreferenceDataset):
                 fe_kwargs["sentence_transformer"] = None
 
             model_reference.eval()
+            #print("TEST EMBEDDING:")
+            #print(self.data.select([0]), "selected")
+            #print(self.feature_extractor_method(np.asarray([self.data.select([0,1])[0], self.data.select([0,1])[1]]), model_reference, use_context=use_context, device=th.device("cuda"), **fe_kwargs))
+            #print("Done")
             self.data = self.data.map(
                             lambda x: self.feature_extractor_method(x, model_reference, use_context=use_context, device=th.device("cuda"), **fe_kwargs),
                             load_from_cache_file=not recalculate_features,
