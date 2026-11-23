@@ -5,8 +5,8 @@ GPUS="H100:1"
 CPU=False
 DO_TRAIN=True
 
-CONFIG="run_configs/smol_ctx_linear_baseline_user_id.json"
-DATASET="prism"
+CONFIG="run_configs/smol_ctx_linear_baseline.json"
+DATASET="ultra"
 DISCORDANCE_EPSILON=""
 NUM_TRAIN_EPOCHS_OVERRIDE=""
 SEEDS=(44)
@@ -158,7 +158,7 @@ elif [[ "$DATASET" == "oasst" ]]; then
   DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_False_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_RUN_1_1016_162211_epo75_s102"
   NUM_TRAIN_EPOCHS=75
 elif [[ "$DATASET" == "prism" ]]; then
-  [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.1
+  [[ -n "$DISCORDANCE_EPSILON" ]] || DISCORDANCE_EPSILON=0.01
   training_initialization_data_size=5000
   #KNLPMEANS_BASELINE="oasst_test_ST_True_KMEANS_THEN_VS_INITVS_equal_INITCTX_False_INITVSGR_True_VS_0.0_CTX_0.0_TM_1.0_LC_1.0_NORM_BatchNorm_DIRCVS_True_RUN_5_1017_162413_epo75_s1730"
   #DIRECT_VS_BASELINE="oasst_test_ST_True_DIRECT_VS_INITVS_equal_INITCTX_False_INITVSGR_True_VS_0.0_CTX_0.0_TM_0.0_LC_0.0_NORM_BatchNorm_DIRCVS_False_RUN_1_1016_162211_epo75_s102"

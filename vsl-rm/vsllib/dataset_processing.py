@@ -298,13 +298,13 @@ class BasePairwisePreferenceDataset():
             print(f"Eval dataset size: {len(self.eval_dataset)}")
             print(f"Test dataset size: {len(self.test_dataset)}")
 
-        #print("NEW DATA", self.train_dataset["user_id"][0])
-        #print("COLUMNS", self.train_dataset.column_names)
+        print("NEW DATA", self.train_dataset.select([0]))
+        print("COLUMNS", self.train_dataset.column_names)
         
         #self.train_dataset = self.train_dataset.select(range(min(len(self.train_dataset), 200)))
         #self.test_dataset = self.test_dataset.select(range(min(len(self.train_dataset), 50)))
         #self.eval_dataset = self.eval_dataset.select(range(min(len(self.train_dataset), 50)))
-        self.get_all_contexts_embeddings()
+        #self.get_all_contexts_embeddings()
         
 
     def calculate_features(self, recalculate_features, use_context, fe_kwargs, batch_size=12, num_proc=4):
