@@ -47,11 +47,11 @@
 
     "rew_center_coefficient": 0.001,
     
-    "learning_rate": 0.0003,
-    "grounding_learning_rate": 0.0003,
-    "context_learning_rate": 0.0003,
+    "learning_rate": 0.0001,
+    "grounding_learning_rate": 0.0001,
+    "context_learning_rate": 0.0001,
     "lagrange_learning_rate": 0.05,
-    "grounding_loss_tendency_update_ratio": 0.1,
+    "grounding_loss_tendency_update_ratio": 0.01,
     "max_grad_norm": 10.0,
     "use_metrics_or_losses_for_lagrange_updates": "losses",
     "use_exponential_moving_average_or_optimum_targets": "optimum",
