@@ -14,9 +14,9 @@ from pathlib import Path
 # SET CPU IN RUN_SEEDS.SH!!!!
 GPUS="H100:1"
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
-DATASET = "oasst"
+DATASET = "ultra"
 BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 2 # 18 no.
+MAX_SIMULTANEOUS_RUNS = 1 # 18 no.
 N_SEEDS_PER_RUN = 1
 MODEL_ALIAS = "llama"
 
@@ -48,13 +48,13 @@ ARGS_TO_CHANGE = {
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [1.0],
+    "ctx_coefficient": [0.0],
     "ctx_chr_coefficient": [0.0],
-    "vae_orthogonality_coefficient": [0.0, 1.0],
+    "do_initialization": [True, False],
+    "vae_orthogonality_coefficient": [0.0],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "do_initialization": [False,True],
     "vae_latent_dim": [128],
     "C2_max_contexts": [20],
     "C2_max_value_systems": [20]
