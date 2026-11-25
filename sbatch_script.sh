@@ -9,6 +9,16 @@
 #SBATCH --time=100:00:00
 set -euo pipefail
 
+if [[ "${1:-}" == "--parallel-script" ]]; then
+	if [[ $# -ne 2 || ! -f "$2" ]]; then
+		echo "Usage: sbatch --gpus=L40S:2 sbatch_script.sh --parallel-script <script>" >&2
+		exit 2
+	fi
+	echo "Running parallel jobs in Slurm allocation: $2"
+	bash "$2"
+	exit $?
+fi
+
 if [[ $# -lt 1 ]]; then
 	echo "Usage: sbatch --gpus=L40S:2 sbatch_script.sh <train_script.py> [script args ...]" >&2
 	exit 2

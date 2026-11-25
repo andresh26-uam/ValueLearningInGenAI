@@ -39,4 +39,8 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-sbatch --wait --gpus="$gpu_request" sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
+if [[ "${RUN_IN_CURRENT_ALLOCATION:-0}" == "1" ]]; then
+    bash sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
+else
+    sbatch --wait --gpus="$gpu_request" sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
+fi

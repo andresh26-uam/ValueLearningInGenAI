@@ -129,6 +129,10 @@ def main_fun(script_args: ScriptArguments, training_args, tokenizer=None) -> Non
         print("Dataset value keys: ", dataset.value_keys,
             "\n Total number of values: ", num_values_to_use)
     
+    dataset_ready_file = os.environ.get("RUN_MULTIPLE_DATASET_READY_FILE")
+    if dataset_ready_file and is_main_accelerate_process:
+        Path(dataset_ready_file).write_text("ready\n", encoding="utf-8")
+
     if script_args.do_train:
         if script_args.use_frozen_base_model:
             reward_heads_module_name = REWARD_HEADS_OUTPUT.get(

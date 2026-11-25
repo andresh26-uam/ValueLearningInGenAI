@@ -220,7 +220,7 @@ class BasePairwisePreferenceDataset():
             print("KEYS?", self.data[0].keys())
             print("RECALCULATING EMBEDDINGS WITH MODEL")
             recalculate_features = True
-
+            exit(1)
         # Extract value keys from the first data item
         if self.data:
             self.value_keys = [key for key in self.data[0].keys() if key.startswith("value_") and key.endswith("_1")]
@@ -250,17 +250,18 @@ class BasePairwisePreferenceDataset():
             
         data_pre = load_from_disk(preprocessed_dataset_path)
         
-    
+        new_data = False
         for col in extra_keep_keys:
             if (col not in self.data.column_names) and col in data_pre.column_names:
                 print(f"ADDING {col} to dataset from preprocessed dataset")
                 self.data = self.data.add_column(col, data_pre[col])
                 print("DATO NUEVO??", self.data[col][0])
                 print("COLUMNAS", self.data.column_names)
-                
+                new_data = True
                 assert col in data_pre.column_names, f"Extra keep key '{col}' not found in preprocessed dataset columns: {data_pre.column_names}"
         
-        self.data = save_dataset(self.data, postprocessed_dataset_output_path)
+        if recalculate_features or new_data:
+            self.data = save_dataset(self.data, postprocessed_dataset_output_path)
         
         #assert "user_id" in self.data.column_names
         

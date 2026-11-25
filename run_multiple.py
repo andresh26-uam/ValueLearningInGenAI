@@ -5,6 +5,7 @@ import itertools
 import json
 import math
 import secrets
+import shlex
 import subprocess
 import tempfile
 import traceback
@@ -12,15 +13,64 @@ from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
 # SET CPU IN RUN_SEEDS.SH!!!!
-GPUS="H100:1"
+GPUS="L40S:1"
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
 DATASET = "ultra"
 BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 1 # 18 no.
+MAX_SIMULTANEOUS_RUNS = 4
 N_SEEDS_PER_RUN = 1
 MODEL_ALIAS = "llama"
+DISCORDANCE_EPSILON = "use_default"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
+
+
+def _write_parallel_script(path, commands):
+    dataset_ready_file = path.with_suffix(".dataset-ready")
+    leader_finished_file = path.with_suffix(".leader-finished")
+    quoted_ready_file = shlex.quote(str(dataset_ready_file))
+    quoted_finished_file = shlex.quote(str(leader_finished_file))
+    lines = [
+        "#!/usr/bin/env bash",
+        "set -uo pipefail",
+        "export RUN_IN_CURRENT_ALLOCATION=1",
+        "pids=()",
+        "(",
+        f"  RUN_MULTIPLE_DATASET_READY_FILE={quoted_ready_file} "
+        f"{shlex.join(commands[0][3])}",
+        "  status=$?",
+        f"  touch {quoted_finished_file}",
+        '  exit "$status"',
+        ") &",
+        'leader_pid=$!',
+        'pids+=("$leader_pid")',
+        f"while [[ ! -e {quoted_ready_file} && ! -e {quoted_finished_file} ]]; do",
+        "  sleep 1",
+        "done",
+        f"if [[ ! -e {quoted_ready_file} ]]; then",
+        '  if wait "$leader_pid"; then',
+        '    echo "First run exited before shared dataset initialization completed" >&2',
+        "    exit 1",
+        "  else",
+        '    exit "$?"',
+        "  fi",
+        "fi",
+    ]
+    for _, _, _, command in commands[1:]:
+        lines.extend([f"{shlex.join(command)} &", 'pids+=("$!")'])
+    lines.extend(
+        [
+            "status=0",
+            'for pid in "${pids[@]}"; do',
+            '  if ! wait "$pid"; then',
+            "    status=1",
+            "  fi",
+            "done",
+            "exit \"$status\"",
+        ]
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
 
 print(f"Running sweep for dataset:\n {DATASET}\nbase config:\n {BASE_CONFIG}\nmodel alias: \n {MODEL_ALIAS}")
 assert MODEL_ALIAS in {"llama", "smol"}
@@ -44,35 +94,35 @@ ARGS_TO_CHANGE = {
     "C1_learning_rate": [0.0001],
     "C1_grounding_learning_rate": [0.0001],
     "C1_context_learning_rate": [0.0001],
-    "weight_decay": [0.0, 0.001],
+    "weight_decay": [0.001],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [0.1, 1.0, 50.0,],
+    "ctx_coefficient": [0.1,10.0,50.0],
     "ctx_chr_coefficient": [0.0],
     "do_initialization": [False, True],
-    "vae_orthogonality_coefficient": [0.0, 1.0, 10.0],
-    "detach_context_selection_for_value_system_selection": [True, False],
+    "vae_orthogonality_coefficient": [1.0, 10.0],
+    "detach_context_selection_for_value_system_selection": [False, True],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
-    "grounding_loss_tendency_update_ratio": [0.1, 0.01],
-    "vae_latent_dim": [16, 128],
-    "C2_max_contexts": [10],
-    "C2_max_value_systems": [10]
+    "grounding_loss_tendency_update_ratio": [0.1,0.01],
+    "vae_latent_dim": [128],
+    "C2_max_contexts": [3,10],
+    "C2_max_value_systems": [3,10]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
 #DISCORDANCE_EPSILON = ["use_default", 0.0, 0.01]
 #DISCORDANCE_EPSILON = [0.1,0.003]
-DISCORDANCE_EPSILON = ["use_default"]
+
 
 
 AVOID_COMBINATIONS = [
     {"ctx_coefficient": 50.0, "do_initialization": False},
     {"ctx_coefficient": 1.0, "vae_orthogonality_coefficient": 1.0, "max_contexts": 10},
 
-    {"final_layer_activation": "Tanh", "discordance_epsilon": "use_default"},
+    {"final_layer_activation": "Tanh",},
 ]
 def _split_coupled_arguments(arguments):
     groups = {}
@@ -130,7 +180,9 @@ def main():
     with base_path.open(encoding="utf-8") as config_file:
         base_config = json.load(config_file)
 
-    with tempfile.TemporaryDirectory(prefix="run_multiple_") as temporary_directory:
+    with tempfile.TemporaryDirectory(
+        prefix="run_multiple_", dir=Path(__file__).resolve().parent
+    ) as temporary_directory:
         temporary_directory = Path(temporary_directory)
         config_stem = base_path.stem
         commands = []
@@ -140,35 +192,37 @@ def main():
                 json.dump(config, config_file, indent=2)
                 config_file.write("\n")
 
-            for epsilon in DISCORDANCE_EPSILON:
-                for num_train_epochs in NUM_TRAIN_EPOCHS:
-                    run_config = {**config, "discordance_epsilon": epsilon}
-                    if _is_avoided(run_config):
-                        continue
-                    run_number = len(commands) + 1
-                    seeds = [secrets.randbelow(2000) for s in range(N_SEEDS_PER_RUN)]
-                    command = [
-                        "bash",
-                        "run_seeds.sh",
-                        "--config",
-                        str(config_path),
-                        "--dataset",
-                        DATASET,
-                        "--gpus",
-                        GPUS,
-                        "--model",
-                        MODEL_ALIAS,
-                        "--num_train_epochs",
-                        str(num_train_epochs),
-                        "--seed",
-                        *map(str, seeds),
-                        "--run_index",
-                        str(run_number),
-                        "--skip_compare_checkpoints",
-                    ]
-                    if epsilon != "use_default":
-                        command.extend(["--discordance_epsilon", str(epsilon)])
-                    commands.append((index, epsilon, num_train_epochs, command))
+            epsilon = DISCORDANCE_EPSILON
+            for num_train_epochs in NUM_TRAIN_EPOCHS:
+                run_config = {**config, "discordance_epsilon": epsilon}
+                if _is_avoided(run_config):
+                    continue
+                run_number = len(commands) + 1
+                seeds = [secrets.randbelow(2000) for s in range(N_SEEDS_PER_RUN)]
+                command = [
+                    "bash",
+                    "run_seeds.sh",
+                    "--config",
+                    str(config_path),
+                    "--dataset",
+                    DATASET,
+                    "--gpus",
+                    GPUS,
+                    "--model",
+                    MODEL_ALIAS,
+                    "--num_train_epochs",
+                    str(num_train_epochs),
+                    "--seed",
+                    *map(str, seeds),
+                    "--run_index",
+                    str(run_number),
+                    "--skip_compare_checkpoints",
+                ]
+                if GPUS:
+                    command.append("--use_gpu")
+                if epsilon != "use_default":
+                    command.extend(["--discordance_epsilon", str(epsilon)])
+                commands.append((index, epsilon, num_train_epochs, command))
 
         total_configurations = len(commands)
         total_runs = total_configurations * N_SEEDS_PER_RUN
@@ -190,25 +244,42 @@ def main():
                 f"({len(cycle)} runs)",
                 flush=True,
             )
-            processes = []
-            for index, epsilon, num_train_epochs, command in cycle:
+            for index, epsilon, num_train_epochs, _ in cycle:
                 print(
                     f"Running variant {index} with epsilon={epsilon}, "
                     f"epochs={num_train_epochs}",
                     flush=True,
                 )
-                processes.append(subprocess.Popen(command))
 
-            return_codes = [process.wait() for process in processes]
+            cycle_number = cycle_start // MAX_SIMULTANEOUS_RUNS + 1
+            batch_script = temporary_directory / f"cycle_{cycle_number}.sh"
+            _write_parallel_script(batch_script, cycle)
+            if GPUS:
+                sbatch_command = ["sbatch", "--wait", f"--gpus={GPUS}"]
+                sbatch_command.extend(
+                    ["sbatch_script.sh", "--parallel-script", str(batch_script)]
+                )
+                print(
+                    f"Submitting one Slurm allocation for {len(cycle)} parallel runs "
+                    f"using {GPUS}",
+                    flush=True,
+                )
+                return_codes = [subprocess.run(sbatch_command).returncode]
+            else:
+                return_codes = [
+                    subprocess.run(["bash", str(batch_script)]).returncode
+                ]
+
             failures = [return_code for return_code in return_codes if return_code != 0]
             if failures:
                 try:
-                    raise subprocess.CalledProcessError(failures[0], "run_seeds.sh")
+                    command = sbatch_command if GPUS else "run_seeds.sh"
+                    raise subprocess.CalledProcessError(failures[0], command)
                 except subprocess.CalledProcessError:
                     with LAST_TRACEBACK_PATH.open("w", encoding="utf-8") as traceback_file:
                         traceback.print_exc(file=traceback_file)
                 print(
-                    f"{len(failures)} run(s) failed; traceback written to "
+                    f"Cycle failed; traceback written to "
                     f"{LAST_TRACEBACK_PATH}",
                     flush=True,
                 )

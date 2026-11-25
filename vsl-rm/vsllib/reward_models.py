@@ -684,8 +684,8 @@ class UserIdCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer):
         return ctx_data
 
     def value_system_from_context_train(self, hidden_state, context_data: CtxData, user_ids: th.Tensor=None, **kwargs) -> Tuple[th.Tensor, CtxData]:
-        print("USER ID SHAPE", user_ids.shape, "HIDDEN SHAPE", hidden_state.shape)
-        print(self.user_id_to_vs_weights.shape)
+        #print("USER ID SHAPE", user_ids.shape, "HIDDEN SHAPE", hidden_state.shape)
+        #print(self.user_id_to_vs_weights.shape)
         
         vs_predicted = th.softmax(self.user_id_to_vs_weights[user_ids], dim=-1)
         assert vs_predicted.shape == (len(hidden_state), self.num_values), f"WHAT THE: {vs_predicted.shape} vs {len(hidden_state)} x {self.num_values}"

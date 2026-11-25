@@ -94,6 +94,13 @@ while [[ $# -gt 0 ]]; do
     --skip_compare_checkpoints)
       SKIP_COMPARE_CHECKPOINTS=True
       ;;
+    --use_gpu)
+      if [[ -z "$GPUS" ]]; then
+        echo "Error: --use_gpu requires a non-empty --gpus value" >&2
+        exit 2
+      fi
+      CPU=False
+      ;;
     *)
       echo "Unknown argument: $1" >&2
       exit 2

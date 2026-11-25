@@ -405,7 +405,7 @@ class ScriptArguments:
     save_postprocessed_and_feature_extracted_dataset: Optional[bool] = field(
         default=True, metadata={"help": "Whether to save the tokenized+embedded dataset to disk."})
     cleanup_dataset_cache_files: Optional[bool] = field(
-        default=True, metadata={"help": "Whether to remove temporary Hugging Face dataset cache files after preprocessing."})
+        default=False, metadata={"help": "Whether to remove temporary Hugging Face dataset cache files after preprocessing."})
     deepspeed: Optional[str] = field(
         # default="dp3.json",
         default=None,

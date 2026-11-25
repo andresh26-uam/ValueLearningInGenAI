@@ -1353,7 +1353,6 @@ class CustomVAE(VAE):
             else:
                 to_basic = {"data": hidden_state}
 
-            print("HIDDEN STATE?", hidden_state.shape, th.norm(hidden_state))
             assert hidden_state.isnan().sum() == 0, "Hidden state contains NaN values"
             model_output = self.forward_basic(to_basic)
             z = model_output["z"]
