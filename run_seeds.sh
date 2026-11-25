@@ -2,7 +2,7 @@
 
 
 GPUS="H100:1"
-CPU=False
+CPU=True
 DO_TRAIN=True
 
 CONFIG="run_configs/llama_ctx_linear_baseline_directvs.json"
