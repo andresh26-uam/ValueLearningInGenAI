@@ -14,12 +14,13 @@ from pathlib import Path
 # PKU TRAIN EPOCHS = 100
 # SET CPU IN RUN_SEEDS.SH!!!!
 GPUS="L40S:1"
+USE_CPU = True
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
 DATASET = "ultra"
-BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 4
+BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
+MAX_SIMULTANEOUS_RUNS = 1
 N_SEEDS_PER_RUN = 1
-MODEL_ALIAS = "llama"
+MODEL_ALIAS = "smol"
 DISCORDANCE_EPSILON = "use_default"
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
@@ -218,7 +219,7 @@ def main():
                     str(run_number),
                     "--skip_compare_checkpoints",
                 ]
-                if GPUS:
+                if not USE_CPU:
                     command.append("--use_gpu")
                 if epsilon != "use_default":
                     command.extend(["--discordance_epsilon", str(epsilon)])
@@ -254,7 +255,7 @@ def main():
             cycle_number = cycle_start // MAX_SIMULTANEOUS_RUNS + 1
             batch_script = temporary_directory / f"cycle_{cycle_number}.sh"
             _write_parallel_script(batch_script, cycle)
-            if GPUS:
+            if not USE_CPU:
                 sbatch_command = ["sbatch", "--wait", f"--gpus={GPUS}"]
                 sbatch_command.extend(
                     ["sbatch_script.sh", "--parallel-script", str(batch_script)]
@@ -273,7 +274,7 @@ def main():
             failures = [return_code for return_code in return_codes if return_code != 0]
             if failures:
                 try:
-                    command = sbatch_command if GPUS else "run_seeds.sh"
+                    command = sbatch_command if not USE_GPU else "run_seeds.sh"
                     raise subprocess.CalledProcessError(failures[0], command)
                 except subprocess.CalledProcessError:
                     with LAST_TRACEBACK_PATH.open("w", encoding="utf-8") as traceback_file:
