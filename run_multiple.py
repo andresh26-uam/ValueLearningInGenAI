@@ -12,21 +12,24 @@ import traceback
 from pathlib import Path
 
 # PKU TRAIN EPOCHS = 100
-# SET CPU IN RUN_SEEDS.SH!!!!
-GPUS="L40S:1"
+
+GPUS=""
 USE_CPU = True
+USE_SBATCH = True
 assert GPUS in {"L40S:1", "H100:1", ""}, f"GPUS must be one of 'L40S:1' or 'H100:1', or nothing (\"\"), but got {GPUS}"
-DATASET = "ultra"
-BASE_CONFIG = "run_configs/smol_ctx_linear_ae_kmeans.json"
-MAX_SIMULTANEOUS_RUNS = 1
-N_SEEDS_PER_RUN = 1
-MODEL_ALIAS = "smol"
+DATASET = "oasst"
+BASE_CONFIG = "run_configs/llama_ctx_linear_ae_kmeans.json"
+MAX_SIMULTANEOUS_RUNS = 8
+N_SEEDS_PER_RUN = 3
+MODEL_ALIAS = "llama"
 DISCORDANCE_EPSILON = "use_default"
+CPU_PROCESSES_PER_RUN = 2
+MEMORY_GB_PER_RUN = 20
 
 LAST_TRACEBACK_PATH = Path("___last_rumultiple_traceback.txt")
 
 
-def _write_parallel_script(path, commands):
+def _write_parallel_script(path, commands, use_current_allocation):
     dataset_ready_file = path.with_suffix(".dataset-ready")
     leader_finished_file = path.with_suffix(".leader-finished")
     quoted_ready_file = shlex.quote(str(dataset_ready_file))
@@ -34,29 +37,34 @@ def _write_parallel_script(path, commands):
     lines = [
         "#!/usr/bin/env bash",
         "set -uo pipefail",
-        "export RUN_IN_CURRENT_ALLOCATION=1",
         "pids=()",
-        "(",
-        f"  RUN_MULTIPLE_DATASET_READY_FILE={quoted_ready_file} "
-        f"{shlex.join(commands[0][3])}",
-        "  status=$?",
-        f"  touch {quoted_finished_file}",
-        '  exit "$status"',
-        ") &",
-        'leader_pid=$!',
-        'pids+=("$leader_pid")',
-        f"while [[ ! -e {quoted_ready_file} && ! -e {quoted_finished_file} ]]; do",
-        "  sleep 1",
-        "done",
-        f"if [[ ! -e {quoted_ready_file} ]]; then",
-        '  if wait "$leader_pid"; then',
-        '    echo "First run exited before shared dataset initialization completed" >&2',
-        "    exit 1",
-        "  else",
-        '    exit "$?"',
-        "  fi",
-        "fi",
     ]
+    if use_current_allocation:
+        lines.append("export RUN_IN_CURRENT_ALLOCATION=1")
+    lines.extend(
+        [
+            "(",
+            f"  RUN_MULTIPLE_DATASET_READY_FILE={quoted_ready_file} "
+            f"{shlex.join(commands[0][3])}",
+            "  status=$?",
+            f"  touch {quoted_finished_file}",
+            '  exit "$status"',
+            ") &",
+            'leader_pid=$!',
+            'pids+=("$leader_pid")',
+            f"while [[ ! -e {quoted_ready_file} && ! -e {quoted_finished_file} ]]; do",
+            "  sleep 1",
+            "done",
+            f"if [[ ! -e {quoted_ready_file} ]]; then",
+            '  if wait "$leader_pid"; then',
+            '    echo "First run exited before shared dataset initialization completed" >&2',
+            "    exit 1",
+            "  else",
+            '    exit "$?"',
+            "  fi",
+            "fi",
+        ]
+    )
     for _, _, _, command in commands[1:]:
         lines.extend([f"{shlex.join(command)} &", 'pids+=("$!")'])
     lines.extend(
@@ -76,6 +84,8 @@ def _write_parallel_script(path, commands):
 print(f"Running sweep for dataset:\n {DATASET}\nbase config:\n {BASE_CONFIG}\nmodel alias: \n {MODEL_ALIAS}")
 assert MODEL_ALIAS in {"llama", "smol"}
 assert MODEL_ALIAS in BASE_CONFIG, f"Model alias {MODEL_ALIAS} not in base config name path {BASE_CONFIG}, which may indicate a mismatch between the base config and the model alias."
+if not USE_CPU and not GPUS:
+    raise ValueError("A non-empty GPUS value is required when USE_CPU is False.")
 if DATASET == "pku":
     NUM_VALUES = 5 
     NUM_TRAIN_EPOCHS = [100]
@@ -92,25 +102,25 @@ else:
     raise ValueError(f"Unknown dataset {DATASET}")
 ARGS_TO_CHANGE = {
     "loss_func_type":["DEFAULT"],
-    "C1_learning_rate": [0.0001],
-    "C1_grounding_learning_rate": [0.0001],
-    "C1_context_learning_rate": [0.0001],
-    "weight_decay": [0.001],
+    "C1_learning_rate": [0.0003],
+    "C1_grounding_learning_rate": [0.0003],
+    "C1_context_learning_rate": [0.0003],
+    "weight_decay": [0.001,0.0],
     "vae_type": ["ae"],
     "vae_dropout": [0.0],
     "max_grad_norm": [10.0,],
-    "ctx_coefficient": [0.1,10.0,50.0],
+    "ctx_coefficient": [1.0],
     "ctx_chr_coefficient": [0.0],
     "do_initialization": [False, True],
-    "vae_orthogonality_coefficient": [1.0, 10.0],
+    "vae_orthogonality_coefficient": [1.0],
     "detach_context_selection_for_value_system_selection": [False, True],
     "layer_normalization": ["BatchNorm"],
     "final_layer_activation": ["none"],
     "vs_weight_initialization": ["equal"],
     "grounding_loss_tendency_update_ratio": [0.1,0.01],
     "vae_latent_dim": [128],
-    "C2_max_contexts": [3,10],
-    "C2_max_value_systems": [3,10]
+    "C2_max_contexts": [20],
+    "C2_max_value_systems": [20]
 }
 # If an argument starts with C<number>_, arguments with the same number are
 # coupled and vary together by position instead of by Cartesian product.
@@ -254,15 +264,31 @@ def main():
 
             cycle_number = cycle_start // MAX_SIMULTANEOUS_RUNS + 1
             batch_script = temporary_directory / f"cycle_{cycle_number}.sh"
-            _write_parallel_script(batch_script, cycle)
-            if not USE_CPU:
-                sbatch_command = ["sbatch", "--wait", f"--gpus={GPUS}"]
+            _write_parallel_script(batch_script, cycle, USE_SBATCH)
+            if USE_SBATCH:
+                sbatch_command = ["sbatch", "--wait"]
+                if USE_CPU:
+                    sbatch_command.extend(
+                        [
+                            f"--cpus-per-task={CPU_PROCESSES_PER_RUN * len(cycle)}",
+                            f"--mem={MEMORY_GB_PER_RUN * len(cycle)}G",
+                        ]
+                    )
+                else:
+                    sbatch_command.extend(
+                        [f"--gpus={GPUS}", "--mem-per-gpu=40G"]
+                    )
                 sbatch_command.extend(
                     ["sbatch_script.sh", "--parallel-script", str(batch_script)]
                 )
+                resource_description = (
+                    f"{CPU_PROCESSES_PER_RUN * len(cycle)} CPUs, no GPUs"
+                    if USE_CPU
+                    else f"{GPUS}"
+                )
                 print(
                     f"Submitting one Slurm allocation for {len(cycle)} parallel runs "
-                    f"using {GPUS}",
+                    f"using {resource_description}",
                     flush=True,
                 )
                 return_codes = [subprocess.run(sbatch_command).returncode]
@@ -274,7 +300,7 @@ def main():
             failures = [return_code for return_code in return_codes if return_code != 0]
             if failures:
                 try:
-                    command = sbatch_command if not USE_GPU else "run_seeds.sh"
+                    command = sbatch_command if USE_SBATCH else "run_seeds.sh"
                     raise subprocess.CalledProcessError(failures[0], command)
                 except subprocess.CalledProcessError:
                     with LAST_TRACEBACK_PATH.open("w", encoding="utf-8") as traceback_file:

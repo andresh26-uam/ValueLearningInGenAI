@@ -2,16 +2,14 @@
 #SBATCH --job-name=ValueLearningInGenAI
 #SBATCH --chdir=/home/aholg/ValueLearningInGenAI
 
-# Pass GPU resources at submission time, e.g.:
-# sbatch --gpus=L40S:2 sbatch_script.sh <train_script.py> [script args ...]
-
-#SBATCH --mem-per-gpu=40G
+# GPU allocations should pass --gpus and --mem-per-gpu at submission time.
+# CPU allocations should pass --mem and --cpus-per-task instead.
 #SBATCH --time=100:00:00
 set -euo pipefail
 
 if [[ "${1:-}" == "--parallel-script" ]]; then
 	if [[ $# -ne 2 || ! -f "$2" ]]; then
-		echo "Usage: sbatch --gpus=L40S:2 sbatch_script.sh --parallel-script <script>" >&2
+		echo "Usage: sbatch_script.sh --parallel-script <script>" >&2
 		exit 2
 	fi
 	echo "Running parallel jobs in Slurm allocation: $2"
@@ -20,7 +18,7 @@ if [[ "${1:-}" == "--parallel-script" ]]; then
 fi
 
 if [[ $# -lt 1 ]]; then
-	echo "Usage: sbatch --gpus=L40S:2 sbatch_script.sh <train_script.py> [script args ...]" >&2
+	echo "Usage: sbatch_script.sh <train_script.py> [script args ...]" >&2
 	exit 2
 fi
 
@@ -63,9 +61,12 @@ if [[ "$num_processes" -eq 1 ]]; then
 	#config_file="accelerate_config/single_config.yaml"
 fi
 
-gpu_ids="${CUDA_VISIBLE_DEVICES:-}"
-if [[ -z "$gpu_ids" || "$gpu_ids" == "NoDevFiles" ]]; then
-	gpu_ids="$(seq -s, 0 $((num_processes - 1)))"
+gpu_ids=""
+if [[ "$use_cpu" -eq 0 ]]; then
+	gpu_ids="${CUDA_VISIBLE_DEVICES:-}"
+	if [[ -z "$gpu_ids" || "$gpu_ids" == "NoDevFiles" ]]; then
+		gpu_ids="$(seq -s, 0 $((num_processes - 1)))"
+	fi
 fi
 
 echo "Running with GPU IDs: $gpu_ids"
@@ -79,9 +80,15 @@ else
 	python_optimize=1
 fi
 
+launch_args=(
+	--config_file="$config_file"
+	--num_processes="$num_processes"
+	--num_machines="$num_machines"
+)
+if [[ "$use_cpu" -eq 0 ]]; then
+	launch_args+=(--gpu_ids="$gpu_ids")
+fi
+
 PYTHONOPTIMIZE="$python_optimize" python -m accelerate.commands.launch \
-	--config_file="$config_file" \
-	--num_processes="$num_processes" \
-	--num_machines="$num_machines" \
-	--gpu_ids="$gpu_ids" \
+	"${launch_args[@]}" \
 	"$entrypoint" "${entrypoint_args[@]}"

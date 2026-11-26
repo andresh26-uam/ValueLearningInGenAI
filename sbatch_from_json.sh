@@ -39,8 +39,16 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
+resource_args=()
+if [[ -n "$gpu_request" ]]; then
+    resource_args+=(--gpus="$gpu_request" --mem-per-gpu=40G)
+else
+    resource_args+=(--mem=40G)
+    extra_args+=(--use_cpu)
+fi
+
 if [[ "${RUN_IN_CURRENT_ALLOCATION:-0}" == "1" ]]; then
     bash sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
 else
-    sbatch --wait --gpus="$gpu_request" sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
+    sbatch --wait "${resource_args[@]}" sbatch_script.sh "$scriptvsl" --config_file="$config_file" "${extra_args[@]}"
 fi
