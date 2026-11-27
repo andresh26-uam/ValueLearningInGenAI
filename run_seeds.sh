@@ -182,6 +182,9 @@ fi
 
 if [[ "$CTX_IMPLEMENTATION" == "KMEANS_THEN_VS" ]]; then
         training_initialization_data_size="all"
+    if [[ "$DATASET" == "ultra" ]]; then
+        training_initialization_data_size=10000
+    fi
 else
     training_initialization_data_size=10000
 fi
@@ -233,6 +236,10 @@ elif [[ "$CONFIG" == *"smol_ctx_linear_baseline_user_id.json"* ]]; then
   NAME=Smol_USERID
 elif [[ "$CONFIG" == *"llama_ctx_linear_baseline_user_id.json"* ]]; then
   NAME=Llama_USERID
+elif [[ "$CONFIG" == *"smol_ctx_linear_kmeans.json"* ]]; then
+  NAME=Smol_KM
+elif [[ "$CONFIG" == *"llama_ctx_linear_kmeans.json"* ]]; then
+  NAME=Llama_KM
 else
   echo "Unknown config file: $CONFIG"
   exit 1
@@ -280,7 +287,9 @@ for seed in "${SEEDS[@]}"; do
     printf 'Running:'
     printf ' %q' bash "$SCRIPT" "${args[@]}"
     printf '\n'
+    #echo $training_initialization_data_size
 
+    #exit
     bash "$SCRIPT" "${args[@]}"
 
     # Read the run name that was written by the training process
