@@ -456,8 +456,7 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
             assert kmeans_object is not None
             self.kmeans_predictor = kmeans_object
             fitted_centers = kmeans_object.cluster_centers_
-        else:
-            if "kNLPmeans" in self.clustering_algorithm:
+        elif "kNLPmeans" in self.clustering_algorithm:
                 assert original_texts is not None
                 # need to select even indices from original_texts (they are duplicated)
                 if original_texts[0] == original_texts[1]:
@@ -476,6 +475,8 @@ class ClusterThenVsCtxDependentAlignmentLayer(AbstractCtxDependentAlignmentLayer
                 self._summaries= summaries
                 self._cluster_centroids= cluster_centroids
                 fitted_centers = cluster_centroids
+        else:
+            raise ValueError(f"Unknown clustering algorithm: {self.clustering_algorithm}")
         # `kmeans_predictor` (a fitted sklearn estimator) and the kNLPmeans-only python
         # attributes above are plain python objects, so they are NOT part of this
         # nn.Module's state_dict and do not survive save_pretrained/from_pretrained.
